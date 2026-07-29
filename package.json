@@ -5,7 +5,7 @@
   "description": "A lightweight, auditable SSH operations workspace with user-controlled sync.",
   "author": "sanrokamlan-prog",
   "license": "Apache-2.0",
-  "repository": "https://github.com/sanrokamlan-prog/vpshell",
+  "repository": "https://github.com/sanrokamlan-prog/VPShell",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -6,12 +6,12 @@
 
 **面向 VPS 运维的轻量、可审计、同步端自选的 SSH 工作台。**
 
-[![CI](https://github.com/sanrokamlan-prog/vpshell/actions/workflows/ci.yml/badge.svg)](https://github.com/sanrokamlan-prog/vpshell/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/sanrokamlan-prog/vpshell?include_prereleases&style=flat-square)](https://github.com/sanrokamlan-prog/vpshell/releases)
+[![CI](https://github.com/sanrokamlan-prog/VPShell/actions/workflows/ci.yml/badge.svg)](https://github.com/sanrokamlan-prog/VPShell/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/sanrokamlan-prog/VPShell?include_prereleases&style=flat-square)](https://github.com/sanrokamlan-prog/VPShell/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-3b6f9d?style=flat-square)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2-287a4e?style=flat-square&logo=tauri&logoColor=white)](https://tauri.app/)
 
-[下载预览版](https://github.com/sanrokamlan-prog/vpshell/releases/latest) · [架构设计](docs/ARCHITECTURE.md) · [开发标准](docs/DEVELOPMENT.md) · [迁移指南](docs/MIGRATION.md) · [同步协议](docs/SYNC.md) · [安全策略](SECURITY.md)
+[下载预览版](https://github.com/sanrokamlan-prog/VPShell/releases/latest) · [架构设计](docs/ARCHITECTURE.md) · [开发标准](docs/DEVELOPMENT.md) · [迁移指南](docs/MIGRATION.md) · [同步协议](docs/SYNC.md) · [安全策略](SECURITY.md)
 
 </div>
 
@@ -66,7 +66,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 
 ## 下载与安装
 
-正式预览产物只从 [GitHub Releases](https://github.com/sanrokamlan-prog/vpshell/releases) 发布：
+正式预览产物只从 [GitHub Releases](https://github.com/sanrokamlan-prog/VPShell/releases) 发布：
 
 | 平台 | GitHub Actions 产物 | 当前支持级别 |
 | --- | --- | --- |

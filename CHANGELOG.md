@@ -44,4 +44,4 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - Stored passwords are available to direct SFTP operations but are not injected into an OpenSSH terminal prompt.
 - Private-key files are written only to the user-selected local path; portable encrypted export is not implemented.
 
-[0.1.0-alpha.1]: https://github.com/sanrokamlan-prog/vpshell/releases/tag/v0.1.0-alpha.1
+[0.1.0-alpha.1]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.1
