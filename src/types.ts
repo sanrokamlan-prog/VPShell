@@ -1,0 +1,137 @@
+export type EnvironmentKind = "production" | "staging" | "development";
+export type ConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
+export type ScriptRisk = "low" | "medium" | "high" | "destructive";
+export type SyncProviderKind = "local" | "webdav" | "sftp" | "s3" | "gateway";
+export type JumpMode = "inherit" | "direct" | "host" | "custom";
+
+export interface HostProfile {
+  id: string;
+  name: string;
+  group: string;
+  host: string;
+  port: number;
+  username: string;
+  environment: EnvironmentKind;
+  tags: string[];
+  jumpMode?: JumpMode;
+  jumpHostId?: string;
+  proxyJump?: string;
+  identityFile?: string;
+  credentialRef?: string;
+  source?: "manual" | "finalshell";
+  lastPath?: string;
+  latency?: number;
+}
+
+export interface TerminalSession {
+  id: string;
+  hostId: string;
+  title: string;
+  state: ConnectionState;
+  currentPath: string;
+  reportedHostname?: string;
+  contextSource: "profile" | "shell-integration";
+}
+
+export interface ScriptRecipe {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  command?: string;
+  sourceUrl: string;
+  risk: ScriptRisk;
+  custom?: boolean;
+  parameters?: string[];
+}
+
+export interface CommandParameter {
+  name: string;
+  label: string;
+  placeholder?: string;
+  defaultValue?: string;
+  required?: boolean;
+}
+
+export interface CommandRecipe {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  command?: string;
+  usage: string;
+  keywords: string[];
+  risk: ScriptRisk;
+  action?: "install-public-key" | "trace-route" | "speed-test" | "udp-speed-test";
+  parameters?: CommandParameter[];
+  custom?: boolean;
+}
+
+export interface SshKeyProfile {
+  id: string;
+  name: string;
+  algorithm: "ed25519" | "rsa4096";
+  privateKeyPath: string;
+  publicKeyPath: string;
+  fingerprint: string;
+  passphraseRef?: string;
+}
+
+export interface CommandHistoryItem {
+  id: string;
+  command: string;
+  hostId: string;
+  path: string;
+  createdAt: string;
+}
+
+export interface ConnectionHistoryItem {
+  id: string;
+  hostId: string;
+  connectedAt: string;
+  path: string;
+}
+
+export interface SyncSettings {
+  enabled: boolean;
+  provider: SyncProviderKind;
+  endpoint: string;
+  remotePath: string;
+  username: string;
+  lastSyncedAt?: string;
+  totpEnabled: boolean;
+  syncSecrets: boolean;
+}
+
+export interface WallpaperSettings {
+  source: "none" | "local" | "url";
+  value: string;
+  opacity: number;
+}
+
+export interface TerminalAppearanceSettings {
+  fontFamily: string;
+  fontSize: number;
+  lineHeight: number;
+  customFontName?: string;
+}
+
+export interface ApplicationSettings {
+  defaultJumpHostId?: string;
+  externalEditorPath: string;
+  autoUploadEditedFiles: boolean;
+}
+
+export interface AppState {
+  hosts: HostProfile[];
+  scripts: ScriptRecipe[];
+  commands: CommandRecipe[];
+  sshKeys: SshKeyProfile[];
+  commandHistory: CommandHistoryItem[];
+  connectionHistory: ConnectionHistoryItem[];
+  pathHistory: Record<string, string[]>;
+  sync: SyncSettings;
+  wallpaper: WallpaperSettings;
+  terminalAppearance: TerminalAppearanceSettings;
+  settings: ApplicationSettings;
+}
