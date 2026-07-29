@@ -166,7 +166,18 @@ jobs:
               repo: context.repo.repo,
               per_page: 100,
             });
-            const existing = releases.find((release) => release.tag_name === tag);
+            const taggedRelease = releases.find((release) => release.tag_name === tag);
+            const orphanedDrafts = releases.filter(
+              (release) =>
+                release.draft &&
+                release.name === `VPShell ${tag}` &&
+                release.tag_name.startsWith('untagged-'),
+            );
+            if (!taggedRelease && orphanedDrafts.length > 1) {
+              core.setFailed(`Multiple orphaned drafts match ${tag}; refusing to choose one.`);
+              return;
+            }
+            const existing = taggedRelease || orphanedDrafts[0];
 
             if (existing) {
               if (!existing.draft) {
@@ -190,6 +201,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 release_id: existing.id,
+                tag_name: tag,
                 name: `VPShell ${tag}`,
                 body: releaseBody,
                 draft: true,
@@ -327,13 +339,34 @@ jobs:
               throw new Error(`Unexpected response type while downloading ${label}.`);
             };
 
-            const { data: release } = await github.rest.repos.getRelease({
+            let { data: release } = await github.rest.repos.getRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               release_id: releaseId,
             });
-            if (!release.draft || release.tag_name !== tag) {
+            if (!release.draft) {
               throw new Error(`Expected an unpublished draft for ${tag}.`);
+            }
+            if (release.tag_name !== tag) {
+              const isRecoverableOrphan =
+                release.name === `VPShell ${tag}` && release.tag_name.startsWith('untagged-');
+              if (!isRecoverableOrphan) {
+                throw new Error(
+                  `Draft ${releaseId} belongs to ${release.tag_name}, not ${tag}; refusing to retarget it.`,
+                );
+              }
+              ({ data: release } = await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: releaseId,
+                tag_name: tag,
+                draft: true,
+                prerelease: false,
+              }));
+              core.info(`Rebound orphaned draft ${releaseId} to ${tag}.`);
+            }
+            if (release.tag_name !== tag) {
+              throw new Error(`Draft ${releaseId} could not be rebound to ${tag}.`);
             }
 
             const initialAssets = await github.paginate(github.rest.repos.listReleaseAssets, {
@@ -500,6 +533,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               release_id: releaseId,
+              tag_name: tag,
               name: `VPShell ${tag}`,
               draft: false,
               prerelease: false,
