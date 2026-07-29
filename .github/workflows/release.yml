@@ -77,6 +77,9 @@ jobs:
             const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             const cargoToml = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
             const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+            const versionParts = tauri.version.match(
+              /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc)\.([1-9]\d{0,2}))?$/,
+            );
 
             if (!tag || tag !== `v${tauri.version}`) {
               core.setFailed(`Release tag must be v${tauri.version}; received ${tag || '<empty>'}.`);
@@ -85,6 +88,24 @@ jobs:
             if (packageJson.version !== tauri.version || cargoVersion !== tauri.version) {
               core.setFailed(
                 `Version mismatch: tauri=${tauri.version}, npm=${packageJson.version}, cargo=${cargoVersion || '<missing>'}.`,
+              );
+              return;
+            }
+            if (!versionParts) {
+              core.setFailed(
+                `Unsupported release version ${tauri.version}; use stable x.y.z or alpha.N, beta.N, rc.N with N from 1 to 999.`,
+              );
+              return;
+            }
+
+            const [, major, minor, patch, channel, serialText] = versionParts;
+            const channelBase = { alpha: 1000, beta: 2000, rc: 3000 };
+            const wixBuild = channel ? channelBase[channel] + Number(serialText) : 65535;
+            const expectedWixVersion = `${major}.${minor}.${patch}.${wixBuild}`;
+            const wixVersion = tauri.bundle?.windows?.wix?.version;
+            if (wixVersion !== expectedWixVersion) {
+              core.setFailed(
+                `MSI version mismatch: expected bundle.windows.wix.version=${expectedWixVersion}, got ${wixVersion || '<missing>'}.`,
               );
               return;
             }
@@ -214,11 +235,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
             args: --target x86_64-unknown-linux-gnu --bundles appimage,deb
           - label: macOS Apple Silicon
-            platform: macos-latest
+            platform: macos-15
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin --bundles dmg
           - label: macOS Intel
-            platform: macos-latest
+            platform: macos-15-intel
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin --bundles dmg
     steps:

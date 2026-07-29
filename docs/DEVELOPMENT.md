@@ -152,6 +152,8 @@ Rust 新模块必须有输入边界和错误路径单元测试。前端新交互
 
 发布失败、任一目标平台验收未完成或安全门槛未通过时，不公开 Release。预览版必须使用 SemVer prerelease 版本号，并在说明中列出未实现能力和已知风险。GitHub Release 本身保持 full release 状态，因为 GitHub 的 `/releases/latest` 不包含 prerelease，而客户端 updater 使用该固定地址。
 
+WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用、Cargo、npm 和 Tag 仍使用可读的 `x.y.z-alpha.N` / `beta.N` / `rc.N`；`bundle.windows.wix.version` 单独映射为 `x.y.z.(1000+N)` / `(2000+N)` / `(3000+N)`，稳定版使用 `x.y.z.65535`。Release workflow 必须校验该映射，保证同一补丁版本从 Alpha 到稳定版可以单调升级。`bundle.windows.wix.upgradeCode` 一经发布不得改变，避免升级时产生重复安装。
+
 ## 10. 依赖评审
 
 新增或重大升级依赖前，在 PR 中记录：

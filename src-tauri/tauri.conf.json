@@ -35,6 +35,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "wix": {
+        "version": "0.1.0.1001",
+        "upgradeCode": "cf78deee-d9da-56c7-a4f8-ba1440e2a166"
+      }
+    },
     "macOS": {
       "signingIdentity": "-"
     }

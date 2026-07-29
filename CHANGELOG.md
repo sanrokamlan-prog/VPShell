@@ -26,6 +26,8 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - Successful-connection history ordered by most recent host.
 - External editing through Notepad++, a configured editor or the platform default, with local-save detection, remote conflict blocking and explicit force overwrite.
 - Signed Tauri updater artifacts and native-runner release jobs for Windows, Linux and macOS.
+- Explicit WiX prerelease version mapping and a stable MSI upgrade code.
+- Native macOS Apple Silicon and Intel runners instead of cross-compiling OpenSSL-dependent crates.
 - Product architecture, encrypted sync protocol and security boundary documentation.
 - Windows NSIS/MSI, Linux AppImage/DEB and macOS Intel/Apple Silicon prerelease workflow plus cross-platform compile checks.
 

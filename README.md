@@ -18,7 +18,7 @@
 ![VPShell 工作台](docs/assets/workspace.png)
 
 > [!IMPORTANT]
-> `v0.1.0-alpha.1` 是 Windows-first 技术预览版。系统 OpenSSH 终端、直连 SFTP、打包传输、Linux 负载采样和安全外部编辑已经接通真实后端，正在完成实机与安装包验收。端到端同步、Shell Integration 和中继加速属于后续里程碑。当前版本不应作为生产密码或私钥管理器。
+> `v0.1.0-alpha.1` 是 Windows-first 技术预览版。系统 OpenSSH 终端、直连 SFTP、打包传输、Linux 负载采样和安全外部编辑已经接通真实后端，后续仍会扩大实机与安装包兼容性验证。端到端同步、Shell Integration 和中继加速属于后续里程碑。当前版本不应作为生产密码或私钥管理器。
 
 ## 为什么做 VPShell
 
@@ -198,7 +198,7 @@ scripts/                本地开发辅助脚本
 
 | 里程碑 | 主题 | 当前状态 |
 | --- | --- | --- |
-| Alpha | 真实 SSH/SFTP 工作流与可安装预览版 | 发布验收中 |
+| Alpha | 真实 SSH/SFTP 工作流与可安装预览版 | 首个技术预览 |
 | v0.2 | 传输可靠性、上下文识别与安全批量运维 | 计划 |
 | v0.3 | 用户自控的端到端加密同步 | 协议设计完成，尚未实现 |
 | 后续 | 原生 SSH 引擎、可验证中继和可选托管服务 | 研究方向 |
@@ -207,12 +207,11 @@ scripts/                本地开发辅助脚本
 
 已经打通系统 OpenSSH 真实终端、FinalShell 导入、SSH 密钥、命令/脚本库、多会话 Compose 广播、本机网络诊断、真实 SFTP、打包传输、Linux 负载区、最近连接和安全外部编辑。**VPShell** 名称与 **A - Terminal V** 图标已经定稿并生成平台图标。
 
-首个 Alpha 的剩余发布门槛：
+Alpha 发布后的重点验证：
 
-- 使用临时 OpenSSH/SFTP 服务验证上传、下载、目录、中文路径、远端冲突和失败清理；
-- 验证 Windows 安装包冷启动、签名更新链路、OpenSSH 缺失，以及 Notepad++ 已安装/未安装场景；
-- 核对 GitHub Actions 在 Windows、Linux、macOS 原生 runner 生成的安装包、更新清单和校验产物；
-- 更新最终工作台截图，并确保 README 与 Release 限制一致。
+- 扩大临时及真实 OpenSSH/SFTP 主机覆盖，继续验证上传、下载、目录、中文路径、远端冲突和失败清理；
+- 扩大 Windows 安装包冷启动、签名更新链路、OpenSSH 缺失，以及 Notepad++ 已安装/未安装场景覆盖；
+- 扩大 Linux 发行版和 macOS Intel/Apple Silicon 实机兼容性反馈，未通过的平台问题按 Alpha 缺陷处理。
 
 ### v0.2 - 文件、监控与编辑器
 
