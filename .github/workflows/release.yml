@@ -249,11 +249,11 @@ jobs:
           - label: macOS Apple Silicon
             platform: macos-15
             target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles dmg
+            args: --target aarch64-apple-darwin --bundles app,dmg
           - label: macOS Intel
             platform: macos-15-intel
             target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin --bundles dmg
+            args: --target x86_64-apple-darwin --bundles app,dmg
     steps:
       - uses: actions/checkout@v7
         with:

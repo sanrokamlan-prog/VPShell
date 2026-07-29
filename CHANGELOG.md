@@ -28,6 +28,7 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - Signed Tauri updater artifacts and native-runner release jobs for Windows, Linux and macOS.
 - Explicit WiX prerelease version mapping and a stable MSI upgrade code.
 - Native macOS Apple Silicon and Intel runners instead of cross-compiling OpenSSL-dependent crates.
+- Signed macOS application archives for updater delivery alongside the Intel and Apple Silicon DMG installers.
 - Product architecture, encrypted sync protocol and security boundary documentation.
 - Windows NSIS/MSI, Linux AppImage/DEB and macOS Intel/Apple Silicon prerelease workflow plus cross-platform compile checks.
 

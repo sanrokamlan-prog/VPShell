@@ -1,12 +1,15 @@
 use std::{
     collections::HashMap,
-    env, fs,
+    fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex, MutexGuard},
     time::UNIX_EPOCH,
 };
+
+#[cfg(windows)]
+use std::env;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
