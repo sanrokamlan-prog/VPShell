@@ -1,0 +1,104 @@
+name: Alpha 测试回报
+description: 提交一次完整或部分实机测试的环境、覆盖范围和结果
+title: "[Alpha Test] "
+labels:
+  - alpha-feedback
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        即使没有发现缺陷，兼容性通过记录也很有价值。请勿填写真实 IP、主机名、用户名或任何凭据。
+
+  - type: input
+    id: version
+    attributes:
+      label: VPShell 版本
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+
+  - type: input
+    id: local_environment
+    attributes:
+      label: 本机环境
+      description: 操作系统版本、架构、语言、安装包和 OpenSSH 版本
+      placeholder: Windows 11 24H2 x64，zh-CN，NSIS，OpenSSH_for_Windows_9.x
+    validations:
+      required: true
+
+  - type: input
+    id: remote_environment
+    attributes:
+      label: 远端测试环境
+      description: 只写系统类型/版本、认证方式和直连/跳板，不写地址
+      placeholder: Debian 12；Ed25519 + Agent；直连和单跳 ProxyJump
+    validations:
+      required: true
+
+  - type: dropdown
+    id: areas
+    attributes:
+      label: 已测试模块
+      multiple: true
+      options:
+        - 安装、冷启动、重启和卸载
+        - SSH 直连、认证和多标签
+        - ProxyJump 与主机路线识别
+        - Linux 主机概况
+        - SFTP 文件/目录上传下载和拖放
+        - tar + zstd 打包传输
+        - Notepad++ 或其他外部编辑器
+        - FinalShell 导入
+        - SSH 密钥生成与公钥安装
+        - 命令/脚本库和多终端广播
+        - 路由追踪、HTTP 和 iperf3 UDP 测速
+        - 背景、字体、设置和本地持久化
+        - 应用内检查更新
+    validations:
+      required: true
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: 总体结果
+      options:
+        - 全部通过
+        - 基本通过，发现一般问题
+        - 核心流程失败
+        - 出现崩溃、数据损坏或错误目标
+    validations:
+      required: true
+
+  - type: textarea
+    id: results
+    attributes:
+      label: 测试结果
+      description: 请按模块写“通过 / 失败 / 未测”，失败项可链接单独的缺陷 Issue
+      placeholder: |
+        - SSH 直连：通过
+        - ProxyJump：未测
+        - SFTP 中文目录：失败，见 #123
+    validations:
+      required: true
+
+  - type: textarea
+    id: transfer
+    attributes:
+      label: 传输样本与性能（如测试过）
+      description: 文件大小、文件数量、耗时、是否打包/回退，以及内容校验结果；不要写敏感路径
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 其他观察或脱敏截图
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交确认
+      options:
+        - label: 测试使用非生产主机或已备份数据。
+          required: true
+        - label: 我已删除密码、私钥、Token、生产 IP、主机名和敏感终端内容。
+          required: true

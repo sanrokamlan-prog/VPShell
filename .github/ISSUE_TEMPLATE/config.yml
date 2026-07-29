@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Alpha 测试指南
+    url: https://github.com/sanrokamlan-prog/VPShell/blob/main/docs/ALPHA_TESTING.md
+    about: 测试前先查看支持范围、必测项目、已知限制和脱敏要求
+  - name: 私密安全漏洞报告
+    url: https://github.com/sanrokamlan-prog/VPShell/security/advisories/new
+    about: 凭据泄露、命令注入、主机密钥绕过等安全问题不要提交公开 Issue

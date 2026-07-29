@@ -20,10 +20,10 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - Local traceroute, bounded HTTP download testing and bidirectional iperf3 UDP testing against user-controlled servers.
 - Local/URL terminal wallpaper controls.
 - Real SFTP directory browsing plus recursive file and directory upload/download with staged writes and verification.
-- Client-side `tar + zstd` package transfer with archive path/link validation and recursive SFTP fallback.
+- Client-side `tar + zstd` package transfer with archive path/link validation and recursive SFTP fallback when remote packaging tools are unavailable.
 - Native file drag-and-drop and transfer progress in the bottom file dock.
 - Linux host overview sampling for IP, CPU, memory, disk, load, traffic and top processes.
-- Successful-connection history ordered by most recent host.
+- Recent connection-attempt history ordered by most recent host.
 - External editing through Notepad++, a configured editor or the platform default, with local-save detection, remote conflict blocking and explicit force overwrite.
 - Signed Tauri updater artifacts and native-runner release jobs for Windows, Linux and macOS.
 - Explicit WiX prerelease version mapping and a stable MSI upgrade code.
@@ -43,6 +43,7 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - Host profiles, history and wallpapers use WebView `localStorage` and are not encrypted.
 - Imported passwords and optionally saved private-key passphrases stay in the OS keyring and are not synchronized.
 - Stored passwords are available to direct SFTP operations but are not injected into an OpenSSH terminal prompt.
+- The system OpenSSH process does not expose structured authentication success, so a failed authentication attempt can still appear in recent connections.
 - Private-key files are written only to the user-selected local path; portable encrypted export is not implemented.
 
 [0.1.0-alpha.1]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.1

@@ -20,18 +20,18 @@ v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 
 | 模块 | 已实现 | 当前限制 |
 | --- | --- | --- |
-| 桌面框架 | Tauri 2、React 19、TypeScript、Vite；Windows/macOS/Linux CI；原生 runner 预发布矩阵 | 各平台安装包尚待首个 GitHub Release 实际验证；Windows 无 Authenticode，macOS Alpha 使用 ad-hoc 签名 |
+| 桌面框架 | Tauri 2、React 19、TypeScript、Vite；Windows/macOS/Linux CI；首个原生 runner Alpha Release 已发布 | 安装与升级仍需扩大实机覆盖；Windows 无 Authenticode，macOS Alpha 使用 ad-hoc 签名且未公证 |
 | 终端 | xterm.js，多标签会话，输入输出、窗口大小调整、断开连接，单终端 250,000 行 scrollback | scrollback 不是持久化的“无限历史” |
 | SSH | Rust 后端通过 `portable-pty` 启动系统 `ssh`；支持端口、`-J` ProxyJump、`-i` 私钥路径及 keepalive | 依赖系统 `ssh` 在 PATH 中；主机密钥提示由 OpenSSH 处理；没有原生端口转发和结构化认证状态 |
 | 主机与会话 | 主机分组、环境标签、最近连接、会话切换、配置路线；非交互 OpenSSH 采集 Linux `/proc` 概况 | 手动嵌套 `ssh` 后不会自动识别新主机；监控不弹密码提示且仅支持 Linux |
 | 多终端输入 | 命令栏可选择多个会话并并发发送同一条命令 | 不是完整的原始按键同步；尚无密码提示隔离、生产确认、就绪状态校验和危险命令保护 |
-| 历史 | 命令、SFTP 路径和成功连接历史写入浏览器 `localStorage`；界面可搜索和快速切换 | 未使用 SQLite；终端内 `cd` 仍不会由 Shell 自动上报；数据未加密 |
+| 历史 | 命令、SFTP 路径和连接尝试历史写入浏览器 `localStorage`；界面可搜索和快速切换 | SSH 进程启动不代表认证成功；未使用 SQLite；终端内 `cd` 不会由 Shell 自动上报；数据未加密 |
 | 命令库 | 22 项本地命令/工具；中文意图匹配、参数表单、POSIX 参数引用、风险与执行前预览 | 不是自然语言模型；自建命令编辑、命令版本和 secret 参数仍未实现 |
 | 脚本中心 | 内置脚本资料、风险标签、来源链接、复制/加入命令栏；可添加自建脚本 | 没有哈希锁定、签名、版本更新或安全执行沙箱 |
 | 凭据与密钥 | FinalShell 密码只写入 OS keyring；生成 Ed25519/RSA4096 OpenSSH 密钥；可安装所选公钥；直连 SFTP 可读取凭据引用 | 凭据尚不能同步；没有凭据编辑/删除界面；系统 OpenSSH 终端不自动注入密码 |
 | 网络诊断 | 本机 traceroute、有限额 HTTP 下载测速、iperf3 UDP 正反向测速 | iperf3 需用户自行安装并启动服务端；没有后台定时采样或路线自动选择 |
 | 终端背景 | 支持本机 PNG/JPEG/WebP 和 URL，可调可见度 | 本机图以 Data URL 存入 `localStorage`；URL 由 WebView 直接加载，尚未实现安全下载、重编码和缓存 |
-| 文件面板 | 真实 SFTP 列表、递归上传下载、拖放、进度、暂存校验与原子提交；`tar + zstd` 打包及 SFTP 回退 | 暂无取消、断点续传和持久队列；SFTP 不支持 ProxyJump |
+| 文件面板 | 真实 SFTP 列表、递归上传下载、拖放、进度、暂存校验与原子提交；`tar + zstd` 打包及缺少远端工具时的 SFTP 回退 | 打包或传输过程失败不会自动重试 SFTP；暂无取消、断点续传和持久队列；SFTP 不支持 ProxyJump |
 | 外部编辑 | SFTP 下载受管临时副本，自动探测 Notepad++/系统编辑器，检测保存并比较远端哈希后回传 | 仅普通文件且不超过 64 MiB；ProxyJump 和应用重启恢复尚未实现 |
 | 同步 | Local/WebDAV/SFTP/S3/Gateway 的配置草稿界面和二级密码/TOTP 开关 | 只保存本地草稿；没有网络访问、端到端加密、自动同步或冲突合并 |
 
@@ -185,10 +185,11 @@ v0.1.0 已有“选中会话后发送一条命令”的基础实现。产品化�
 单个小文件                     -> SFTP
 目录 / 大量小文件 / 文本集合
   remote has tar + zstd        -> tar stream + zstd
-  capability missing or failed -> recursive SFTP
+  capability missing           -> recursive SFTP
+  packaging/transfer failed    -> stop with diagnostics
 ```
 
-上传时由 Rust 客户端生成 tar+zstd 流，不要求 Windows 本机安装 `tar` 或 `zstd`。远端先写入随机临时目录，校验清单后再移动到目标位置。下载时远端打包，客户端流式接收和安全解压。压缩能力探测结果按主机和版本缓存，但每次失败都能回退 SFTP。
+上传时由 Rust 客户端生成 tar+zstd 流，不要求 Windows 本机安装 `tar` 或 `zstd`。远端先写入随机临时目录，校验清单后再移动到目标位置。下载时远端打包，客户端流式接收和安全解压。当前仅在探测到远端缺少 `tar`/`zstd` 时回退 SFTP；打包、传输、解包或提交阶段失败会停止并报告错误，避免静默重复写入。
 
 传输协议必须做到：
 

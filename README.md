@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-3b6f9d?style=flat-square)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2-287a4e?style=flat-square&logo=tauri&logoColor=white)](https://tauri.app/)
 
-[下载预览版](https://github.com/sanrokamlan-prog/VPShell/releases/latest) · [架构设计](docs/ARCHITECTURE.md) · [开发标准](docs/DEVELOPMENT.md) · [迁移指南](docs/MIGRATION.md) · [同步协议](docs/SYNC.md) · [安全策略](SECURITY.md)
+[下载预览版](https://github.com/sanrokamlan-prog/VPShell/releases/latest) · [Alpha 测试指南](docs/ALPHA_TESTING.md) · [提交反馈](https://github.com/sanrokamlan-prog/VPShell/issues/new/choose) · [架构设计](docs/ARCHITECTURE.md) · [开发标准](docs/DEVELOPMENT.md) · [迁移指南](docs/MIGRATION.md) · [同步协议](docs/SYNC.md) · [安全策略](SECURITY.md)
 
 </div>
 
@@ -19,6 +19,12 @@
 
 > [!IMPORTANT]
 > `v0.1.0-alpha.1` 是 Windows-first 技术预览版。系统 OpenSSH 终端、直连 SFTP、打包传输、Linux 负载采样和安全外部编辑已经接通真实后端，后续仍会扩大实机与安装包兼容性验证。端到端同步、Shell Integration 和中继加速属于后续里程碑。当前版本不应作为生产密码或私钥管理器。
+
+## 参与 Alpha 测试
+
+请优先在测试 VPS 或已备份的数据上验证，不要首次就在生产主机上使用广播、脚本或批量传输。测试前阅读 [Alpha 测试指南](docs/ALPHA_TESTING.md)，其中列出了安装、SSH、ProxyJump、SFTP、打包传输、外部编辑、迁移、密钥、网络诊断和持久化的逐项测试步骤。
+
+测试结果和普通缺陷请使用 [结构化 Issue 表单](https://github.com/sanrokamlan-prog/VPShell/issues/new/choose)。提交前必须删除真实密码、私钥、Token、生产 IP、主机名和敏感终端输出；安全漏洞请使用 [GitHub 私密漏洞报告](https://github.com/sanrokamlan-prog/VPShell/security/advisories/new)，不要创建公开 Issue。
 
 ## 为什么做 VPShell
 
@@ -33,7 +39,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 | 运维痛点 | VPShell 方向 | `v0.1.0-alpha.1` |
 | --- | --- | :---: |
 | 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **未实现**：仅协议设计与设置界面 |
-| 大量小文件/目录传输缓慢 | 自动探测 `tar + zstd`，失败回退 SFTP | **已实现**：直连后端 |
+| 大量小文件/目录传输缓慢 | 自动探测 `tar + zstd`，缺少远端能力时回退 SFTP | **已实现**：直连后端 |
 | 命令、路径和参数反复复制 | 不设产品条数上限的事件历史、快速检索和参数模板 | **部分实现**：本地历史与最近连接 |
 | 跳板后忘记当前主机 | 常驻主机链、环境边框、Shell Integration 上报 hostname/cwd | **部分实现**：配置链与 Linux 实时概况 |
 | 多机操作效率低且容易误发 | Compose 广播、目标清单、生产/危险命令保护 | **部分实现**：基础 Compose 广播 |
@@ -49,11 +55,11 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 - xterm.js 多标签终端，支持输入输出、窗口缩放、断开和 250,000 行 scrollback。
 - Rust 后端通过跨平台 PTY 启动系统 `ssh`，支持自定义端口、`ProxyJump (-J)`、私钥路径和 keepalive。
 - 真实 SFTP 目录、递归文件/目录上传下载、资源管理器拖放、字节进度、临时文件校验和原子提交。
-- 大量小文件可使用客户端生成的 `tar + zstd` 包传输；远端能力不足或打包失败时回退递归 SFTP。
+- 大量小文件可使用客户端生成的 `tar + zstd` 包传输；远端缺少 `tar`/`zstd` 时回退递归 SFTP，打包或传输过程失败时明确报错。
 - 左侧主机概况常驻显示配置 IP、用户、跳板链并可复制 IP；密钥/agent 可用时每 15 秒读取 Linux `/proc` 的 CPU、内存、磁盘、负载、流量和进程摘要。
 - 远端普通文件可用 Notepad++、用户指定编辑器或系统编辑器打开；检测本地保存，回传前比较远端哈希，冲突时阻止静默覆盖。
 - 主机分组、生产/基础设施/测试环境标记，以及常驻连接路线。
-- 成功连接历史按最近时间置顶，并保留最后路径、用户和连接时间。
+- 最近发起的连接按时间置顶，并保留最后路径、用户和连接时间；当前系统 OpenSSH 后端尚不能结构化确认认证成功，因此失败的认证尝试也可能进入记录。
 - FinalShell 主机、端口、用户名和可选密码导入；密码只进入系统钥匙串，不返回前端。
 - Ed25519/RSA4096 密钥生成、OpenSSH 口令加密，以及把所选公钥安装到当前已连接主机。
 - 多终端 Compose 命令栏、命令历史检索和路径快捷输入。
