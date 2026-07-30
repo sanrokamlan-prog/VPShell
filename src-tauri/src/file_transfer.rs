@@ -668,16 +668,14 @@ fn open_session_with_preference(
     }
     session.set_tcp_stream(tcp);
     session.set_timeout(IO_TIMEOUT.as_millis() as u32);
-    session
-        .handshake()
-        .map_err(|error| {
-            let preference = host_key_preference
-                .map(|value| format!("，主机密钥偏好 {value}"))
-                .unwrap_or_default();
-            format!(
-                "SFTP SSH 握手失败（独立传输连接{preference}）：{error}；终端凭据不会因此被判为无效"
-            )
-        })?;
+    session.handshake().map_err(|error| {
+        let preference = host_key_preference
+            .map(|value| format!("，主机密钥偏好 {value}"))
+            .unwrap_or_default();
+        format!(
+            "SFTP SSH 握手失败（独立传输连接{preference}）：{error}；终端凭据不会因此被判为无效"
+        )
+    })?;
     Ok(session)
 }
 
@@ -892,7 +890,10 @@ fn lookup_known_host_keys(host: &str, port: u16) -> Result<Vec<HostKeyMaterial>,
         .and_then(|value| value.strip_suffix(']'))
         .unwrap_or(host);
     let lookups = if port == 22 {
-        vec![normalized_host.to_string(), format!("[{normalized_host}]:22")]
+        vec![
+            normalized_host.to_string(),
+            format!("[{normalized_host}]:22"),
+        ]
     } else {
         vec![format!("[{normalized_host}]:{port}")]
     };
@@ -1118,7 +1119,10 @@ fn known_hosts_files() -> Vec<PathBuf> {
 
 fn authenticate(session: &Session, connection: &ConnectionSpec) -> Result<(), String> {
     let username = connection.username.trim();
-    let advertised_methods = session.auth_methods(username).unwrap_or_default().to_string();
+    let advertised_methods = session
+        .auth_methods(username)
+        .unwrap_or_default()
+        .to_string();
     let mut identity_attempted = false;
     let mut saved_password_attempted = false;
 

@@ -413,7 +413,8 @@ fn ssh_failure(status: ExitStatus, stderr: &[u8]) -> String {
         return "SSH 连接被拒绝，请检查端口和服务状态".to_string();
     }
     if lower.contains("too many authentication failures") {
-        return "服务器因认证尝试过多拒绝了独立采样连接；已保存凭据未被判为错误，稍后会自动重试".to_string();
+        return "服务器因认证尝试过多拒绝了独立采样连接；已保存凭据未被判为错误，稍后会自动重试"
+            .to_string();
     }
     if detail.is_empty() {
         format!(
