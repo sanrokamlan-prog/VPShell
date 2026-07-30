@@ -4,6 +4,22 @@ All notable changes to VPShell are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/). Pre-release versions may change local data structures before the first stable release.
 
+## [0.1.0-alpha.4] - 2026-07-30
+
+### Fixed
+
+- Interactive terminal host-key inspection now uses the system OpenSSH `ssh-keyscan`/`ssh-keygen` toolchain. A libssh2-only negotiation failure can no longer block an otherwise compatible system OpenSSH terminal.
+- Saved-password connections explicitly prefer password or keyboard-interactive authentication and suppress unrelated agent identities, preventing valid imported passwords from being skipped after `MaxAuthTries` is exhausted.
+- Terminal, SFTP and Linux metrics startup is staggered instead of opening three pre-auth connections at once, reducing handshake drops on small or rate-limited VPS hosts.
+- SFTP handshake, host-key, network and authentication failures now remain distinct. Reading a saved password successfully is reported separately from whether a server accepts that attempt.
+- Linux metrics no longer treats every error containing `publickey` as proof that a password is wrong; an empty OpenSSH exit 255 is identified as an independent sampling-connection failure.
+- FinalShell migration reports passwords that could not be decrypted or stored as "not migrated" rather than claiming that the remote credential is invalid.
+
+### Changed
+
+- Host-key trust remains strict: unknown SHA256 fingerprints require explicit confirmation, changed keys are blocked, and trusted keys are written only to the user's guarded OpenSSH `known_hosts` file.
+- SFTP handshake errors include the underlying libssh2 diagnostic and explicitly state that terminal credentials were not invalidated.
+
 ## [0.1.0-alpha.3] - 2026-07-30
 
 ### Fixed
@@ -85,6 +101,7 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - The system OpenSSH process does not expose structured authentication success, so a failed authentication attempt can still appear in recent connections.
 - Private-key files are written only to the user-selected local path; portable encrypted export is not implemented.
 
+[0.1.0-alpha.4]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.1

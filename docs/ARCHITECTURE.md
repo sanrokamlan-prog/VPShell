@@ -89,7 +89,9 @@ xterm.js <-> Tauri IPC <-> portable PTY <-> system ssh <-> target
 - 连接超时、取消、诊断和结构化退出原因；
 - 对 Windows OpenSSH 缺失或版本过旧的可操作提示。
 
-兼容引擎的信任源继续使用 OpenSSH `known_hosts`。alpha.3 已在启动系统 OpenSSH 前通过受限 SSH 握手读取主机算法和 SHA256 指纹：匹配时继续，未知时由用户明确确认并保存，换钥时硬阻止；随后终端强制 `StrictHostKeyChecking=yes`，SFTP 与监控复用同一信任结果。应用不能自动回答 `yes`，也不能把主机换钥警告降级成普通终端文本。
+兼容引擎的信任源继续使用 OpenSSH `known_hosts`。alpha.4 在启动系统 OpenSSH 前通过系统 `ssh-keyscan` 读取公开主机密钥，并用 `ssh-keygen` 查询含哈希条目的本机信任库：匹配时继续，未知时展示算法和 SHA256 指纹并由用户明确确认保存，换钥时硬阻止。这样系统 OpenSSH 终端不再被 libssh2 的算法协商能力提前阻断；随后终端仍强制 `StrictHostKeyChecking=yes`，SFTP 与监控复用同一信任结果。应用不能自动回答 `yes`，也不能把主机换钥警告降级成普通终端文本。
+
+当前终端、SFTP 和 Linux 概况仍是三条独立 SSH 连接。alpha.4 将它们按终端、SFTP、概况的顺序错峰启动，减少低配主机的预认证突发；长期方案是原生会话引擎在一次认证后的主连接上复用 Shell、SFTP 和监控通道。
 
 ### 4.2 russh native engine
 
