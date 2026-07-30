@@ -11,8 +11,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ssh2::{
-    CheckResult, ExtendedData, FileStat, KeyboardInteractivePrompt, KnownHostFileKind,
-    MethodType, Prompt, Session, Sftp,
+    CheckResult, ExtendedData, FileStat, KeyboardInteractivePrompt, KnownHostFileKind, MethodType,
+    Prompt, Session, Sftp,
 };
 use tauri::{AppHandle, Emitter};
 use zeroize::Zeroizing;
@@ -590,11 +590,9 @@ pub(crate) fn connect(connection: &ConnectionSpec) -> Result<Session, String> {
         .map_err(|error| format!("无法设置 SFTP 写入超时: {error}"))?;
 
     let mut session = Session::new().map_err(|_| "无法初始化 SSH 会话".to_string())?;
-    if let Some(preferences) = known_host_key_preferences(
-        &connection.host,
-        connection.port,
-        &known_hosts_files(),
-    ) {
+    if let Some(preferences) =
+        known_host_key_preferences(&connection.host, connection.port, &known_hosts_files())
+    {
         session
             .method_pref(MethodType::HostKey, &preferences)
             .map_err(|_| "无法应用 known_hosts 主机密钥算法偏好".to_string())?;
@@ -782,10 +780,7 @@ fn authenticate(session: &Session, connection: &ConnectionSpec) -> Result<(), St
             password: &password,
             used: false,
         };
-        let result = session.userauth_keyboard_interactive(
-            connection.username.trim(),
-            &mut prompt,
-        );
+        let result = session.userauth_keyboard_interactive(connection.username.trim(), &mut prompt);
         if result.is_ok() && session.authenticated() {
             return Ok(());
         }

@@ -426,7 +426,11 @@ fn fetch_remote_metrics_blocking(request: MonitorRequest) -> Result<RemoteMetric
     command
         .arg("-T")
         .arg("-o")
-        .arg(if use_askpass { "BatchMode=no" } else { "BatchMode=yes" })
+        .arg(if use_askpass {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        })
         .arg("-o")
         .arg("ConnectTimeout=8")
         .arg("-o")
@@ -594,7 +598,6 @@ mod tests {
         let mut invalid_user = request();
         invalid_user.username = "root@other".to_string();
         assert!(validate_request(&invalid_user).is_err());
-
     }
 
     #[test]

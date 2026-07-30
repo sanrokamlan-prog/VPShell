@@ -105,8 +105,8 @@ pub(crate) fn configure_process_ssh_askpass(
 
     file_transfer::validate_optional_reference(credential_ref, "ssh-")?;
     file_transfer::validate_optional_reference(key_passphrase_ref, "key-")?;
-    let executable = env::current_exe()
-        .map_err(|error| format!("无法定位 VPShell AskPass 助手: {error}"))?;
+    let executable =
+        env::current_exe().map_err(|error| format!("无法定位 VPShell AskPass 助手: {error}"))?;
     command.env("SSH_ASKPASS", executable);
     command.env("SSH_ASKPASS_REQUIRE", "force");
     command.env(ASKPASS_MODE_ENV, "1");
@@ -134,8 +134,8 @@ fn configure_ssh_askpass(
 
     file_transfer::validate_optional_reference(credential_ref, "ssh-")?;
     file_transfer::validate_optional_reference(key_passphrase_ref, "key-")?;
-    let executable = env::current_exe()
-        .map_err(|error| format!("无法定位 VPShell AskPass 助手: {error}"))?;
+    let executable =
+        env::current_exe().map_err(|error| format!("无法定位 VPShell AskPass 助手: {error}"))?;
     command.env("SSH_ASKPASS", executable);
     command.env("SSH_ASKPASS_REQUIRE", "force");
     command.env(ASKPASS_MODE_ENV, "1");
@@ -168,11 +168,16 @@ pub fn run_ssh_askpass(prompt: Option<&str>) -> i32 {
     ) else {
         return 3;
     };
-    let prefix = if reference.starts_with("key-") { "key-" } else { "ssh-" };
+    let prefix = if reference.starts_with("key-") {
+        "key-"
+    } else {
+        "ssh-"
+    };
     if file_transfer::validate_optional_reference(Some(reference), prefix).is_err() {
         return 4;
     }
-    let Ok(secret) = file_transfer::read_secret(reference, "未找到已保存的 SSH 凭据") else {
+    let Ok(secret) = file_transfer::read_secret(reference, "未找到已保存的 SSH 凭据")
+    else {
         return 5;
     };
     let mut stdout = std::io::stdout().lock();
@@ -503,7 +508,11 @@ mod tests {
             Some("key-a")
         );
         assert_eq!(
-            select_askpass_reference("Are you sure you want to continue connecting?", Some("ssh-a"), None),
+            select_askpass_reference(
+                "Are you sure you want to continue connecting?",
+                Some("ssh-a"),
+                None
+            ),
             None
         );
         assert_eq!(
