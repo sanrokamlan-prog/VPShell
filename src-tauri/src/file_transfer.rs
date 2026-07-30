@@ -186,9 +186,7 @@ pub(crate) async fn list_remote_files(
 }
 
 #[tauri::command]
-pub(crate) async fn inspect_host_key(
-    request: HostKeyRequest,
-) -> Result<HostKeyInspection, String> {
+pub(crate) async fn inspect_host_key(request: HostKeyRequest) -> Result<HostKeyInspection, String> {
     tauri::async_runtime::spawn_blocking(move || inspect_host_key_blocking(request))
         .await
         .map_err(|error| format!("SSH 主机指纹检查任务异常结束: {error}"))?
@@ -2356,7 +2354,10 @@ mod tests {
     fn formats_known_host_markers_for_default_and_custom_ports() {
         assert_eq!(known_host_marker("example.com", 22), "example.com");
         assert_eq!(known_host_marker("example.com", 2202), "[example.com]:2202");
-        assert_eq!(known_host_marker("[2001:db8::1]", 2202), "[2001:db8::1]:2202");
+        assert_eq!(
+            known_host_marker("[2001:db8::1]", 2202),
+            "[2001:db8::1]:2202"
+        );
     }
 
     #[test]
