@@ -110,9 +110,9 @@ export function MigrationDialog({ onClose, onImported, showToast }: MigrationDia
             <span><b>{lastResult.profiles.length}</b> 个主机</span>
             <span><b>{lastResult.credentialsImported}</b> 个密码</span>
             <span><b>{lastResult.filesSkipped}</b> 个跳过</span>
-            <span><b>{lastResult.credentialsFailed}</b> 个凭据失败</span>
+            <span><b>{lastResult.credentialsFailed}</b> 个密码未迁移</span>
           </div>
-          <small>共发现 {lastResult.filesFound} 个配置文件；重复主机在加入资料库时会再次合并。</small>
+          <small>共发现 {lastResult.filesFound} 个配置文件；“未迁移”只表示无法解密或写入系统凭据库，不是远端密码校验结果。重复主机在加入资料库时会再次合并。</small>
         </div>
       ) : null}
     </Dialog>

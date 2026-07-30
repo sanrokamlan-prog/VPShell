@@ -546,8 +546,13 @@ export function FileTransferPanel({
     setEntries([]);
     setSelectedPaths(new Set());
     setLoadError(null);
-    if (connected && isDesktopRuntime()) void loadDirectory(targetPath);
+    // Let the interactive OpenSSH login finish before opening the independent SFTP connection.
+    // Several small VPS providers throttle simultaneous pre-auth handshakes.
+    const timer = connected && isDesktopRuntime()
+      ? window.setTimeout(() => void loadDirectory(targetPath), 2_000)
+      : undefined;
     return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
       loadGenerationRef.current += 1;
     };
     // Reload only when the remote connection identity changes.

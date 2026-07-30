@@ -241,13 +241,31 @@ fn start_ssh_session(
     command.arg("-p");
     command.arg(request.port.to_string());
 
-    if let Some(identity_file) = request
+    let identity_file = request
         .identity_file
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
+        .filter(|value| !value.trim().is_empty());
+    if let Some(identity_file) = identity_file {
+        command.arg("-o");
+        command.arg("IdentitiesOnly=yes");
         command.arg("-i");
         command.arg(identity_file);
+    }
+
+    if request.credential_ref.is_some() {
+        // Do not let unrelated agent keys exhaust sshd MaxAuthTries before the imported password.
+        command.arg("-o");
+        command.arg("IdentitiesOnly=yes");
+        command.arg("-o");
+        command.arg(if identity_file.is_some() {
+            "PreferredAuthentications=publickey,keyboard-interactive,password"
+        } else {
+            "PreferredAuthentications=keyboard-interactive,password"
+        });
+        command.arg("-o");
+        command.arg("PasswordAuthentication=yes");
+        command.arg("-o");
+        command.arg("KbdInteractiveAuthentication=yes");
     }
 
     configure_ssh_askpass(

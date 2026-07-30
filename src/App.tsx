@@ -364,7 +364,9 @@ function App() {
       }
     }
 
-    void sample();
+    // Stagger the third SSH connection behind the terminal and SFTP startup. This avoids
+    // pre-auth connection bursts on small servers while keeping metrics automatic.
+    timer = window.setTimeout(() => void sample(), 5_000);
     return () => {
       disposed = true;
       if (timer !== undefined) window.clearTimeout(timer);

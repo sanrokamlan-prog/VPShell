@@ -389,11 +389,13 @@ fn sanitize_error(stderr: &[u8]) -> String {
 fn ssh_failure(status: ExitStatus, stderr: &[u8]) -> String {
     let detail = sanitize_error(stderr);
     let lower = detail.to_ascii_lowercase();
-    if lower.contains("permission denied")
-        || lower.contains("no supported authentication")
-        || lower.contains("publickey")
+    if lower.contains("permission denied") {
+        return "服务器拒绝了这次主机概况认证；已保存凭据未被删除，也不能仅凭独立采样失败判定导入密码错误".to_string();
+    }
+    if lower.contains("no supported authentication")
+        || lower.contains("no more authentication methods")
     {
-        return "SSH 身份验证失败：请检查已保存密码、私钥口令、私钥或 ssh-agent".to_string();
+        return "服务器不接受主机概况采样使用的认证方式；当前终端会话可能仍然正常".to_string();
     }
     if lower.contains("host key verification failed")
         || lower.contains("no host key is known")
@@ -410,8 +412,13 @@ fn ssh_failure(status: ExitStatus, stderr: &[u8]) -> String {
     if lower.contains("connection refused") {
         return "SSH 连接被拒绝，请检查端口和服务状态".to_string();
     }
+    if lower.contains("too many authentication failures") {
+        return "服务器因认证尝试过多拒绝了独立采样连接；已保存凭据未被判为错误，稍后会自动重试".to_string();
+    }
     if detail.is_empty() {
-        format!("SSH 主机概况采集失败（退出状态 {status}）")
+        format!(
+            "独立的 SSH 主机概况连接失败（退出状态 {status}，远端未返回详情）；当前终端与凭据可能仍然正常，稍后自动重试"
+        )
     } else {
         format!("SSH 主机概况采集失败: {detail}")
     }
@@ -463,16 +470,31 @@ fn fetch_remote_metrics_blocking(request: MonitorRequest) -> Result<RemoteMetric
             .env("SSH_ASKPASS_REQUIRE", "never");
     }
 
-    if let Some(identity_file) = request
+    let identity_file = request
         .identity_file
         .as_deref()
-        .filter(|value| !value.is_empty())
-    {
+        .filter(|value| !value.is_empty());
+    if let Some(identity_file) = identity_file {
         command
             .arg("-o")
             .arg("IdentitiesOnly=yes")
             .arg("-i")
             .arg(identity_file);
+    }
+    if request.credential_ref.is_some() {
+        command
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg("-o")
+            .arg(if identity_file.is_some() {
+                "PreferredAuthentications=publickey,keyboard-interactive,password"
+            } else {
+                "PreferredAuthentications=keyboard-interactive,password"
+            })
+            .arg("-o")
+            .arg("PasswordAuthentication=yes")
+            .arg("-o")
+            .arg("KbdInteractiveAuthentication=yes");
     }
 
     command
