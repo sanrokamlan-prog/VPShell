@@ -4,6 +4,18 @@ All notable changes to VPShell are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/). Pre-release versions may change local data structures before the first stable release.
 
+## [0.1.0-alpha.5] - 2026-07-30
+
+### Fixed
+
+- Host-key discovery now performs an isolated, no-credential system OpenSSH handshake instead of relying on `ssh-keyscan`. This avoids a Win32 OpenSSH failure where `ssh-keyscan` selects a KEX method that the installed binary does not actually support and closes before returning the server key.
+- The host-key preflight, interactive terminal and Linux metrics connection now share a cached KEX allowlist derived from `ssh -Q kex`, so all OpenSSH-backed paths negotiate from the same algorithms that the current client reports as available.
+- Host-key discovery uses a unique temporary `known_hosts` file, ignores user SSH config, never sends imported passwords or private keys, and removes the temporary file after parsing. The permanent trust store is still changed only after explicit fingerprint confirmation.
+
+### Security
+
+- Automatic compatibility does not enable SHA-1 KEX methods. Servers that only support obsolete algorithms remain blocked until a future per-host legacy mode can show an explicit security warning.
+
 ## [0.1.0-alpha.4] - 2026-07-30
 
 ### Fixed
@@ -101,6 +113,7 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - The system OpenSSH process does not expose structured authentication success, so a failed authentication attempt can still appear in recent connections.
 - Private-key files are written only to the user-selected local path; portable encrypted export is not implemented.
 
+[0.1.0-alpha.5]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.2
