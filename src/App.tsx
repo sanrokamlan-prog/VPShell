@@ -25,6 +25,7 @@ import {
   Library,
   LockKeyhole,
   MoreHorizontal,
+  Minus,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
@@ -40,6 +41,7 @@ import {
   Server,
   Settings2,
   ShieldCheck,
+  Square,
   SquareTerminal,
   Trash2,
   Type,
@@ -73,7 +75,7 @@ import type {
 import "./App.css";
 
 type SidebarView = "hosts" | "commands" | "scripts" | "history";
-type DialogKind = "host" | "sync" | "wallpaper" | "settings" | "guide" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | null;
+type DialogKind = "host" | "host-key" | "sync" | "wallpaper" | "settings" | "guide" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | null;
 
 const RECYCLE_BIN_DAYS = 30;
 
@@ -104,6 +106,14 @@ interface HostMetricsState {
   loading: boolean;
   error?: string;
   sampledAt?: string;
+}
+
+interface HostKeyInspection {
+  host: string;
+  port: number;
+  status: "verified" | "unknown" | "changed" | "failure";
+  algorithm: string;
+  fingerprint: string;
 }
 
 const providerLabels: Record<SyncProviderKind, string> = {
@@ -214,6 +224,8 @@ function App() {
   const [installedFonts, setInstalledFonts] = useState<string[]>([]);
   const [fontRevision, setFontRevision] = useState(0);
   const [hostMetrics, setHostMetrics] = useState<Record<string, HostMetricsState>>({});
+  const [pendingHostKey, setPendingHostKey] = useState<HostKeyInspection | null>(null);
+  const [trustingHostKey, setTrustingHostKey] = useState(false);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
@@ -413,6 +425,21 @@ function App() {
     }
     updateSession(activeSession.id, { state: "connecting" });
     try {
+      const inspection = await invoke<HostKeyInspection>("inspect_host_key", {
+        request: { host: activeHost.host, port: activeHost.port },
+      });
+      if (inspection.status === "unknown") {
+        setPendingHostKey(inspection);
+        setDialog("host-key");
+        updateSession(activeSession.id, { state: "idle" });
+        return;
+      }
+      if (inspection.status === "changed") {
+        throw new Error(`主机指纹与本机记录不一致，已拒绝连接：${inspection.fingerprint}`);
+      }
+      if (inspection.status !== "verified") {
+        throw new Error("无法验证 SSH 主机指纹，已拒绝连接");
+      }
       await invoke("start_ssh_session", {
         request: {
           sessionId: activeSession.id,
@@ -448,6 +475,25 @@ function App() {
       await invoke("stop_terminal", { sessionId: activeSession.id }).catch((error) => showToast(String(error)));
     }
     updateSession(activeSession.id, { state: "closed" });
+  }
+
+  async function trustPendingHostKey() {
+    if (!pendingHostKey || trustingHostKey) return;
+    setTrustingHostKey(true);
+    try {
+      await invoke<HostKeyInspection>("trust_host_key", {
+        request: { host: pendingHostKey.host, port: pendingHostKey.port },
+        expectedFingerprint: pendingHostKey.fingerprint,
+      });
+      setPendingHostKey(null);
+      setDialog(null);
+      showToast("主机指纹已保存，正在连接");
+      await connectActiveSession();
+    } catch (error) {
+      showToast(String(error));
+    } finally {
+      setTrustingHostKey(false);
+    }
   }
 
   async function writeToSessions(command: string, targetIds: string[]) {
@@ -521,11 +567,47 @@ function App() {
   }
 
   function handleFinalShellImport(result: FinalShellImportResult) {
-    const existing = new Set(appState.hosts.map((host) => `${host.username}\0${host.host}\0${host.port}`));
-    const additions = result.profiles.filter((host) => !existing.has(`${host.username}\0${host.host}\0${host.port}`));
-    setAppState((current) => ({ ...current, hosts: [...current.hosts, ...additions] }));
+    const hostKey = (host: HostProfile) => `${host.username}\0${host.host}\0${host.port}`;
+    const importedByKey = new Map(result.profiles.map((host) => [hostKey(host), host]));
+    const existingKeys = new Set(appState.hosts.map(hostKey));
+    const additions = result.profiles.filter((host) => !existingKeys.has(hostKey(host)));
+    const supersededReferences = new Set<string>();
+    let updatedCredentials = 0;
+
+    const mergedHosts = appState.hosts.map((host) => {
+      const imported = importedByKey.get(hostKey(host));
+      if (!imported) return host;
+      if (imported.credentialRef && imported.credentialRef !== host.credentialRef) {
+        updatedCredentials += 1;
+        if (host.credentialRef) supersededReferences.add(host.credentialRef);
+      }
+      return {
+        ...host,
+        credentialRef: imported.credentialRef ?? host.credentialRef,
+        source: imported.credentialRef ? "finalshell" as const : host.source,
+        tags: [...new Set([...host.tags, ...imported.tags])],
+      };
+    });
+
+    const nextHosts = [...mergedHosts, ...additions];
+    setAppState((current) => ({ ...current, hosts: nextHosts }));
+    if (isDesktopRuntime() && supersededReferences.size > 0) {
+      const retainedReferences = new Set([
+        ...nextHosts.map((host) => host.credentialRef),
+        ...(appState.deletedHosts ?? []).map((item) => item.host.credentialRef),
+      ].filter((reference): reference is string => Boolean(reference)));
+      void Promise.all([...supersededReferences]
+        .filter((reference) => !retainedReferences.has(reference))
+        .map((reference) => invoke("delete_credential", { reference }).catch(() => undefined)));
+    }
     setSidebarView("hosts");
-    showToast(`已加入 ${additions.length} 个主机，安全保存 ${result.credentialsImported} 个密码`);
+    showToast(`新增 ${additions.length} 台，更新 ${updatedCredentials} 台凭据，安全保存 ${result.credentialsImported} 个密码`);
+  }
+
+  async function runWindowAction(action: "minimize" | "toggleMaximize" | "close") {
+    if (!isDesktopRuntime()) return;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow()[action]();
   }
 
   async function openExternal(url: string) {
@@ -740,41 +822,36 @@ function App() {
 
   return (
     <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
-      <header className="topbar">
-        <div className="brand-block">
+      <header className="topbar" data-tauri-drag-region>
+        <div className="brand-block" data-tauri-drag-region>
           <span className="brand-mark"><img src={brandMark} alt="" /></span>
           <strong>VPShell</strong>
           <button className="workspace-switcher" type="button">
             个人资料库 <ChevronDown size={14} />
           </button>
         </div>
-        <div className="topbar-actions">
-          <button
-            className={`sync-status ${appState.sync.enabled ? "is-synced" : ""}`}
-            type="button"
-            onClick={() => setDialog("sync")}
-          >
-            {appState.sync.enabled ? <Cloud size={15} /> : <CloudOff size={15} />}
-            <span>{appState.sync.enabled ? relativeTime(appState.sync.lastSyncedAt) : appState.sync.endpoint ? "同步后端未启用" : "同步未配置"}</span>
-          </button>
-          <span className="route-status">
-            <Route size={15} /> 路线：直连
-          </span>
-          <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}>
-            <Network size={17} />
-          </button>
-          <button className="icon-button" type="button" title="SSH 密钥" aria-label="SSH 密钥" onClick={() => setDialog("key-manager")}>
-            <KeyRound size={17} />
-          </button>
-          <button className="icon-button" type="button" title="终端外观" aria-label="终端外观" onClick={() => setDialog("wallpaper")}>
-            <Image size={17} />
-          </button>
-          <button className="icon-button" type="button" title="使用指南" aria-label="使用指南" onClick={() => setDialog("guide")}>
-            <CircleHelp size={17} />
-          </button>
-          <button className="icon-button" type="button" title="设置与升级" aria-label="设置与升级" onClick={() => setDialog("settings")}>
-            <Settings2 size={17} />
-          </button>
+        <div className="topbar-right">
+          <div className="topbar-actions">
+            <button
+              className={`sync-status ${appState.sync.enabled ? "is-synced" : ""}`}
+              type="button"
+              onClick={() => setDialog("sync")}
+            >
+              {appState.sync.enabled ? <Cloud size={15} /> : <CloudOff size={15} />}
+              <span>{appState.sync.enabled ? relativeTime(appState.sync.lastSyncedAt) : appState.sync.endpoint ? "同步后端未启用" : "同步未配置"}</span>
+            </button>
+            <span className="route-status"><Route size={15} /> 路线：直连</span>
+            <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
+            <button className="icon-button" type="button" title="SSH 密钥" aria-label="SSH 密钥" onClick={() => setDialog("key-manager")}><KeyRound size={17} /></button>
+            <button className="icon-button" type="button" title="终端外观" aria-label="终端外观" onClick={() => setDialog("wallpaper")}><Image size={17} /></button>
+            <button className="icon-button" type="button" title="使用指南" aria-label="使用指南" onClick={() => setDialog("guide")}><CircleHelp size={17} /></button>
+            <button className="icon-button" type="button" title="设置与升级" aria-label="设置与升级" onClick={() => setDialog("settings")}><Settings2 size={17} /></button>
+          </div>
+          <div className="window-controls" aria-label="窗口控制">
+            <button type="button" title="最小化" aria-label="最小化" onClick={() => void runWindowAction("minimize")}><Minus size={16} /></button>
+            <button type="button" title="最大化或还原" aria-label="最大化或还原" onClick={() => void runWindowAction("toggleMaximize")}><Square size={13} /></button>
+            <button className="window-close" type="button" title="关闭" aria-label="关闭" onClick={() => void runWindowAction("close")}><X size={16} /></button>
+          </div>
         </div>
       </header>
 
@@ -1112,6 +1189,32 @@ function App() {
 
       {dialog === "migration" ? (
         <MigrationDialog onClose={() => setDialog(null)} onImported={handleFinalShellImport} showToast={showToast} />
+      ) : null}
+
+      {dialog === "host-key" && pendingHostKey ? (
+        <Dialog
+          title="确认 SSH 主机指纹"
+          onClose={() => { setPendingHostKey(null); setDialog(null); }}
+          footer={(
+            <>
+              <button className="secondary-button" type="button" onClick={() => { setPendingHostKey(null); setDialog(null); }}>取消</button>
+              <button className="primary-button" type="button" disabled={trustingHostKey} onClick={() => void trustPendingHostKey()}>
+                {trustingHostKey ? <RefreshCw className="spin" size={14} /> : <ShieldCheck size={14} />}
+                {trustingHostKey ? "正在复核" : "信任并连接"}
+              </button>
+            </>
+          )}
+        >
+          <div className="host-key-callout">
+            <AlertTriangle size={19} />
+            <div><strong>这是此主机的首次连接</strong><span>请通过服务器控制台或服务商面板核对指纹。VPShell 不会自动接受未知或已变化的主机密钥。</span></div>
+          </div>
+          <dl className="host-key-details">
+            <div><dt>目标</dt><dd>{pendingHostKey.host}:{pendingHostKey.port}</dd></div>
+            <div><dt>算法</dt><dd>{pendingHostKey.algorithm}</dd></div>
+            <div className="fingerprint-row"><dt>SHA256 指纹</dt><dd><code>{pendingHostKey.fingerprint}</code><button className="icon-button compact" type="button" title="复制指纹" aria-label="复制指纹" onClick={() => { void navigator.clipboard.writeText(pendingHostKey.fingerprint); showToast("指纹已复制"); }}><Copy size={14} /></button></dd></div>
+          </dl>
+        </Dialog>
       ) : null}
 
       {dialog === "guide" ? <OnboardingDialog onClose={closeGuide} /> : null}

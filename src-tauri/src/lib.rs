@@ -236,6 +236,8 @@ fn start_ssh_session(
     command.arg("ServerAliveInterval=30");
     command.arg("-o");
     command.arg("ServerAliveCountMax=3");
+    command.arg("-o");
+    command.arg("StrictHostKeyChecking=yes");
     command.arg("-p");
     command.arg(request.port.to_string());
 
@@ -474,6 +476,8 @@ pub fn run() {
             stop_terminal,
             delete_credential,
             import_finalshell,
+            file_transfer::inspect_host_key,
+            file_transfer::trust_host_key,
             generate_ssh_key,
             install_public_key,
             file_transfer::list_remote_files,

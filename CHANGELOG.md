@@ -4,6 +4,20 @@ All notable changes to VPShell are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/). Pre-release versions may change local data structures before the first stable release.
 
+## [0.1.0-alpha.3] - 2026-07-30
+
+### Fixed
+
+- Re-importing an existing FinalShell host now updates its OS-keyring credential reference instead of discarding the newly migrated password. Users upgrading from alpha.2 should select the same FinalShell directory once; no passwords need to be re-entered.
+- SSH connections now perform a structured host-key preflight. Unknown keys display their algorithm and SHA256 fingerprint for explicit trust, while changed keys remain hard-blocked.
+- SFTP no longer aborts when the Windows libssh2 build rejects a combined host-key preference list; known algorithms are tried individually and normal verification remains mandatory.
+- The Windows native title bar and colored outer frame are replaced by the VPShell title bar with working minimize, maximize/restore and close controls.
+
+### Changed
+
+- The terminal OpenSSH process always uses strict host-key checking after the shared preflight, so AskPass is reserved for password and private-key passphrase prompts.
+- The roadmap implementation notes now record the design patterns reviewed from Tabby, Electerm and WindTerm, with clean module boundaries and no copied third-party code.
+
 ## [0.1.0-alpha.2] - 2026-07-30
 
 ### Fixed
@@ -71,5 +85,6 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - The system OpenSSH process does not expose structured authentication success, so a failed authentication attempt can still appear in recent connections.
 - Private-key files are written only to the user-selected local path; portable encrypted export is not implemented.
 
+[0.1.0-alpha.3]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.1

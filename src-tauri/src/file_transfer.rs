@@ -1,13 +1,15 @@
 use std::{
     collections::HashSet,
     env, fs,
-    io::{self, Read, Write},
+    fs::OpenOptions,
+    io::{self, Read, Seek, SeekFrom, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Component, Path, PathBuf},
     process::Command,
     time::Duration,
 };
 
+use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ssh2::{
@@ -40,6 +42,23 @@ pub(crate) struct ConnectionSpec {
     pub(crate) credential_ref: Option<String>,
     pub(crate) identity_file: Option<String>,
     pub(crate) identity_passphrase_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostKeyRequest {
+    host: String,
+    port: u16,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostKeyInspection {
+    host: String,
+    port: u16,
+    status: String,
+    algorithm: String,
+    fingerprint: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -164,6 +183,27 @@ pub(crate) async fn list_remote_files(
     tauri::async_runtime::spawn_blocking(move || list_remote_files_blocking(connection, path))
         .await
         .map_err(|error| format!("SFTP 浏览任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_host_key(
+    request: HostKeyRequest,
+) -> Result<HostKeyInspection, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_host_key_blocking(request))
+        .await
+        .map_err(|error| format!("SSH 主机指纹检查任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn trust_host_key(
+    request: HostKeyRequest,
+    expected_fingerprint: String,
+) -> Result<HostKeyInspection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        trust_host_key_blocking(request, expected_fingerprint)
+    })
+    .await
+    .map_err(|error| format!("SSH 主机指纹保存任务异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -434,18 +474,8 @@ fn download_paths_blocking(
 }
 
 pub(crate) fn validate_connection(connection: &ConnectionSpec) -> Result<(), String> {
-    let host = connection.host.trim();
+    validate_host(&connection.host, connection.port)?;
     let username = connection.username.trim();
-    if host.is_empty() || host.len() > MAX_HOST_LENGTH || connection.port == 0 {
-        return Err("SFTP 主机地址或端口无效".to_string());
-    }
-    if host.starts_with('-')
-        || host
-            .chars()
-            .any(|value| value.is_whitespace() || value.is_control())
-    {
-        return Err("SFTP 主机地址格式无效".to_string());
-    }
     if username.is_empty()
         || username.len() > MAX_USERNAME_LENGTH
         || username.starts_with('-')
@@ -471,6 +501,21 @@ pub(crate) fn validate_connection(connection: &ConnectionSpec) -> Result<(), Str
         if !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
             return Err("SFTP 私钥文件无效或过大".to_string());
         }
+    }
+    Ok(())
+}
+
+fn validate_host(host: &str, port: u16) -> Result<(), String> {
+    let host = host.trim();
+    if host.is_empty() || host.len() > MAX_HOST_LENGTH || port == 0 {
+        return Err("SSH 主机地址或端口无效".to_string());
+    }
+    if host.starts_with('-')
+        || host
+            .chars()
+            .any(|value| value.is_whitespace() || value.is_control())
+    {
+        return Err("SSH 主机地址格式无效".to_string());
     }
     Ok(())
 }
@@ -565,10 +610,36 @@ fn validate_remote_inputs(paths: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 pub(crate) fn connect(connection: &ConnectionSpec) -> Result<Session, String> {
+    let session = open_session(&connection.host, connection.port)?;
+    verify_known_host(&session, &connection.host, connection.port)?;
+    authenticate(&session, connection)?;
+    Ok(session)
+}
+
+fn open_session(host: &str, port: u16) -> Result<Session, String> {
+    let preferences = known_host_key_preferences(host, port, &known_hosts_files());
     let mut last_error = None;
-    let addresses = (connection.host.as_str(), connection.port)
+    for preference in preferences.iter().map(String::as_str).map(Some) {
+        match open_session_with_preference(host, port, preference) {
+            Ok(session) => return Ok(session),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match open_session_with_preference(host, port, None) {
+        Ok(session) => Ok(session),
+        Err(error) => Err(last_error.unwrap_or(error)),
+    }
+}
+
+fn open_session_with_preference(
+    host: &str,
+    port: u16,
+    host_key_preference: Option<&str>,
+) -> Result<Session, String> {
+    let mut last_error = None;
+    let addresses = (host, port)
         .to_socket_addrs()
-        .map_err(|_| "无法解析 SFTP 主机地址".to_string())?;
+        .map_err(|_| "无法解析 SSH 主机地址".to_string())?;
     let mut tcp = None;
     for address in addresses.take(16) {
         match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
@@ -581,8 +652,8 @@ pub(crate) fn connect(connection: &ConnectionSpec) -> Result<Session, String> {
     }
     let tcp = tcp.ok_or_else(|| {
         last_error
-            .map(|error| format!("无法连接 SFTP 主机: {error}"))
-            .unwrap_or_else(|| "SFTP 主机没有可用地址".to_string())
+            .map(|error| format!("无法连接 SSH 主机: {error}"))
+            .unwrap_or_else(|| "SSH 主机没有可用地址".to_string())
     })?;
     tcp.set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|error| format!("无法设置 SFTP 读取超时: {error}"))?;
@@ -590,29 +661,42 @@ pub(crate) fn connect(connection: &ConnectionSpec) -> Result<Session, String> {
         .map_err(|error| format!("无法设置 SFTP 写入超时: {error}"))?;
 
     let mut session = Session::new().map_err(|_| "无法初始化 SSH 会话".to_string())?;
-    if let Some(preferences) =
-        known_host_key_preferences(&connection.host, connection.port, &known_hosts_files())
-    {
+    if let Some(preference) = host_key_preference {
         session
-            .method_pref(MethodType::HostKey, &preferences)
-            .map_err(|_| "无法应用 known_hosts 主机密钥算法偏好".to_string())?;
+            .method_pref(MethodType::HostKey, preference)
+            .map_err(|_| format!("SSH 不支持主机密钥算法偏好: {preference}"))?;
     }
     session.set_tcp_stream(tcp);
     session.set_timeout(IO_TIMEOUT.as_millis() as u32);
     session
         .handshake()
         .map_err(|_| "SSH 握手失败".to_string())?;
-    verify_known_host(&session, &connection.host, connection.port)?;
-    authenticate(&session, connection)?;
     Ok(session)
 }
 
 fn verify_known_host(session: &Session, host: &str, port: u16) -> Result<(), String> {
+    let (status, key_type) = check_known_host(session, host, port)?;
+    match status {
+        CheckResult::Match => Ok(()),
+        CheckResult::Mismatch => Err(format!(
+            "SSH 主机密钥与 known_hosts 不匹配，已拒绝连接（协商算法: {key_type:?}）"
+        )),
+        CheckResult::NotFound => {
+            Err("SSH 主机不在 known_hosts 中；请先核验并信任主机指纹".to_string())
+        }
+        CheckResult::Failure => Err("SSH 主机密钥校验失败，已拒绝连接".to_string()),
+    }
+}
+
+fn check_known_host(
+    session: &Session,
+    host: &str,
+    port: u16,
+) -> Result<(CheckResult, ssh2::HostKeyType), String> {
     let mut known_hosts = session
         .known_hosts()
         .map_err(|_| "无法初始化 known_hosts 校验".to_string())?;
     let files = known_hosts_files();
-    let mut loaded_files = 0_u32;
     for path in files.iter().filter(|path| path.is_file()) {
         let metadata = fs::metadata(path).map_err(|_| "无法读取 known_hosts 文件".to_string())?;
         if metadata.len() > MAX_KNOWN_HOSTS_SIZE {
@@ -621,29 +705,161 @@ fn verify_known_host(session: &Session, host: &str, port: u16) -> Result<(), Str
         known_hosts
             .read_file(path, KnownHostFileKind::OpenSSH)
             .map_err(|_| format!("无法解析 known_hosts 文件: {}", path.display()))?;
-        loaded_files += 1;
-    }
-    if loaded_files == 0 {
-        return Err(
-            "未找到现有 OpenSSH known_hosts；请先用系统 ssh 核验并保存主机指纹".to_string(),
-        );
     }
     let (key, key_type) = session
         .host_key()
         .ok_or_else(|| "SSH 服务器未提供主机密钥".to_string())?;
-    match known_hosts.check_port(host, port, key) {
-        CheckResult::Match => Ok(()),
-        CheckResult::Mismatch => Err(format!(
-            "SSH 主机密钥与 known_hosts 不匹配，已拒绝连接（协商算法: {key_type:?}）"
-        )),
-        CheckResult::NotFound => {
-            Err("SSH 主机不在 known_hosts 中；请先用系统 ssh 核验并保存主机指纹".to_string())
+    Ok((known_hosts.check_port(host, port, key), key_type))
+}
+
+fn inspect_host_key_blocking(request: HostKeyRequest) -> Result<HostKeyInspection, String> {
+    validate_host(&request.host, request.port)?;
+    let session = open_session(&request.host, request.port)?;
+    inspect_handshaken_host(&session, &request.host, request.port)
+}
+
+fn inspect_handshaken_host(
+    session: &Session,
+    host: &str,
+    port: u16,
+) -> Result<HostKeyInspection, String> {
+    let (status, key_type) = check_known_host(session, host, port)?;
+    let (key, _) = session
+        .host_key()
+        .ok_or_else(|| "SSH 服务器未提供主机密钥".to_string())?;
+    let digest = Sha256::digest(key);
+    Ok(HostKeyInspection {
+        host: host.to_string(),
+        port,
+        status: match status {
+            CheckResult::Match => "verified",
+            CheckResult::NotFound => "unknown",
+            CheckResult::Mismatch => "changed",
+            CheckResult::Failure => "failure",
         }
-        CheckResult::Failure => Err("SSH 主机密钥校验失败，已拒绝连接".to_string()),
+        .to_string(),
+        algorithm: host_key_algorithm(key_type).to_string(),
+        fingerprint: format!("SHA256:{}", BASE64_STANDARD_NO_PAD.encode(digest)),
+    })
+}
+
+fn trust_host_key_blocking(
+    request: HostKeyRequest,
+    expected_fingerprint: String,
+) -> Result<HostKeyInspection, String> {
+    validate_host(&request.host, request.port)?;
+    let session = open_session(&request.host, request.port)?;
+    let inspection = inspect_handshaken_host(&session, &request.host, request.port)?;
+    if inspection.status == "verified" {
+        return Ok(inspection);
+    }
+    if inspection.status == "changed" {
+        return Err("主机指纹与现有记录不一致，不能覆盖；请先人工核查 known_hosts".to_string());
+    }
+    if inspection.status != "unknown" {
+        return Err("主机指纹校验失败，不能保存".to_string());
+    }
+    if expected_fingerprint != inspection.fingerprint {
+        return Err("服务器指纹在确认期间发生变化，已取消连接".to_string());
+    }
+
+    let (key, key_type) = session
+        .host_key()
+        .ok_or_else(|| "SSH 服务器未提供主机密钥".to_string())?;
+    if matches!(key_type, ssh2::HostKeyType::Unknown) {
+        return Err("服务器使用了无法识别的主机密钥算法".to_string());
+    }
+    let path = user_known_hosts_file()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("无法创建 .ssh 目录: {error}"))?;
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata_is_linklike(&metadata) {
+            return Err("拒绝写入符号链接或重解析点形式的 known_hosts".to_string());
+        }
+        if metadata.len() > MAX_KNOWN_HOSTS_SIZE {
+            return Err("known_hosts 文件过大，拒绝写入".to_string());
+        }
+    }
+
+    let marker = known_host_marker(&request.host, request.port);
+    let mut known_hosts = session
+        .known_hosts()
+        .map_err(|_| "无法初始化 known_hosts 写入".to_string())?;
+    known_hosts
+        .add(&marker, key, "VPShell", key_type.into())
+        .map_err(|_| "无法生成 known_hosts 记录".to_string())?;
+    let hosts = known_hosts
+        .hosts()
+        .map_err(|_| "无法读取待保存的 known_hosts 记录".to_string())?;
+    let added = hosts
+        .last()
+        .ok_or_else(|| "未生成 known_hosts 记录".to_string())?;
+    let line = known_hosts
+        .write_string(added, KnownHostFileKind::OpenSSH)
+        .map_err(|_| "无法序列化 known_hosts 记录".to_string())?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("无法打开 known_hosts: {error}"))?;
+    let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    if length > 0 {
+        file.seek(SeekFrom::End(-1))
+            .map_err(|error| format!("无法检查 known_hosts 结尾: {error}"))?;
+        let mut last = [0_u8; 1];
+        file.read_exact(&mut last)
+            .map_err(|error| format!("无法读取 known_hosts 结尾: {error}"))?;
+        if last[0] != b'\n' {
+            file.write_all(b"\n")
+                .map_err(|error| format!("无法写入 known_hosts: {error}"))?;
+        }
+    }
+    file.write_all(line.as_bytes())
+        .and_then(|_| file.flush())
+        .map_err(|error| format!("无法保存 known_hosts: {error}"))?;
+
+    let verified = inspect_handshaken_host(&session, &request.host, request.port)?;
+    if verified.status != "verified" {
+        return Err("主机指纹已写入，但复核失败".to_string());
+    }
+    Ok(verified)
+}
+
+fn known_host_marker(host: &str, port: u16) -> String {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
     }
 }
 
-fn known_host_key_preferences(host: &str, port: u16, files: &[PathBuf]) -> Option<String> {
+fn user_known_hosts_file() -> Result<PathBuf, String> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".ssh").join("known_hosts"))
+        .ok_or_else(|| "无法定位当前用户的 known_hosts".to_string())
+}
+
+fn host_key_algorithm(key_type: ssh2::HostKeyType) -> &'static str {
+    match key_type {
+        ssh2::HostKeyType::Rsa => "RSA",
+        ssh2::HostKeyType::Dss => "DSA",
+        ssh2::HostKeyType::Ecdsa256 => "ECDSA P-256",
+        ssh2::HostKeyType::Ecdsa384 => "ECDSA P-384",
+        ssh2::HostKeyType::Ecdsa521 => "ECDSA P-521",
+        ssh2::HostKeyType::Ed25519 => "ED25519",
+        ssh2::HostKeyType::Unknown => "未知算法",
+    }
+}
+
+fn known_host_key_preferences(host: &str, port: u16, files: &[PathBuf]) -> Vec<String> {
     let normalized_host = host
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
@@ -697,7 +913,7 @@ fn known_host_key_preferences(host: &str, port: u16, files: &[PathBuf]) -> Optio
     if key_types.contains("ssh-rsa") {
         preferences.extend(["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]);
     }
-    (!preferences.is_empty()).then(|| preferences.join(","))
+    preferences.into_iter().map(str::to_string).collect()
 }
 
 fn collect_known_host_key_types(output: &str, key_types: &mut HashSet<String>) {
@@ -2134,6 +2350,13 @@ mod tests {
         assert!(key_types.contains("ssh-ed25519"));
         assert!(key_types.contains("ecdsa-sha2-nistp256"));
         assert!(!key_types.contains("ssh-rsa"));
+    }
+
+    #[test]
+    fn formats_known_host_markers_for_default_and_custom_ports() {
+        assert_eq!(known_host_marker("example.com", 22), "example.com");
+        assert_eq!(known_host_marker("example.com", 2202), "[example.com]:2202");
+        assert_eq!(known_host_marker("[2001:db8::1]", 2202), "[2001:db8::1]:2202");
     }
 
     #[test]

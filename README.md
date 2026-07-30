@@ -18,7 +18,7 @@
 ![VPShell 工作台](docs/assets/workspace.png)
 
 > [!IMPORTANT]
-> `v0.1.0-alpha.2` 是 Windows-first 技术预览版。系统 OpenSSH 直连终端、直连 SFTP、打包传输、Linux 负载采样和安全外部编辑已经接通真实后端。FinalShell 导入密码可由直连终端、采样和 SFTP 自动使用；跳板机、端到端同步、Shell Integration 和中继加速属于后续里程碑。当前版本不应作为生产密码或私钥管理器。
+> `v0.1.0-alpha.3` 是 Windows-first 技术预览版。系统 OpenSSH 直连终端、直连 SFTP、打包传输、Linux 负载采样和安全外部编辑已经接通真实后端。FinalShell 导入密码可由直连终端、采样和 SFTP 自动使用；跳板机、端到端同步、Shell Integration 和中继加速属于后续里程碑。当前版本不应作为生产密码或私钥管理器。
 
 ## 参与 Alpha 测试
 
@@ -36,7 +36,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 
 若长期运营需要商业收入，收费边界只会放在可选的托管基础设施与服务上，例如托管中继、团队协作与审计、企业支持或托管加密同步。基础 SSH、SFTP、密钥管理、本地资料库以及用户自建同步不会因托管服务出现而被撤回或锁进付费版。
 
-| 运维痛点 | VPShell 方向 | `v0.1.0-alpha.2` |
+| 运维痛点 | VPShell 方向 | `v0.1.0-alpha.3` |
 | --- | --- | :---: |
 | 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **未实现**：仅协议设计与设置界面 |
 | 大量小文件/目录传输缓慢 | 自动探测 `tar + zstd`，缺少远端能力时回退 SFTP | **已实现**：直连后端 |
@@ -60,7 +60,8 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 - 远端普通文件可用 Notepad++、用户指定编辑器或系统编辑器打开；检测本地保存，回传前比较远端哈希，冲突时阻止静默覆盖。
 - 主机分组、生产/基础设施/测试环境标记，以及常驻直连身份栏。
 - 最近发起的连接按时间置顶，并保留最后路径、用户和连接时间；当前系统 OpenSSH 后端尚不能结构化确认认证成功，因此失败的认证尝试也可能进入记录。
-- FinalShell 主机、端口、用户名和可选密码导入；密码只进入系统钥匙串，不返回前端，并可用于直连终端、采样与 SFTP。
+- FinalShell 主机、端口、用户名和可选密码导入；重复导入会更新已有主机的凭据引用，密码只进入系统钥匙串，不返回前端，并可用于直连终端、采样与 SFTP。
+- 连接前统一检查 OpenSSH `known_hosts`；未知主机显示算法和 SHA256 指纹供明确确认，已变化指纹硬拒绝，终端、SFTP 与采样共享信任结果。
 - Ed25519/RSA4096 密钥生成、OpenSSH 口令加密，以及把所选公钥安装到当前已连接主机。
 - 多终端 Compose 命令栏、命令历史检索和路径快捷输入。
 - 22 项命令/工具的本地中文意图搜索、参数填写、风险提示和执行前预览。
@@ -94,7 +95,7 @@ VPShell 当前调用系统 `ssh`。安装后先验证：
 ssh -V
 ```
 
-Windows 如找不到该命令，请在可选功能中安装 **OpenSSH Client**；macOS/Linux 请使用系统包管理器安装 OpenSSH 客户端。首次连接和主机密钥变化仍由 OpenSSH 在终端内明确提示，VPShell 不会自动回答 `yes`。
+Windows 如找不到该命令，请在可选功能中安装 **OpenSSH Client**；macOS/Linux 请使用系统包管理器安装 OpenSSH 客户端。首次连接由 VPShell 显示算法和 SHA256 指纹并等待用户明确确认；已保存指纹发生变化时会硬阻止连接，不能一键覆盖。
 
 ## 使用
 
@@ -102,7 +103,7 @@ Windows 如找不到该命令，请在可选功能中安装 **OpenSSH Client**�
 
 1. 点击主机区域的 `+`，填写 IP/域名、端口、用户名和可选私钥路径，或从 FinalShell 导入。
 2. 打开主机标签，核对顶部常驻的别名、用户、IP 和环境。
-3. 点击“连接”；首次指纹仍需人工确认，已导入的直连密码会从系统凭据管理器自动使用。
+3. 点击“连接”；首次指纹需在 VPShell 对话框中人工确认，已导入的直连密码会从系统凭据管理器自动使用。
 4. 需要复用命令时使用底部命令栏；广播前逐个勾选目标。
 5. 也可以在命令栏输入“磁盘满了”“查看 nginx 日志”或“UDP 测速”，选择本地匹配结果并先核对最终命令。
 6. 脚本中心只会显示来源并把最终命令加入命令栏，不会后台静默执行。
@@ -113,7 +114,9 @@ Windows 如找不到该命令，请在可选功能中安装 **OpenSSH Client**�
 
 ## 从其他 SSH 工具迁移
 
-`v0.1.0-alpha.2` 支持从 FinalShell 配置目录导入主机、端口、用户名和可选密码。密码在 Rust 后端解码后直接写入 Windows Credential Manager（或对应平台系统钥匙串），明文不会进入 WebView；直连终端、采样和 SFTP 通过随机凭据引用使用它。旧代理引用只保留标记，当前版本不会恢复代理或跳板路线。
+`v0.1.0-alpha.3` 支持从 FinalShell 配置目录导入主机、端口、用户名和可选密码。密码在 Rust 后端解码后直接写入 Windows Credential Manager（或对应平台系统钥匙串），明文不会进入 WebView；直连终端、采样和 SFTP 通过随机凭据引用使用它。旧代理引用只保留标记，当前版本不会恢复代理或跳板路线。
+
+从 `alpha.2` 升级后，请重新选择同一个 FinalShell 配置目录导入一次。VPShell 会合并重复主机并更新系统凭据引用，不需要逐台输入密码；源配置仍保持只读。
 
 OpenSSH、PuTTY、Xshell、SecureCRT、MobaXterm、Tabby、Termius 的专用导入器及跨客户端导出仍在路线图。格式、凭据边界和安全迁移步骤见 [MIGRATION.md](docs/MIGRATION.md)。VPShell 不会把凭据导出成 FinalShell 的旧 DES 格式。
 
@@ -201,6 +204,17 @@ docs/SYNC.md            加密同步、冲突、恢复和 TOTP 边界
 scripts/                本地开发辅助脚本
 ```
 
+## 开源项目实现审计
+
+VPShell 会持续审计成熟公开项目的模块边界和用户工作流，但不会复制第三方实现。当前已纳入设计决策的公开参考包括：
+
+- [Tabby](https://github.com/Eugeny/tabby)：配置、逻辑密钥标识、插件与终端会话分层；
+- [Electerm](https://github.com/electerm/electerm)：终端、SFTP、快捷命令和多后端同步保持独立能力边界；
+- [WindTerm](https://github.com/kingToolbox/WindTerm)：认证完成后再按顺序启动 Shell、SFTP 和系统监控，减少并发失败与重复提示；
+- [openFinalShell](https://github.com/kexue-aihao/openfinalshell)：仅用于核对 FinalShell 数据迁移和桌面工作流，不把兼容代码作为安全事实来源。
+
+所有吸收项都要重新按 VPShell 的 Rust/Tauri 安全边界实现，并经过本项目测试与许可证检查。
+
 ## 路线图
 
 路线图描述未来方向，不是发布日期或功能承诺。只有进入安装包、通过对应平台验收并写入 Release Notes 的能力，才会移动到“当前可用能力”。
@@ -221,6 +235,7 @@ Alpha 发布后的重点验证：
 - 扩大临时及真实 OpenSSH/SFTP 主机覆盖，继续验证上传、下载、目录、中文路径、远端冲突和失败清理；
 - 扩大 Windows 安装包冷启动、签名更新链路、OpenSSH 缺失，以及 Notepad++ 已安装/未安装场景覆盖；
 - 扩大 Linux 发行版和 macOS Intel/Apple Silicon 实机兼容性反馈，未通过的平台问题按 Alpha 缺陷处理。
+- 已开始实现结构化主机指纹确认：终端、SFTP 和监控共享同一 `known_hosts` 信任结果，未知指纹显式确认，已变化指纹不可覆盖。
 
 ### v0.2 - 文件、监控与编辑器
 

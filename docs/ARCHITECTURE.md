@@ -89,7 +89,7 @@ xterm.js <-> Tauri IPC <-> portable PTY <-> system ssh <-> target
 - 连接超时、取消、诊断和结构化退出原因；
 - 对 Windows OpenSSH 缺失或版本过旧的可操作提示。
 
-兼容引擎的主机密钥验证继续由 OpenSSH `known_hosts` 完成。应用不能自动回答 `yes`，也不能把主机换钥警告降级成普通终端文本。
+兼容引擎的信任源继续使用 OpenSSH `known_hosts`。alpha.3 已在启动系统 OpenSSH 前通过受限 SSH 握手读取主机算法和 SHA256 指纹：匹配时继续，未知时由用户明确确认并保存，换钥时硬阻止；随后终端强制 `StrictHostKeyChecking=yes`，SFTP 与监控复用同一信任结果。应用不能自动回答 `yes`，也不能把主机换钥警告降级成普通终端文本。
 
 ### 4.2 russh native engine
 
@@ -299,7 +299,7 @@ SSH 参数调优、压缩或连接复用不能等同于海外线路加速。真�
 | 传输与上下文 | 真实 SFTP、tar+zstd 回退、Shell Integration、持久身份链、安全广播 | 多平台 OpenSSH、恶意文件名/压缩包和嵌套 SSH 测试通过 |
 | 加密同步 | Local Folder + WebDAV、E2EE、冲突中心、恢复密钥 | 多设备离线冲突、远端篡改/删除/回滚演练通过 |
 | 扩展 provider | SFTP、S3、Gateway、TOTP 登录、附件分块 | Provider 兼容矩阵和限流/故障恢复通过 |
-| 原生 SSH | russh、结构化 host key、原生 SFTP/跳板/转发 | 与系统 OpenSSH 的认证及服务器兼容测试达标，随时可回退 |
+| 原生 SSH | russh、原生 SFTP/跳板/转发；结构化 host key 已由兼容层先行实现 | 与系统 OpenSSH 的认证及服务器兼容测试达标，随时可回退 |
 | 路线优化 | SOCKS/HTTP、自建 Relay、测速选路、可选 Mosh | 有实际节点、公开指标与隐私边界后才使用“加速”表述 |
 
 每个阶段都应以可回退、可迁移和可验证为准。路线图不是发布日期承诺，未通过门槛的模块不应仅凭界面存在就标记为已完成。
