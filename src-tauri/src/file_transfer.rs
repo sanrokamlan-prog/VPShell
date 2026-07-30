@@ -953,9 +953,9 @@ fn scan_host_keys(host: &str, port: u16) -> Result<Vec<HostKeyMaterial>, String>
         .arg(host)
         .arg("exit");
     hide_console_window(&mut command);
-    let output = command.output().map_err(|error| {
-        format!("无法启动系统 ssh；请确认已安装 OpenSSH 客户端: {error}")
-    })?;
+    let output = command
+        .output()
+        .map_err(|error| format!("无法启动系统 ssh；请确认已安装 OpenSSH 客户端: {error}"))?;
     if output.stdout.len() > MAX_KEYSCAN_OUTPUT_SIZE
         || output.stderr.len() > MAX_KEYSCAN_OUTPUT_SIZE
     {
