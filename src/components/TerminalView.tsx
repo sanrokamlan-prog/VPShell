@@ -35,10 +35,17 @@ function decodeBase64(value: string) {
 }
 
 function welcomeText(host: HostProfile) {
+  if (!host.host) {
+    return [
+      "\x1b[38;2;121;208;149mVPShell workspace\x1b[0m",
+      "",
+      "请从左侧添加或导入主机配置，然后点击连接。",
+    ].join("\r\n");
+  }
   return [
     "\x1b[38;2;121;208;149mVPShell workspace\x1b[0m",
     `Profile: ${host.name}  ${host.username}@${host.host}:${host.port}`,
-    host.proxyJump ? `Route: local > ${host.proxyJump} > ${host.host}` : `Route: local > ${host.host}`,
+    `Route: local > ${host.host}`,
     "",
     "This preview is offline. Choose Connect to start the system OpenSSH session.",
     "",

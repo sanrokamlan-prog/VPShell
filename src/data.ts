@@ -1,44 +1,10 @@
-import type { AppState, CommandRecipe, HostProfile, ScriptRecipe } from "./types";
+import type { AppState, ApplicationSettings, CommandRecipe, HostProfile, ScriptRecipe } from "./types";
 
-export const demoHosts: HostProfile[] = [
-  {
-    id: "host-sg-prod",
-    name: "示例 · 新加坡生产",
-    group: "示例配置",
-    host: "203.0.113.42",
-    port: 22,
-    username: "root",
-    environment: "production",
-    tags: ["核心", "海外"],
-    jumpMode: "host",
-    jumpHostId: "host-hk-gateway",
-    lastPath: "/opt/services",
-  },
-  {
-    id: "host-hk-gateway",
-    name: "示例 · 香港跳板机",
-    group: "示例配置",
-    host: "192.0.2.18",
-    port: 22,
-    username: "ops",
-    environment: "staging",
-    tags: ["跳板"],
-    jumpMode: "direct",
-    lastPath: "/home/ops",
-  },
-  {
-    id: "host-tokyo-test",
-    name: "示例 · 东京测试",
-    group: "示例配置",
-    host: "198.51.100.27",
-    port: 22022,
-    username: "ubuntu",
-    environment: "development",
-    tags: ["测试"],
-    jumpMode: "inherit",
-    lastPath: "/srv/app",
-  },
-];
+const legacyDemoHostIds = new Set([
+  "host-sg-prod",
+  "host-hk-gateway",
+  "host-tokyo-test",
+]);
 
 export const builtInScripts: ScriptRecipe[] = [
   {
@@ -383,39 +349,14 @@ export const builtInCommands: CommandRecipe[] = [
 ];
 
 export const initialState: AppState = {
-  hosts: demoHosts,
+  hosts: [],
+  deletedHosts: [],
   scripts: builtInScripts,
   commands: builtInCommands,
   sshKeys: [],
-  commandHistory: [
-    {
-      id: "history-1",
-      command: "docker compose ps",
-      hostId: "host-sg-prod",
-      path: "/opt/services",
-      createdAt: new Date(Date.now() - 1000 * 60 * 9).toISOString(),
-    },
-    {
-      id: "history-2",
-      command: "journalctl -u nginx --since '20 min ago'",
-      hostId: "host-sg-prod",
-      path: "/var/log",
-      createdAt: new Date(Date.now() - 1000 * 60 * 34).toISOString(),
-    },
-    {
-      id: "history-3",
-      command: "df -hT",
-      hostId: "host-tokyo-test",
-      path: "/srv/app",
-      createdAt: new Date(Date.now() - 1000 * 60 * 82).toISOString(),
-    },
-  ],
+  commandHistory: [],
   connectionHistory: [],
-  pathHistory: {
-    "host-sg-prod": ["/opt/services", "/var/log/nginx", "/etc/nginx", "/root"],
-    "host-hk-gateway": ["/home/ops", "/var/log", "/etc/ssh"],
-    "host-tokyo-test": ["/srv/app", "/var/log", "/home/ubuntu"],
-  },
+  pathHistory: {},
   sync: {
     enabled: false,
     provider: "webdav",
@@ -436,8 +377,46 @@ export const initialState: AppState = {
     lineHeight: 1.25,
   },
   settings: {
-    defaultJumpHostId: "host-hk-gateway",
     externalEditorPath: "",
     autoUploadEditedFiles: false,
   },
+  onboardingCompleted: false,
 };
+
+/** Remove only the three profiles shipped as legacy demos and their exact references. */
+export function migratePersistedAppState(value: AppState): AppState {
+  const sourceHosts = Array.isArray(value.hosts) ? value.hosts : [];
+  const hosts = sourceHosts
+    .filter((host) => !legacyDemoHostIds.has(host.id))
+    .map((host) => {
+      const directHost = { ...host } as HostProfile & {
+        jumpMode?: unknown;
+        jumpHostId?: unknown;
+        proxyJump?: unknown;
+      };
+      delete directHost.jumpMode;
+      delete directHost.jumpHostId;
+      delete directHost.proxyJump;
+      return directHost;
+    });
+  const pathHistory = Object.fromEntries(
+    Object.entries(value.pathHistory ?? {}).filter(([hostId]) => !legacyDemoHostIds.has(hostId)),
+  );
+  const settings = {
+    ...initialState.settings,
+    ...(value.settings ?? {}),
+  } as ApplicationSettings & { defaultJumpHostId?: unknown };
+  delete settings.defaultJumpHostId;
+
+  return {
+    ...initialState,
+    ...value,
+    hosts,
+    deletedHosts: value.deletedHosts ?? [],
+    commandHistory: (value.commandHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
+    connectionHistory: (value.connectionHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
+    pathHistory,
+    settings,
+    onboardingCompleted: value.onboardingCompleted ?? false,
+  };
+}

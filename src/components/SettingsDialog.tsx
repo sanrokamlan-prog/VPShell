@@ -6,22 +6,17 @@ import {
   FileCode2,
   FolderOpen,
   Info,
-  Network,
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import type { HostProfile } from "../types";
 import { Dialog } from "./Dialog";
 
 export interface SettingsValues {
-  defaultJumpHostId?: string;
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
 }
 
 interface SettingsDialogProps {
-  hosts: HostProfile[];
-  currentDefaultJumpHostId?: string;
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
   onSave: (settings: SettingsValues) => void | Promise<void>;
@@ -43,8 +38,6 @@ function formatBytes(bytes: number) {
 }
 
 export function SettingsDialog({
-  hosts,
-  currentDefaultJumpHostId,
   externalEditorPath,
   autoUploadEditedFiles,
   onSave,
@@ -52,11 +45,6 @@ export function SettingsDialog({
   showToast,
 }: SettingsDialogProps) {
   const desktopRuntime = isDesktopRuntime();
-  const [defaultJumpHostId, setDefaultJumpHostId] = useState(
-    currentDefaultJumpHostId && hosts.some((host) => host.id === currentDefaultJumpHostId)
-      ? currentDefaultJumpHostId
-      : "",
-  );
   const [editorPath, setEditorPath] = useState(externalEditorPath);
   const [autoUpload, setAutoUpload] = useState(autoUploadEditedFiles);
   const [saving, setSaving] = useState(false);
@@ -110,7 +98,6 @@ export function SettingsDialog({
     setSaving(true);
     try {
       await onSave({
-        defaultJumpHostId: defaultJumpHostId || undefined,
         externalEditorPath: editorPath.trim(),
         autoUploadEditedFiles: autoUpload,
       });
@@ -201,27 +188,6 @@ export function SettingsDialog({
       )}
     >
       <div className="settings-dialog-content">
-        <section className="settings-section" aria-labelledby="settings-jump-title">
-          <div className="settings-section-heading">
-            <Network size={17} />
-            <div><h3 id="settings-jump-title">默认 SSH 跳板机</h3><p>没有单独规则的主机会通过这里选择的入口连接。</p></div>
-          </div>
-          <div className="form-grid">
-            <label className="field full">
-              <span>默认连接路径</span>
-              <select value={defaultJumpHostId} onChange={(event) => setDefaultJumpHostId(event.target.value)}>
-                <option value="">不使用默认跳板机（直连）</option>
-                {hosts.map((host) => (
-                  <option key={host.id} value={host.id}>
-                    {host.name}（{host.username}@{host.host}:{host.port}）
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <p className="settings-note"><ShieldCheck size={14} /> 跳板机自身始终直连。自动认证使用 SSH 密钥或 Agent，不通过终端提示猜测并注入密码。</p>
-        </section>
-
         <section className="settings-section" aria-labelledby="settings-editor-title">
           <div className="settings-section-heading">
             <FileCode2 size={17} />

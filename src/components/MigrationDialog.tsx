@@ -100,7 +100,7 @@ export function MigrationDialog({ onClose, onImported, showToast }: MigrationDia
       <label className="credential-option">
         <input type="checkbox" checked={includePasswords} onChange={(event) => setIncludePasswords(event.target.checked)} />
         <LockKeyhole size={16} />
-        <span><strong>同时迁移已保存密码</strong><small>导入到系统凭据管理器；连接后由你点击填入。</small></span>
+        <span><strong>同时迁移已保存密码</strong><small>导入系统凭据管理器；直连终端、负载采样和 SFTP 会自动复用。</small></span>
       </label>
 
       {lastResult ? (

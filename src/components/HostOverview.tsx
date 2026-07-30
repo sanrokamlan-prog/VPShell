@@ -6,7 +6,6 @@ import {
   HardDrive,
   MemoryStick,
   Network,
-  Route,
   Server,
   UserRound,
 } from "lucide-react";
@@ -42,7 +41,6 @@ export interface HostOverviewCurrentIdentity {
 export interface HostOverviewProps {
   host: HostProfile;
   state: ConnectionState;
-  jumpLabels: string[];
   metrics?: HostOverviewMetrics;
   currentIdentity?: HostOverviewCurrentIdentity;
   loading?: boolean;
@@ -146,7 +144,6 @@ function MetricRow({ icon, label, percent }: { icon: ReactNode; label: string; p
 export function HostOverview({
   host,
   state,
-  jumpLabels,
   metrics,
   currentIdentity,
   loading = false,
@@ -230,11 +227,6 @@ export function HostOverview({
         <OverviewRow icon={<Network size={13} />} label="端口">
           {host.port}
         </OverviewRow>
-        {jumpLabels.length > 0 ? (
-          <OverviewRow icon={<Route size={13} />} label="跳板链路">
-            <span title={jumpLabels.join(" → ")}>{jumpLabels.join(" → ")}</span>
-          </OverviewRow>
-        ) : null}
       </div>
 
       <div aria-label="主机资源指标" style={{ display: "grid", gap: 2, paddingTop: 6, borderTop: "1px solid var(--border, #d8dee4)" }}>

@@ -1,6 +1,6 @@
 [package]
 name = "vpshell"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 description = "A fast cross-platform SSH operations workspace"
 authors = ["sanrokamlan-prog"]
 edition = "2024"

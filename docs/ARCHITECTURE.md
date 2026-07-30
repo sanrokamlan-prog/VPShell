@@ -22,13 +22,13 @@ v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 | --- | --- | --- |
 | 桌面框架 | Tauri 2、React 19、TypeScript、Vite；Windows/macOS/Linux CI；首个原生 runner Alpha Release 已发布 | 安装与升级仍需扩大实机覆盖；Windows 无 Authenticode，macOS Alpha 使用 ad-hoc 签名且未公证 |
 | 终端 | xterm.js，多标签会话，输入输出、窗口大小调整、断开连接，单终端 250,000 行 scrollback | scrollback 不是持久化的“无限历史” |
-| SSH | Rust 后端通过 `portable-pty` 启动系统 `ssh`；支持端口、`-J` ProxyJump、`-i` 私钥路径及 keepalive | 依赖系统 `ssh` 在 PATH 中；主机密钥提示由 OpenSSH 处理；没有原生端口转发和结构化认证状态 |
-| 主机与会话 | 主机分组、环境标签、最近连接、会话切换、配置路线；非交互 OpenSSH 采集 Linux `/proc` 概况 | 手动嵌套 `ssh` 后不会自动识别新主机；监控不弹密码提示且仅支持 Linux |
+| SSH | Rust 后端通过 `portable-pty` 启动系统 `ssh`；支持端口、`-i` 私钥路径、keepalive 及直连 AskPass | 当前只支持直连；依赖系统 `ssh` 在 PATH 中；主机密钥提示由 OpenSSH 处理；没有原生端口转发和结构化认证状态 |
+| 主机与会话 | 主机分组、环境标签、最近连接、会话切换；OpenSSH 采集 Linux `/proc` 概况 | 手动嵌套 `ssh` 后不会自动识别新主机；监控仅支持 Linux |
 | 多终端输入 | 命令栏可选择多个会话并并发发送同一条命令 | 不是完整的原始按键同步；尚无密码提示隔离、生产确认、就绪状态校验和危险命令保护 |
 | 历史 | 命令、SFTP 路径和连接尝试历史写入浏览器 `localStorage`；界面可搜索和快速切换 | SSH 进程启动不代表认证成功；未使用 SQLite；终端内 `cd` 不会由 Shell 自动上报；数据未加密 |
 | 命令库 | 22 项本地命令/工具；中文意图匹配、参数表单、POSIX 参数引用、风险与执行前预览 | 不是自然语言模型；自建命令编辑、命令版本和 secret 参数仍未实现 |
 | 脚本中心 | 内置脚本资料、风险标签、来源链接、复制/加入命令栏；可添加自建脚本 | 没有哈希锁定、签名、版本更新或安全执行沙箱 |
-| 凭据与密钥 | FinalShell 密码只写入 OS keyring；生成 Ed25519/RSA4096 OpenSSH 密钥；可安装所选公钥；直连 SFTP 可读取凭据引用 | 凭据尚不能同步；没有凭据编辑/删除界面；系统 OpenSSH 终端不自动注入密码 |
+| 凭据与密钥 | FinalShell 密码只写入 OS keyring；直连终端、采样和 SFTP 可使用凭据引用；生成 Ed25519/RSA4096 OpenSSH 密钥；可安装所选公钥；删除主机进入 30 天回收站，永久删除或到期时清理未共享凭据 | 凭据尚不能同步或单独编辑；跳板逐跳凭据尚未实现 |
 | 网络诊断 | 本机 traceroute、有限额 HTTP 下载测速、iperf3 UDP 正反向测速 | iperf3 需用户自行安装并启动服务端；没有后台定时采样或路线自动选择 |
 | 终端背景 | 支持本机 PNG/JPEG/WebP 和 URL，可调可见度 | 本机图以 Data URL 存入 `localStorage`；URL 由 WebView 直接加载，尚未实现安全下载、重编码和缓存 |
 | 文件面板 | 真实 SFTP 列表、递归上传下载、拖放、进度、暂存校验与原子提交；`tar + zstd` 打包及缺少远端工具时的 SFTP 回退 | 打包或传输过程失败不会自动重试 SFTP；暂无取消、断点续传和持久队列；SFTP 不支持 ProxyJump |
@@ -81,7 +81,7 @@ WebView 只负责展示和用户交互。网络、文件系统、密钥、远程
 xterm.js <-> Tauri IPC <-> portable PTY <-> system ssh <-> target
 ```
 
-它的价值是兼容用户已经工作的 OpenSSH 配置、密钥格式、agent、ProxyJump 和主机密钥策略。当前实现只组装少量显式参数，后续需要增加：
+它的价值是兼容用户已经工作的 OpenSSH 配置、密钥格式、agent 和主机密钥策略。当前 Alpha 只组装直连参数；ProxyJump 在逐跳凭据模型完成前不对用户开放。后续需要增加：
 
 - 可选择的配置文件和 profile 解析结果预览；
 - 密码、私钥口令和交互式认证的安全输入通道；
@@ -120,7 +120,7 @@ open_forward(session_id, policy) -> lease
 
 主机配置只保存 `credential_ref`，不直接保存密码或私钥正文。目标实现使用 Windows Credential Manager、macOS Keychain 或 Linux Secret Service 保存短凭据和数据密钥；私钥保留为用户选择的加密 key 文件，或放入独立加密 vault。敏感内存使用可清零容器。
 
-v0.1.0 可把用户选择迁移的 FinalShell 密码和可选私钥口令保存到 OS keyring。React 侧只持久化随机 `credential_ref`；密码明文不作为 IPC 返回值。私钥正文只写入用户选择的 OpenSSH 文件，不进入 `localStorage`。
+v0.1.0 可把用户选择迁移的 FinalShell 密码和可选私钥口令保存到 OS keyring。React 侧只持久化随机 `credential_ref`；直连 OpenSSH AskPass、采样和 SFTP 在 Rust 边界内按当前主机读取，密码明文不作为 IPC 返回值。私钥正文只写入用户选择的 OpenSSH 文件，不进入 `localStorage`。
 
 ## 5. 主机身份链与 Shell Integration
 
@@ -201,7 +201,7 @@ v0.1.0 已有“选中会话后发送一条命令”的基础实现。产品化�
 - 取消后清理临时文件，清理失败要显式报告；
 - 后续再增加断点续传、差量传输和队列持久化。
 
-v0.1.0 已有真实 SFTP 和打包后端；取消、断点续传、任务持久化及跳板后的 SFTP 仍属于后续工作。
+v0.1.0 已有真实直连 SFTP 和打包后端；取消、断点续传、任务持久化及带独立逐跳凭据的传输仍属于后续工作。
 
 ## 8. 历史与本地数据模型
 
@@ -279,7 +279,7 @@ SSH 参数调优、压缩或连接复用不能等同于海外线路加速。真�
 
 中继只能承载到目标的 SSH 密文字节，不能终止最终 SSH、读取凭据或替代目标主机密钥验证。客户端持续测量 DNS、TCP/隧道建立、SSH 握手 RTT、丢包/重传和吞吐，按策略选择路线；自动切换必须显示原因，并允许锁定直连或指定中继。
 
-没有部署和实测中继时，界面只能称“直连”“代理”“跳板”或“连接优化”，不能宣称“海外智能加速”。v0.1.0 当前仅支持系统 OpenSSH 的直连和 `-J`，顶部“直连优先”是静态状态文本，没有测速选路或加速服务。
+没有部署和实测中继时，界面只能称“直连”“代理”“跳板”或“连接优化”，不能宣称“海外智能加速”。v0.1.0 当前只支持系统 OpenSSH 直连，没有 ProxyJump、测速选路或加速服务。
 
 ## 12. 跨模块安全基线
 

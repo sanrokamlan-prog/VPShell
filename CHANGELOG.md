@@ -4,6 +4,31 @@ All notable changes to VPShell are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/). Pre-release versions may change local data structures before the first stable release.
 
+## [0.1.0-alpha.2] - 2026-07-30
+
+### Fixed
+
+- FinalShell passwords saved during import are now supplied to direct OpenSSH terminal sessions through a restricted AskPass helper backed by the OS keyring.
+- Direct Linux host sampling reuses saved passwords or private-key passphrases and no longer opens a visible `ssh.exe` console window on Windows.
+- SFTP aligns its negotiated host-key algorithm with matching OpenSSH `known_hosts` entries while continuing to reject unknown or changed keys.
+- SFTP also attempts keyboard-interactive authentication for servers that route password login through PAM.
+- Deleted hosts, session metadata and histories now enter a 30-day recycle bin; users can restore them or permanently remove the record and unshared OS-keyring credential.
+- The legacy sample profiles and their seeded history are removed from both fresh and previously persisted workspaces.
+- New and imported hosts always default to direct connections.
+
+### Changed
+
+- ProxyJump configuration has been removed from the Alpha UI. Per-hop automatic credentials must be designed and tested before jump-host support returns.
+- Empty workspaces now show explicit add/import actions instead of a simulated terminal profile.
+- First launch now opens a five-step Chinese usage guide with button-to-function mappings; the help button reopens it at any time.
+
+### Known limitations
+
+- SSH, Linux metrics, SFTP, packaged transfer and external editing support direct targets only.
+- The OpenSSH compatibility engine still cannot report structured authentication success, so a failed attempt may enter recent history.
+- Transfers do not yet support cancellation, pause/resume, persistent queues or interrupted-transfer resume.
+- Sync providers and end-to-end encryption remain roadmap work.
+
 ## [0.1.0-alpha.1] - 2026-07-29
 
 ### Added
@@ -46,4 +71,5 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - The system OpenSSH process does not expose structured authentication success, so a failed authentication attempt can still appear in recent connections.
 - Private-key files are written only to the user-selected local path; portable encrypted export is not implemented.
 
+[0.1.0-alpha.2]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.1

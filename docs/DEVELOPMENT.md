@@ -66,7 +66,7 @@ transfer-finished       -> { taskId, outcome, warnings, cleanupStatus }
 - 主机资料只保存 `credentialRef`，短凭据进入 Windows Credential Manager、macOS Keychain 或 Linux Secret Service。
 - 私钥默认保留在用户选择的 OpenSSH 文件中；生成时默认加密，口令不写日志、`localStorage`、命令历史或错误报告。
 - Rust 读取秘密后使用可清零内存，并尽量缩短生命周期；不得克隆到长期任务状态或通过终端输出事件回显。
-- 当前系统 OpenSSH 终端不自动填入钥匙串密码。未来若实现，必须由用户在明确的当前会话中触发；广播层永远不能复制密码输入，生产主机也不能继承其他标签的秘密状态。
+- 当前直连 OpenSSH 会话可通过受限 AskPass 助手读取当前主机的钥匙串凭据；未知提示、主机密钥确认和广播层永远不能取得密码。多跳路线恢复前必须为每一跳建立独立凭据绑定，禁止把目标凭据猜测性地发送给跳板提示。
 - 凭据同步默认关闭。未来凭据 vault 使用独立密钥和逐设备授权；同步 provider 凭据不能依赖同一个尚未解锁的远端仓库自举。
 - 测试使用公开固定样例或临时生成的凭据，禁止把真实 IP、用户名、密码、私钥、Token 和生产日志提交到仓库、fixture 或截图。
 

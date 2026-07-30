@@ -4,12 +4,16 @@ use std::{
     io::{self, Read, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Component, Path, PathBuf},
+    process::Command,
     time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use ssh2::{CheckResult, ExtendedData, FileStat, KnownHostFileKind, Session, Sftp};
+use ssh2::{
+    CheckResult, ExtendedData, FileStat, KeyboardInteractivePrompt, KnownHostFileKind,
+    MethodType, Prompt, Session, Sftp,
+};
 use tauri::{AppHandle, Emitter};
 use zeroize::Zeroizing;
 
@@ -36,7 +40,6 @@ pub(crate) struct ConnectionSpec {
     pub(crate) credential_ref: Option<String>,
     pub(crate) identity_file: Option<String>,
     pub(crate) identity_passphrase_ref: Option<String>,
-    pub(crate) proxy_jump: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -453,13 +456,6 @@ pub(crate) fn validate_connection(connection: &ConnectionSpec) -> Result<(), Str
     {
         return Err("SFTP 用户名格式无效".to_string());
     }
-    if connection
-        .proxy_jump
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Err("SFTP 当前仅支持直连主机，ProxyJump 将在后续版本支持".to_string());
-    }
     validate_optional_reference(connection.credential_ref.as_deref(), "ssh-")?;
     validate_optional_reference(connection.identity_passphrase_ref.as_deref(), "key-")?;
     if connection.identity_passphrase_ref.is_some() && connection.identity_file.is_none() {
@@ -479,7 +475,10 @@ pub(crate) fn validate_connection(connection: &ConnectionSpec) -> Result<(), Str
     Ok(())
 }
 
-fn validate_optional_reference(reference: Option<&str>, prefix: &str) -> Result<(), String> {
+pub(crate) fn validate_optional_reference(
+    reference: Option<&str>,
+    prefix: &str,
+) -> Result<(), String> {
     if let Some(reference) = reference {
         if reference.len() > 128
             || !reference.starts_with(prefix)
@@ -591,6 +590,15 @@ pub(crate) fn connect(connection: &ConnectionSpec) -> Result<Session, String> {
         .map_err(|error| format!("无法设置 SFTP 写入超时: {error}"))?;
 
     let mut session = Session::new().map_err(|_| "无法初始化 SSH 会话".to_string())?;
+    if let Some(preferences) = known_host_key_preferences(
+        &connection.host,
+        connection.port,
+        &known_hosts_files(),
+    ) {
+        session
+            .method_pref(MethodType::HostKey, &preferences)
+            .map_err(|_| "无法应用 known_hosts 主机密钥算法偏好".to_string())?;
+    }
     session.set_tcp_stream(tcp);
     session.set_timeout(IO_TIMEOUT.as_millis() as u32);
     session
@@ -622,18 +630,111 @@ fn verify_known_host(session: &Session, host: &str, port: u16) -> Result<(), Str
             "未找到现有 OpenSSH known_hosts；请先用系统 ssh 核验并保存主机指纹".to_string(),
         );
     }
-    let (key, _) = session
+    let (key, key_type) = session
         .host_key()
         .ok_or_else(|| "SSH 服务器未提供主机密钥".to_string())?;
     match known_hosts.check_port(host, port, key) {
         CheckResult::Match => Ok(()),
-        CheckResult::Mismatch => Err("SSH 主机密钥与 known_hosts 不匹配，已拒绝连接".to_string()),
+        CheckResult::Mismatch => Err(format!(
+            "SSH 主机密钥与 known_hosts 不匹配，已拒绝连接（协商算法: {key_type:?}）"
+        )),
         CheckResult::NotFound => {
             Err("SSH 主机不在 known_hosts 中；请先用系统 ssh 核验并保存主机指纹".to_string())
         }
         CheckResult::Failure => Err("SSH 主机密钥校验失败，已拒绝连接".to_string()),
     }
 }
+
+fn known_host_key_preferences(host: &str, port: u16, files: &[PathBuf]) -> Option<String> {
+    let normalized_host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    let lookup = if port == 22 {
+        normalized_host.to_string()
+    } else {
+        format!("[{normalized_host}]:{port}")
+    };
+    let mut key_types: HashSet<String> = HashSet::new();
+
+    for path in files.iter().filter(|path| path.is_file()) {
+        let Ok(metadata) = fs::metadata(path) else {
+            continue;
+        };
+        if metadata.len() > MAX_KNOWN_HOSTS_SIZE {
+            continue;
+        }
+        let lookups = if port == 22 {
+            vec![lookup.clone(), format!("[{normalized_host}]:22")]
+        } else {
+            vec![lookup.clone()]
+        };
+        for lookup in lookups {
+            let mut command = Command::new("ssh-keygen");
+            command.arg("-F").arg(&lookup).arg("-f").arg(path);
+            hide_console_window(&mut command);
+            let Ok(output) = command.output() else {
+                continue;
+            };
+            if output.status.success() && output.stdout.len() <= MAX_KNOWN_HOSTS_SIZE as usize {
+                collect_known_host_key_types(
+                    &String::from_utf8_lossy(&output.stdout),
+                    &mut key_types,
+                );
+            }
+        }
+    }
+
+    let mut preferences = Vec::new();
+    for key_type in [
+        "ssh-ed25519",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+    ] {
+        if key_types.contains(key_type) {
+            preferences.push(key_type);
+        }
+    }
+    if key_types.contains("ssh-rsa") {
+        preferences.extend(["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]);
+    }
+    (!preferences.is_empty()).then(|| preferences.join(","))
+}
+
+fn collect_known_host_key_types(output: &str, key_types: &mut HashSet<String>) {
+    for line in output.lines().filter(|line| !line.starts_with('#')) {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let key_type = if fields.first().is_some_and(|field| field.starts_with('@')) {
+            fields.get(2)
+        } else {
+            fields.get(1)
+        };
+        if let Some(key_type) = key_type
+            && matches!(
+                *key_type,
+                "ssh-ed25519"
+                    | "ecdsa-sha2-nistp256"
+                    | "ecdsa-sha2-nistp384"
+                    | "ecdsa-sha2-nistp521"
+                    | "ssh-rsa"
+            )
+        {
+            key_types.insert((*key_type).to_string());
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_console_window(_command: &mut Command) {}
 
 fn known_hosts_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -677,6 +778,17 @@ fn authenticate(session: &Session, connection: &ConnectionSpec) -> Result<(), St
         if result.is_ok() && session.authenticated() {
             return Ok(());
         }
+        let mut prompt = StoredPasswordPrompt {
+            password: &password,
+            used: false,
+        };
+        let result = session.userauth_keyboard_interactive(
+            connection.username.trim(),
+            &mut prompt,
+        );
+        if result.is_ok() && session.authenticated() {
+            return Ok(());
+        }
     }
 
     if session.userauth_agent(connection.username.trim()).is_ok() && session.authenticated() {
@@ -686,7 +798,36 @@ fn authenticate(session: &Session, connection: &ConnectionSpec) -> Result<(), St
     Err("SFTP 身份验证失败；请检查私钥、凭据或 ssh-agent".to_string())
 }
 
-fn read_secret(reference: &str, missing_message: &str) -> Result<Zeroizing<String>, String> {
+struct StoredPasswordPrompt<'a> {
+    password: &'a str,
+    used: bool,
+}
+
+impl KeyboardInteractivePrompt for StoredPasswordPrompt<'_> {
+    fn prompt<'a>(
+        &mut self,
+        _username: &str,
+        _instructions: &str,
+        prompts: &[Prompt<'a>],
+    ) -> Vec<String> {
+        prompts
+            .iter()
+            .map(|prompt| {
+                if !self.used && !prompt.echo {
+                    self.used = true;
+                    self.password.to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .collect()
+    }
+}
+
+pub(crate) fn read_secret(
+    reference: &str,
+    missing_message: &str,
+) -> Result<Zeroizing<String>, String> {
     let entry = keyring::Entry::new(CREDENTIAL_SERVICE, reference)
         .map_err(|_| "无法访问系统凭据管理器".to_string())?;
     if let Ok(secret) = entry.get_password() {
@@ -1961,16 +2102,7 @@ mod tests {
             credential_ref: None,
             identity_file: None,
             identity_passphrase_ref: None,
-            proxy_jump: None,
         }
-    }
-
-    #[test]
-    fn rejects_proxy_jump_for_sftp() {
-        let mut connection = valid_connection();
-        connection.proxy_jump = Some("jump.example.com".to_string());
-        let error = validate_connection(&connection).expect_err("ProxyJump must be rejected");
-        assert!(error.contains("ProxyJump"));
     }
 
     #[test]
@@ -1994,6 +2126,19 @@ mod tests {
         assert!(validate_transfer_id("").is_err());
         assert!(validate_transfer_id("contains space").is_err());
         assert!(validate_transfer_id("../escape").is_err());
+    }
+
+    #[test]
+    fn parses_only_known_host_key_fields() {
+        let mut key_types = HashSet::new();
+        collect_known_host_key_types(
+            "# Host example found: line 1\nexample ssh-ed25519 AAAA comment ssh-rsa\n\
+             @cert-authority *.example ecdsa-sha2-nistp256 AAAA\n",
+            &mut key_types,
+        );
+        assert!(key_types.contains("ssh-ed25519"));
+        assert!(key_types.contains("ecdsa-sha2-nistp256"));
+        assert!(!key_types.contains("ssh-rsa"));
     }
 
     #[test]

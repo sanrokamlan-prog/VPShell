@@ -30,7 +30,6 @@ export interface SshConnectionSpec {
   credentialRef?: string;
   identityFile?: string;
   identityPassphraseRef?: string;
-  proxyJump?: string;
 }
 
 type RemoteEntryKind = "file" | "directory" | "symlink";
@@ -267,7 +266,6 @@ export function FileTransferPanel({
     connection.credentialRef ?? "",
     connection.identityFile ?? "",
     connection.identityPassphraseRef ?? "",
-    connection.proxyJump ?? "",
   ].join("\u0000");
 
   const sortedEntries = useMemo(() => [...entries].sort((left, right) => {

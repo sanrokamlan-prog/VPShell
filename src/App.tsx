@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock3,
+  CircleHelp,
   Cloud,
   CloudOff,
   Columns2,
@@ -33,31 +34,33 @@ import {
   Plus,
   RadioTower,
   RefreshCw,
+  RotateCcw,
   Route,
   Search,
   Server,
   Settings2,
   ShieldCheck,
   SquareTerminal,
+  Trash2,
   Type,
   Upload,
   Wifi,
   WifiOff,
   X,
 } from "lucide-react";
-import { initialState } from "./data";
+import { initialState, migratePersistedAppState } from "./data";
 import { Dialog } from "./components/Dialog";
 import { FileTransferPanel } from "./components/FileTransferPanel";
 import { HostOverview } from "./components/HostOverview";
 import { KeyManagerDialog } from "./components/KeyManagerDialog";
 import { MigrationDialog, type FinalShellImportResult } from "./components/MigrationDialog";
 import { NetworkToolsDialog, type NetworkToolMode } from "./components/NetworkToolsDialog";
+import { OnboardingDialog } from "./components/OnboardingDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TerminalView } from "./components/TerminalView";
 import { usePersistedState } from "./hooks/usePersistedState";
 import { loadStoredCustomFont, saveAndRegisterCustomFont } from "./fontStorage";
 import brandMark from "./assets/vpshell.svg";
-import { resolveJumpRoute } from "./jumpHosts";
 import type {
   AppState,
   CommandRecipe,
@@ -70,7 +73,9 @@ import type {
 import "./App.css";
 
 type SidebarView = "hosts" | "commands" | "scripts" | "history";
-type DialogKind = "host" | "sync" | "wallpaper" | "settings" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | null;
+type DialogKind = "host" | "sync" | "wallpaper" | "settings" | "guide" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | null;
+
+const RECYCLE_BIN_DAYS = 30;
 
 interface IntentSuggestion {
   kind: "command" | "script";
@@ -133,6 +138,18 @@ function makeSession(host: HostProfile): TerminalSession {
   };
 }
 
+const emptyHost: HostProfile = {
+  id: "__vpshell-empty-host__",
+  name: "新标签",
+  group: "",
+  host: "",
+  port: 22,
+  username: "root",
+  environment: "development",
+  tags: [],
+  lastPath: "~",
+};
+
 function isDesktopRuntime() {
   return "__TAURI_INTERNALS__" in window;
 }
@@ -176,12 +193,13 @@ function App() {
     "vpshell-state-v1",
     initialState,
     ["opsshell-state-v6"],
+    migratePersistedAppState,
   );
-  const [sessions, setSessions] = useState<TerminalSession[]>([makeSession(appState.hosts[0])]);
+  const [sessions, setSessions] = useState<TerminalSession[]>([makeSession(appState.hosts[0] ?? emptyHost)]);
   const [activeSessionId, setActiveSessionId] = useState(sessions[0].id);
   const [sidebarView, setSidebarView] = useState<SidebarView>("hosts");
   const [searchText, setSearchText] = useState("");
-  const [dialog, setDialog] = useState<DialogKind>(null);
+  const [dialog, setDialog] = useState<DialogKind>(appState.onboardingCompleted ? null : "guide");
   const [selectedScript, setSelectedScript] = useState<ScriptRecipe | null>(null);
   const [selectedCommand, setSelectedCommand] = useState<CommandRecipe | null>(null);
   const [commandParameters, setCommandParameters] = useState<Record<string, string>>({});
@@ -198,18 +216,41 @@ function App() {
   const [hostMetrics, setHostMetrics] = useState<Record<string, HostMetricsState>>({});
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
-  const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0];
-  const jumpResolution = useMemo(() => {
-    try {
-      return { route: resolveJumpRoute(activeHost, appState.hosts, appState.settings), error: undefined };
-    } catch (error) {
-      return { route: { proxyJump: undefined, hops: [] }, error: String(error) };
-    }
-  }, [activeHost, appState.hosts, appState.settings]);
-  const terminalHost = useMemo(
-    () => ({ ...activeHost, proxyJump: jumpResolution.route.proxyJump }),
-    [activeHost, jumpResolution.route.proxyJump],
-  );
+  const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
+  const hasActiveHost = appState.hosts.some((host) => host.id === activeHost.id);
+  const activeIdentityPassphraseRef = appState.sshKeys.find(
+    (key) => key.privateKeyPath === activeHost.identityFile,
+  )?.passphraseRef;
+  const deletedHosts = appState.deletedHosts ?? [];
+
+  useEffect(() => {
+    const now = Date.now();
+    const expired = deletedHosts.filter((item) => Date.parse(item.expiresAt) <= now);
+    if (expired.length === 0) return;
+
+    void (async () => {
+      if (isDesktopRuntime()) {
+        const retainedReferences = new Set([
+          ...appState.hosts.map((host) => host.credentialRef),
+          ...deletedHosts
+            .filter((item) => Date.parse(item.expiresAt) > now)
+            .map((item) => item.host.credentialRef),
+        ].filter((reference): reference is string => Boolean(reference)));
+        await Promise.all(expired.map(async (item) => {
+          const reference = item.host.credentialRef;
+          if (reference && !retainedReferences.has(reference)) {
+            await invoke("delete_credential", { reference }).catch(() => undefined);
+          }
+        }));
+      }
+      setAppState((current) => ({
+        ...current,
+        deletedHosts: (current.deletedHosts ?? []).filter((item) => Date.parse(item.expiresAt) > Date.now()),
+      }));
+    })();
+  // Expiry is evaluated once for the persisted snapshot loaded at startup.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const visibleHosts = useMemo(() => {
     const query = searchText.trim().toLocaleLowerCase();
@@ -273,7 +314,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isDesktopRuntime() || activeSession.state !== "connected" || jumpResolution.error) return;
+    if (!isDesktopRuntime() || activeSession.state !== "connected") return;
     let disposed = false;
     let timer: number | undefined;
 
@@ -288,8 +329,9 @@ function App() {
             host: activeHost.host,
             port: activeHost.port,
             username: activeHost.username,
-            proxyJump: jumpResolution.route.proxyJump,
             identityFile: activeHost.identityFile,
+            credentialRef: activeHost.credentialRef,
+            identityPassphraseRef: activeIdentityPassphraseRef,
           },
         });
         if (!disposed) {
@@ -315,7 +357,7 @@ function App() {
       disposed = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [activeHost.host, activeHost.identityFile, activeHost.port, activeHost.username, activeSession.id, activeSession.state, jumpResolution.error, jumpResolution.route.proxyJump]);
+  }, [activeHost.credentialRef, activeHost.host, activeHost.identityFile, activeHost.port, activeHost.username, activeIdentityPassphraseRef, activeSession.id, activeSession.state]);
 
   useEffect(() => {
     void loadStoredCustomFont().then((family) => { if (family) setFontRevision((value) => value + 1); }).catch(() => undefined);
@@ -337,7 +379,11 @@ function App() {
       return;
     }
     const session = makeSession(host);
-    setSessions((current) => [...current, session]);
+    setSessions((current) => (
+      current.length === 1 && current[0].hostId === emptyHost.id
+        ? [session]
+        : [...current, session]
+    ));
     setActiveSessionId(session.id);
   }
 
@@ -356,12 +402,13 @@ function App() {
   }
 
   async function connectActiveSession() {
-    if (!isDesktopRuntime()) {
-      showToast("浏览器预览不启动 SSH；桌面应用中可直接连接");
+    if (!hasActiveHost) {
+      setDialog("host");
+      showToast("请先添加或导入主机配置");
       return;
     }
-    if (jumpResolution.error) {
-      showToast(jumpResolution.error);
+    if (!isDesktopRuntime()) {
+      showToast("浏览器预览不启动 SSH；桌面应用中可直接连接");
       return;
     }
     updateSession(activeSession.id, { state: "connecting" });
@@ -372,8 +419,9 @@ function App() {
           host: activeHost.host,
           port: activeHost.port,
           username: activeHost.username,
-          proxyJump: jumpResolution.route.proxyJump,
           identityFile: activeHost.identityFile,
+          credentialRef: activeHost.credentialRef,
+          identityPassphraseRef: activeIdentityPassphraseRef,
           cols: 120,
           rows: 32,
         },
@@ -500,9 +548,6 @@ function App() {
       port: Number(data.get("port") || 22),
       username: String(data.get("username") || "root"),
       environment: String(data.get("environment") || "development") as EnvironmentKind,
-      jumpMode: String(data.get("jumpMode") || "inherit") as HostProfile["jumpMode"],
-      jumpHostId: String(data.get("jumpHostId") || "") || undefined,
-      proxyJump: String(data.get("proxyJump") || "") || undefined,
       identityFile: String(data.get("identityFile") || "") || undefined,
       tags: [],
       lastPath: "~",
@@ -510,6 +555,112 @@ function App() {
     setAppState((current) => ({ ...current, hosts: [...current.hosts, host] }));
     setDialog(null);
     openHost(host);
+  }
+
+  async function deleteHost(host: HostProfile) {
+    const confirmed = window.confirm(
+      `确定将主机“${host.name}”（${host.username}@${host.host}:${host.port}）移到回收站吗？\n\n相关连接记录和命令/路径历史将一并保留 30 天，可在回收站恢复。`,
+    );
+    if (!confirmed) return;
+
+    const hostSessions = sessions.filter((session) => session.hostId === host.id);
+    if (isDesktopRuntime()) {
+      await Promise.all(hostSessions
+        .filter((session) => session.state === "connected" || session.state === "connecting")
+        .map((session) => invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined)));
+    }
+
+    const remainingHosts = appState.hosts.filter((item) => item.id !== host.id);
+    const nextSessions = sessions.filter((session) => session.hostId !== host.id);
+    if (nextSessions.length === 0) nextSessions.push(makeSession(remainingHosts[0] ?? emptyHost));
+    setSessions(nextSessions);
+    setActiveSessionId((current) => (
+      nextSessions.some((session) => session.id === current) ? current : nextSessions[0].id
+    ));
+    setBroadcastTargets((current) => current.filter((sessionId) => !hostSessions.some((session) => session.id === sessionId)));
+    setHostMetrics((current) => Object.fromEntries(
+      Object.entries(current).filter(([sessionId]) => !hostSessions.some((session) => session.id === sessionId)),
+    ));
+    setAppState((current) => {
+      const pathHistory = { ...current.pathHistory };
+      const deletedAt = new Date();
+      const expiresAt = new Date(deletedAt.getTime() + RECYCLE_BIN_DAYS * 24 * 60 * 60 * 1000);
+      const deletedItem = {
+        id: crypto.randomUUID(),
+        host,
+        deletedAt: deletedAt.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+        commandHistory: current.commandHistory.filter((item) => item.hostId === host.id),
+        connectionHistory: (current.connectionHistory ?? []).filter((item) => item.hostId === host.id),
+        pathHistory: pathHistory[host.id] ?? [],
+      };
+      delete pathHistory[host.id];
+      return {
+        ...current,
+        hosts: current.hosts.filter((item) => item.id !== host.id),
+        deletedHosts: [deletedItem, ...(current.deletedHosts ?? [])],
+        commandHistory: current.commandHistory.filter((item) => item.hostId !== host.id),
+        connectionHistory: (current.connectionHistory ?? []).filter((item) => item.hostId !== host.id),
+        pathHistory,
+        settings: current.settings,
+      };
+    });
+    showToast(`已将 ${host.name} 移到回收站，保留 30 天`);
+  }
+
+  function restoreDeletedHost(itemId: string) {
+    const deleted = deletedHosts.find((item) => item.id === itemId);
+    if (!deleted) return;
+    const restoredHost = appState.hosts.some((host) => host.id === deleted.host.id)
+      ? { ...deleted.host, id: crypto.randomUUID() }
+      : deleted.host;
+    setAppState((current) => ({
+      ...current,
+      hosts: [...current.hosts, restoredHost],
+      deletedHosts: (current.deletedHosts ?? []).filter((item) => item.id !== itemId),
+      commandHistory: [
+        ...deleted.commandHistory.map((item) => ({ ...item, hostId: restoredHost.id })),
+        ...current.commandHistory,
+      ],
+      connectionHistory: [
+        ...deleted.connectionHistory.map((item) => ({ ...item, hostId: restoredHost.id })),
+        ...(current.connectionHistory ?? []),
+      ],
+      pathHistory: {
+        ...current.pathHistory,
+        [restoredHost.id]: deleted.pathHistory,
+      },
+    }));
+    openHost(restoredHost);
+    showToast(`已恢复主机 ${restoredHost.name}`);
+  }
+
+  async function permanentlyDeleteHost(itemId: string) {
+    const deleted = deletedHosts.find((item) => item.id === itemId);
+    if (!deleted || !window.confirm(`永久删除“${deleted.host.name}”吗？此操作无法恢复。`)) return;
+    let credentialError: string | undefined;
+    const reference = deleted.host.credentialRef;
+    const referencedElsewhere = reference && (
+      appState.hosts.some((host) => host.credentialRef === reference)
+      || deletedHosts.some((item) => item.id !== itemId && item.host.credentialRef === reference)
+    );
+    if (reference && !referencedElsewhere && isDesktopRuntime()) {
+      try {
+        await invoke("delete_credential", { reference });
+      } catch (error) {
+        credentialError = String(error);
+      }
+    }
+    setAppState((current) => ({
+      ...current,
+      deletedHosts: (current.deletedHosts ?? []).filter((item) => item.id !== itemId),
+    }));
+    showToast(credentialError ? `记录已永久删除；系统凭据清理失败：${credentialError}` : `已永久删除 ${deleted.host.name}`);
+  }
+
+  function closeGuide() {
+    setAppState((current) => ({ ...current, onboardingCompleted: true }));
+    setDialog(null);
   }
 
   function addCustomScript(form: HTMLFormElement) {
@@ -606,8 +757,8 @@ function App() {
             {appState.sync.enabled ? <Cloud size={15} /> : <CloudOff size={15} />}
             <span>{appState.sync.enabled ? relativeTime(appState.sync.lastSyncedAt) : appState.sync.endpoint ? "同步后端未启用" : "同步未配置"}</span>
           </button>
-          <span className={`route-status ${jumpResolution.error ? "route-error" : ""}`} title={jumpResolution.error}>
-            <Route size={15} /> 路线：{jumpResolution.error ? "配置错误" : jumpResolution.route.hops.length ? `${jumpResolution.route.hops.length} 跳` : "直连"}
+          <span className="route-status">
+            <Route size={15} /> 路线：直连
           </span>
           <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}>
             <Network size={17} />
@@ -617,6 +768,9 @@ function App() {
           </button>
           <button className="icon-button" type="button" title="终端外观" aria-label="终端外观" onClick={() => setDialog("wallpaper")}>
             <Image size={17} />
+          </button>
+          <button className="icon-button" type="button" title="使用指南" aria-label="使用指南" onClick={() => setDialog("guide")}>
+            <CircleHelp size={17} />
           </button>
           <button className="icon-button" type="button" title="设置与升级" aria-label="设置与升级" onClick={() => setDialog("settings")}>
             <Settings2 size={17} />
@@ -685,15 +839,52 @@ function App() {
                     {hosts.map((host) => {
                       const session = sessions.find((item) => item.hostId === host.id && item.state !== "closed");
                       return (
-                        <button className={`host-row ${activeHost.id === host.id ? "active" : ""}`} type="button" key={host.id} onClick={() => openHost(host)}>
-                          <span className={`environment-dot ${host.environment}`} />
-                          <span className="host-copy"><strong>{host.name}</strong><small>{host.username}@{host.host}:{host.port}</small></span>
-                          {session?.state === "connected" ? <Wifi size={14} className="connected-icon" /> : <span className="latency">{host.latency ? `${host.latency}ms` : "-"}</span>}
-                        </button>
+                        <div className="host-list-item" key={host.id}>
+                          <button className={`host-row ${activeHost.id === host.id ? "active" : ""}`} type="button" onClick={() => openHost(host)}>
+                            <span className={`environment-dot ${host.environment}`} />
+                            <span className="host-copy"><strong>{host.name}</strong><small>{host.username}@{host.host}:{host.port}</small></span>
+                            {session?.state === "connected" ? <Wifi size={14} className="connected-icon" /> : <span className="latency">{host.latency ? `${host.latency}ms` : "-"}</span>}
+                          </button>
+                          <button
+                            className="host-delete-button"
+                            type="button"
+                            title={`删除 ${host.name}`}
+                            aria-label={`删除 ${host.name}`}
+                            onClick={() => void deleteHost(host)}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
                       );
                     })}
                   </section>
                 ))}
+                {hostGroups.length === 0 ? (
+                  <div className="host-list-empty">
+                    <Server size={22} />
+                    <strong>暂无主机配置</strong>
+                    <span>添加一台主机，或从 FinalShell 导入现有配置。</span>
+                    <div>
+                      <button type="button" onClick={() => setDialog("host")}><Plus size={14} /> 添加主机</button>
+                      <button type="button" onClick={() => setDialog("migration")}><Download size={14} /> 导入</button>
+                    </div>
+                  </div>
+                ) : null}
+                {deletedHosts.length > 0 ? (
+                  <section className="resource-group recycle-bin">
+                    <div className="group-title"><Trash2 size={13} /> <span>回收站</span><small>{deletedHosts.length}</small></div>
+                    {deletedHosts.map((item) => {
+                      const days = Math.max(1, Math.ceil((Date.parse(item.expiresAt) - Date.now()) / 86_400_000));
+                      return (
+                        <div className="recycle-row" key={item.id}>
+                          <span><strong>{item.host.name}</strong><small>{item.host.username}@{item.host.host} · {days} 天后清理</small></span>
+                          <button type="button" title={`恢复 ${item.host.name}`} aria-label={`恢复 ${item.host.name}`} onClick={() => restoreDeletedHost(item.id)}><RotateCcw size={13} /></button>
+                          <button type="button" title={`永久删除 ${item.host.name}`} aria-label={`永久删除 ${item.host.name}`} onClick={() => void permanentlyDeleteHost(item.id)}><Trash2 size={13} /></button>
+                        </div>
+                      );
+                    })}
+                  </section>
+                ) : null}
               </>
             ) : null}
 
@@ -731,11 +922,10 @@ function App() {
               </div>
             ) : null}
           </div>
-          {sidebarView === "hosts" ? (
+          {sidebarView === "hosts" && hasActiveHost ? (
             <HostOverview
               host={activeHost}
               state={activeSession.state}
-              jumpLabels={jumpResolution.route.hops.map((hop) => hop.label)}
               metrics={hostMetrics[activeSession.id]?.metrics ? {
                 cpuPercent: hostMetrics[activeSession.id].metrics?.cpuPercent,
                 memoryPercent: hostMetrics[activeSession.id].metrics?.memoryPercent,
@@ -796,15 +986,18 @@ function App() {
           <div className="identity-breadcrumb">
             <Route size={17} />
             <span className="route-node local">本机</span>
-            <ChevronRight size={14} />
-            {jumpResolution.route.hops.map((jump, index) => <span className="route-hop" key={`${jump.address}-${index}`}><span className="route-node jump" title={jump.address}>{jump.label}</span><ChevronRight size={14} /></span>)}
-            <strong className={`route-node current ${activeHost.environment}`}>{activeHost.name}</strong>
-            <code>{activeHost.username}@{activeHost.host}</code>
+            {hasActiveHost ? (
+              <>
+                <ChevronRight size={14} />
+                <strong className={`route-node current ${activeHost.environment}`}>{activeHost.name}</strong>
+                <code>{activeHost.username}@{activeHost.host}</code>
+              </>
+            ) : <span className="empty-host-hint">请选择、添加或导入主机</span>}
           </div>
           <div className="context-meta">
-            <span className={`environment-badge ${activeHost.environment}`}>{environmentLabels[activeHost.environment]}</span>
-            <span className="context-source"><Check size={13} /> 配置视图</span>
-            <span>{activeHost.latency ? `${activeHost.latency} ms` : "未测速"}</span>
+            {hasActiveHost ? <span className={`environment-badge ${activeHost.environment}`}>{environmentLabels[activeHost.environment]}</span> : null}
+            {hasActiveHost ? <span className="context-source"><Check size={13} /> 配置视图</span> : null}
+            {hasActiveHost ? <span>{activeHost.latency ? `${activeHost.latency} ms` : "未测速"}</span> : null}
             {activeSession.state === "connected" ? (
               <button className="disconnect-button" type="button" onClick={disconnectActiveSession}><WifiOff size={14} /> 断开</button>
             ) : (
@@ -844,7 +1037,7 @@ function App() {
           <section className="terminal-pane">
             <TerminalView
               session={activeSession}
-              host={terminalHost}
+              host={activeHost}
               wallpaper={appState.wallpaper}
               appearance={appState.terminalAppearance}
               appearanceRevision={fontRevision}
@@ -887,8 +1080,7 @@ function App() {
                 username: activeHost.username,
                 credentialRef: activeHost.credentialRef,
                 identityFile: activeHost.identityFile,
-                identityPassphraseRef: appState.sshKeys.find((key) => key.privateKeyPath === activeHost.identityFile)?.passphraseRef,
-                proxyJump: jumpResolution.route.proxyJump,
+                identityPassphraseRef: activeIdentityPassphraseRef,
               }}
               connected={activeSession.state === "connected"}
               initialPath={activeSession.currentPath}
@@ -922,6 +1114,8 @@ function App() {
         <MigrationDialog onClose={() => setDialog(null)} onImported={handleFinalShellImport} showToast={showToast} />
       ) : null}
 
+      {dialog === "guide" ? <OnboardingDialog onClose={closeGuide} /> : null}
+
       {dialog === "key-manager" ? (
         <KeyManagerDialog
           keys={appState.sshKeys}
@@ -940,8 +1134,6 @@ function App() {
 
       {dialog === "settings" ? (
         <SettingsDialog
-          hosts={appState.hosts}
-          currentDefaultJumpHostId={appState.settings.defaultJumpHostId}
           externalEditorPath={appState.settings.externalEditorPath}
           autoUploadEditedFiles={appState.settings.autoUploadEditedFiles}
           onSave={(settings) => setAppState((current) => ({ ...current, settings }))}
@@ -959,9 +1151,6 @@ function App() {
             <label className="field"><span>用户名</span><input name="username" defaultValue="root" required /></label>
             <label className="field"><span>环境</span><select name="environment" defaultValue="development"><option value="production">生产</option><option value="staging">基础设施</option><option value="development">测试</option></select></label>
             <label className="field"><span>分组</span><input name="group" defaultValue="我的主机" /></label>
-            <label className="field span-2"><span>连接路线</span><select name="jumpMode" defaultValue="inherit"><option value="inherit">跟随默认跳板</option><option value="direct">强制直连</option><option value="host">指定主机作为跳板</option><option value="custom">自定义 ProxyJump 链</option></select></label>
-            <label className="field span-2"><span>指定跳板机</span><select name="jumpHostId" defaultValue=""><option value="">请选择</option>{appState.hosts.map((host) => <option key={host.id} value={host.id}>{host.name}（{host.username}@{host.host}:{host.port}）</option>)}</select></label>
-            <label className="field full"><span>自定义 ProxyJump 链</span><input name="proxyJump" placeholder="user@host:port 或逗号分隔多跳；仅在自定义模式使用" /></label>
             <label className="field full"><span>私钥路径</span><input name="identityFile" placeholder="使用系统 OpenSSH 路径（可选）" /></label>
           </form>
         </Dialog>

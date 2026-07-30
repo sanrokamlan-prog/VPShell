@@ -2,7 +2,6 @@ export type EnvironmentKind = "production" | "staging" | "development";
 export type ConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 export type ScriptRisk = "low" | "medium" | "high" | "destructive";
 export type SyncProviderKind = "local" | "webdav" | "sftp" | "s3" | "gateway";
-export type JumpMode = "inherit" | "direct" | "host" | "custom";
 
 export interface HostProfile {
   id: string;
@@ -13,9 +12,6 @@ export interface HostProfile {
   username: string;
   environment: EnvironmentKind;
   tags: string[];
-  jumpMode?: JumpMode;
-  jumpHostId?: string;
-  proxyJump?: string;
   identityFile?: string;
   credentialRef?: string;
   source?: "manual" | "finalshell";
@@ -92,6 +88,16 @@ export interface ConnectionHistoryItem {
   path: string;
 }
 
+export interface DeletedHostItem {
+  id: string;
+  host: HostProfile;
+  deletedAt: string;
+  expiresAt: string;
+  commandHistory: CommandHistoryItem[];
+  connectionHistory: ConnectionHistoryItem[];
+  pathHistory: string[];
+}
+
 export interface SyncSettings {
   enabled: boolean;
   provider: SyncProviderKind;
@@ -117,13 +123,13 @@ export interface TerminalAppearanceSettings {
 }
 
 export interface ApplicationSettings {
-  defaultJumpHostId?: string;
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
 }
 
 export interface AppState {
   hosts: HostProfile[];
+  deletedHosts: DeletedHostItem[];
   scripts: ScriptRecipe[];
   commands: CommandRecipe[];
   sshKeys: SshKeyProfile[];
@@ -134,4 +140,5 @@ export interface AppState {
   wallpaper: WallpaperSettings;
   terminalAppearance: TerminalAppearanceSettings;
   settings: ApplicationSettings;
+  onboardingCompleted: boolean;
 }

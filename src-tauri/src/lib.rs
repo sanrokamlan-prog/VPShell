@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     io::{Read, Write},
     sync::{Arc, Mutex},
     thread,
@@ -19,6 +20,9 @@ mod remote_monitor;
 
 pub(crate) const CREDENTIAL_SERVICE: &str = "com.sanro.vpshell.credentials";
 pub(crate) const LEGACY_CREDENTIAL_SERVICE: &str = "com.sanro.opsshell.credentials";
+const ASKPASS_MODE_ENV: &str = "VPSHELL_SSH_ASKPASS";
+const ASKPASS_PASSWORD_REF_ENV: &str = "VPSHELL_SSH_CREDENTIAL_REF";
+const ASKPASS_KEY_REF_ENV: &str = "VPSHELL_SSH_KEY_PASSPHRASE_REF";
 
 struct TerminalHandle {
     writer: Box<dyn Write + Send>,
@@ -38,8 +42,9 @@ struct StartSshRequest {
     host: String,
     port: u16,
     username: String,
-    proxy_jump: Option<String>,
     identity_file: Option<String>,
+    credential_ref: Option<String>,
+    identity_passphrase_ref: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
 }
@@ -73,69 +78,111 @@ fn lock_sessions(
         .map_err(|_| "终端会话状态已损坏".to_string())
 }
 
-fn validate_proxy_jump(value: &str) -> Result<(), String> {
-    if value.len() > 1024
-        || value.chars().any(char::is_whitespace)
-        || value.chars().any(char::is_control)
-    {
-        return Err("ProxyJump 格式无效".to_string());
+fn select_askpass_reference<'a>(
+    prompt: &str,
+    credential_ref: Option<&'a str>,
+    key_passphrase_ref: Option<&'a str>,
+) -> Option<&'a str> {
+    let prompt = prompt.to_ascii_lowercase();
+    if prompt.contains("passphrase") {
+        key_passphrase_ref
+    } else if prompt.contains("password") {
+        credential_ref
+    } else {
+        // Unknown confirmation prompts, including host-key prompts, must not receive a secret.
+        None
     }
-    let hops = value.split(',').collect::<Vec<_>>();
-    if hops.is_empty() || hops.len() > 4 || hops.iter().any(|hop| hop.is_empty()) {
-        return Err("ProxyJump 必须包含 1 到 4 个有效跳点".to_string());
+}
+
+pub(crate) fn configure_process_ssh_askpass(
+    command: &mut std::process::Command,
+    credential_ref: Option<&str>,
+    key_passphrase_ref: Option<&str>,
+) -> Result<(), String> {
+    if credential_ref.is_none() && key_passphrase_ref.is_none() {
+        return Ok(());
     }
-    for hop in hops {
-        if hop.starts_with('-')
-            || !hop.chars().all(|character| {
-                character.is_ascii_alphanumeric()
-                    || matches!(character, '.' | '-' | '_' | '@' | ':' | '[' | ']')
-            })
-        {
-            return Err(format!("ProxyJump 跳点格式不安全: {hop}"));
-        }
-        let mut address = hop;
-        if let Some((username, remainder)) = hop.split_once('@') {
-            if username.is_empty() || remainder.is_empty() || remainder.contains('@') {
-                return Err(format!("ProxyJump 用户或地址无效: {hop}"));
-            }
-            address = remainder;
-        }
-        let port = if address.starts_with('[') {
-            let closing = address
-                .find(']')
-                .ok_or_else(|| format!("ProxyJump IPv6 地址缺少右括号: {hop}"))?;
-            if closing == 1 {
-                return Err(format!("ProxyJump 主机地址为空: {hop}"));
-            }
-            let suffix = &address[closing + 1..];
-            if suffix.is_empty() {
-                None
-            } else {
-                suffix
-                    .strip_prefix(':')
-                    .ok_or_else(|| format!("ProxyJump IPv6 端口格式无效: {hop}"))?
-                    .into()
-            }
-        } else {
-            if address.matches(':').count() > 1 {
-                return Err(format!("ProxyJump IPv6 地址必须使用方括号: {hop}"));
-            }
-            match address.rsplit_once(':') {
-                Some((host, port)) if !host.is_empty() => Some(port),
-                _ if !address.is_empty() => None,
-                _ => return Err(format!("ProxyJump 主机地址为空: {hop}")),
-            }
-        };
-        if let Some(port) = port {
-            let port = port
-                .parse::<u16>()
-                .map_err(|_| format!("ProxyJump 端口无效: {hop}"))?;
-            if port == 0 {
-                return Err(format!("ProxyJump 端口无效: {hop}"));
-            }
-        }
+
+    file_transfer::validate_optional_reference(credential_ref, "ssh-")?;
+    file_transfer::validate_optional_reference(key_passphrase_ref, "key-")?;
+    let executable = env::current_exe()
+        .map_err(|error| format!("无法定位 VPShell AskPass 助手: {error}"))?;
+    command.env("SSH_ASKPASS", executable);
+    command.env("SSH_ASKPASS_REQUIRE", "force");
+    command.env(ASKPASS_MODE_ENV, "1");
+    if env::var_os("DISPLAY").is_none() {
+        command.env("DISPLAY", "vpshell");
     }
+    if let Some(reference) = credential_ref {
+        command.env(ASKPASS_PASSWORD_REF_ENV, reference);
+    }
+    if let Some(reference) = key_passphrase_ref {
+        command.env(ASKPASS_KEY_REF_ENV, reference);
+    }
+    command.arg("-o").arg("NumberOfPasswordPrompts=1");
     Ok(())
+}
+
+fn configure_ssh_askpass(
+    command: &mut CommandBuilder,
+    credential_ref: Option<&str>,
+    key_passphrase_ref: Option<&str>,
+) -> Result<(), String> {
+    if credential_ref.is_none() && key_passphrase_ref.is_none() {
+        return Ok(());
+    }
+
+    file_transfer::validate_optional_reference(credential_ref, "ssh-")?;
+    file_transfer::validate_optional_reference(key_passphrase_ref, "key-")?;
+    let executable = env::current_exe()
+        .map_err(|error| format!("无法定位 VPShell AskPass 助手: {error}"))?;
+    command.env("SSH_ASKPASS", executable);
+    command.env("SSH_ASKPASS_REQUIRE", "force");
+    command.env(ASKPASS_MODE_ENV, "1");
+    if env::var_os("DISPLAY").is_none() {
+        command.env("DISPLAY", "vpshell");
+    }
+    if let Some(reference) = credential_ref {
+        command.env(ASKPASS_PASSWORD_REF_ENV, reference);
+    }
+    if let Some(reference) = key_passphrase_ref {
+        command.env(ASKPASS_KEY_REF_ENV, reference);
+    }
+    command.arg("-o");
+    command.arg("NumberOfPasswordPrompts=1");
+    Ok(())
+}
+
+/// Entry point used when OpenSSH starts the VPShell executable as SSH_ASKPASS.
+/// Only opaque references cross the process boundary; the secret stays in the OS keyring.
+pub fn run_ssh_askpass(prompt: Option<&str>) -> i32 {
+    if env::var(ASKPASS_MODE_ENV).as_deref() != Ok("1") {
+        return 2;
+    }
+    let credential_ref = env::var(ASKPASS_PASSWORD_REF_ENV).ok();
+    let key_passphrase_ref = env::var(ASKPASS_KEY_REF_ENV).ok();
+    let Some(reference) = select_askpass_reference(
+        prompt.unwrap_or_default(),
+        credential_ref.as_deref(),
+        key_passphrase_ref.as_deref(),
+    ) else {
+        return 3;
+    };
+    let prefix = if reference.starts_with("key-") { "key-" } else { "ssh-" };
+    if file_transfer::validate_optional_reference(Some(reference), prefix).is_err() {
+        return 4;
+    }
+    let Ok(secret) = file_transfer::read_secret(reference, "未找到已保存的 SSH 凭据") else {
+        return 5;
+    };
+    let mut stdout = std::io::stdout().lock();
+    if stdout.write_all(secret.as_bytes()).is_err()
+        || stdout.write_all(b"\n").is_err()
+        || stdout.flush().is_err()
+    {
+        return 6;
+    }
+    0
 }
 
 #[tauri::command]
@@ -160,14 +207,6 @@ fn start_ssh_session(
     {
         return Err("SSH 用户名格式无效".to_string());
     }
-    if let Some(proxy_jump) = request
-        .proxy_jump
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        validate_proxy_jump(proxy_jump)?;
-    }
-
     let session_id = request
         .session_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -195,18 +234,20 @@ fn start_ssh_session(
     command.arg("-p");
     command.arg(request.port.to_string());
 
-    if let Some(proxy_jump) = request.proxy_jump.filter(|value| !value.trim().is_empty()) {
-        command.arg("-J");
-        command.arg(proxy_jump);
-    }
-
     if let Some(identity_file) = request
         .identity_file
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
         command.arg("-i");
         command.arg(identity_file);
     }
+
+    configure_ssh_askpass(
+        &mut command,
+        request.credential_ref.as_deref(),
+        request.identity_passphrase_ref.as_deref(),
+    )?;
 
     command.arg("--");
     command.arg(format!("{}@{}", request.username, request.host));
@@ -390,6 +431,28 @@ fn stop_terminal(manager: State<'_, TerminalManager>, session_id: String) -> Res
         .map_err(|error| format!("关闭终端失败: {error}"))
 }
 
+#[tauri::command]
+fn delete_credential(reference: String) -> Result<(), String> {
+    file_transfer::validate_optional_reference(Some(&reference), "ssh-")?;
+    let mut deleted = false;
+    let mut last_error = None;
+    for service in [CREDENTIAL_SERVICE, LEGACY_CREDENTIAL_SERVICE] {
+        match keyring::Entry::new(service, &reference).and_then(|entry| entry.delete_credential()) {
+            Ok(()) => deleted = true,
+            Err(keyring::Error::NoEntry) => {}
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    if deleted || last_error.is_none() {
+        Ok(())
+    } else {
+        Err(format!(
+            "删除系统凭据失败: {}",
+            last_error.unwrap_or_else(|| "未知错误".to_string())
+        ))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -404,6 +467,7 @@ pub fn run() {
             write_terminal,
             resize_terminal,
             stop_terminal,
+            delete_credential,
             import_finalshell,
             generate_ssh_key,
             install_public_key,
@@ -426,19 +490,29 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_proxy_jump;
+    use super::select_askpass_reference;
 
     #[test]
-    fn accepts_bounded_proxy_jump_routes() {
-        assert!(validate_proxy_jump("ops@gateway.example:2222").is_ok());
-        assert!(validate_proxy_jump("first,[2001:db8::2]:22").is_ok());
-    }
-
-    #[test]
-    fn rejects_proxy_jump_option_injection_and_bad_ports() {
-        assert!(validate_proxy_jump("-oProxyCommand=bad").is_err());
-        assert!(validate_proxy_jump("host:0").is_err());
-        assert!(validate_proxy_jump("host name").is_err());
-        assert!(validate_proxy_jump("a,b,c,d,e").is_err());
+    fn askpass_only_selects_secrets_for_authentication_prompts() {
+        assert_eq!(
+            select_askpass_reference("root@example's password:", Some("ssh-a"), Some("key-a")),
+            Some("ssh-a")
+        );
+        assert_eq!(
+            select_askpass_reference("Enter passphrase for key", Some("ssh-a"), Some("key-a")),
+            Some("key-a")
+        );
+        assert_eq!(
+            select_askpass_reference("Are you sure you want to continue connecting?", Some("ssh-a"), None),
+            None
+        );
+        assert_eq!(
+            select_askpass_reference("root@example's password:", None, Some("key-a")),
+            None
+        );
+        assert_eq!(
+            select_askpass_reference("Enter passphrase for key", Some("ssh-a"), None),
+            None
+        );
     }
 }

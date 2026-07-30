@@ -8,6 +8,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::configure_process_ssh_askpass;
+
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(12);
 const STDOUT_LIMIT: usize = 192 * 1024;
 const STDERR_LIMIT: usize = 64 * 1024;
@@ -103,8 +105,9 @@ pub struct MonitorRequest {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub proxy_jump: Option<String>,
     pub identity_file: Option<String>,
+    pub credential_ref: Option<String>,
+    pub identity_passphrase_ref: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -184,13 +187,6 @@ fn validate_request(request: &MonitorRequest) -> Result<(), String> {
         return Err("SSH 用户名格式无效".to_string());
     }
 
-    if let Some(proxy_jump) = request
-        .proxy_jump
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        validate_proxy_jump(proxy_jump)?;
-    }
     if let Some(identity_file) = request
         .identity_file
         .as_deref()
@@ -201,72 +197,6 @@ fn validate_request(request: &MonitorRequest) -> Result<(), String> {
             || !Path::new(identity_file).is_file()
         {
             return Err("SSH 私钥文件不存在或路径无效".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn validate_proxy_jump(value: &str) -> Result<(), String> {
-    if value.len() > 1024
-        || value.chars().any(char::is_whitespace)
-        || value.chars().any(char::is_control)
-    {
-        return Err("ProxyJump 格式无效".to_string());
-    }
-    let hops = value.split(',').collect::<Vec<_>>();
-    if hops.is_empty() || hops.len() > 4 || hops.iter().any(|hop| hop.is_empty()) {
-        return Err("ProxyJump 必须包含 1 到 4 个有效跳点".to_string());
-    }
-    for hop in hops {
-        if hop.starts_with('-')
-            || !hop.chars().all(|character| {
-                character.is_ascii_alphanumeric()
-                    || matches!(character, '.' | '-' | '_' | '@' | ':' | '[' | ']')
-            })
-        {
-            return Err(format!("ProxyJump 跳点格式不安全: {hop}"));
-        }
-        let mut address = hop;
-        if let Some((username, remainder)) = hop.split_once('@') {
-            if username.is_empty() || remainder.is_empty() || remainder.contains('@') {
-                return Err(format!("ProxyJump 用户或地址无效: {hop}"));
-            }
-            address = remainder;
-        }
-        let port = if address.starts_with('[') {
-            let closing = address
-                .find(']')
-                .ok_or_else(|| format!("ProxyJump IPv6 地址缺少右括号: {hop}"))?;
-            if closing == 1 {
-                return Err(format!("ProxyJump 主机地址为空: {hop}"));
-            }
-            let suffix = &address[closing + 1..];
-            if suffix.is_empty() {
-                None
-            } else {
-                Some(
-                    suffix
-                        .strip_prefix(':')
-                        .ok_or_else(|| format!("ProxyJump IPv6 端口格式无效: {hop}"))?,
-                )
-            }
-        } else {
-            if address.matches(':').count() > 1 {
-                return Err(format!("ProxyJump IPv6 地址必须使用方括号: {hop}"));
-            }
-            match address.rsplit_once(':') {
-                Some((host, port)) if !host.is_empty() => Some(port),
-                _ if !address.is_empty() => None,
-                _ => return Err(format!("ProxyJump 主机地址为空: {hop}")),
-            }
-        };
-        if let Some(port) = port {
-            let port = port
-                .parse::<u16>()
-                .map_err(|_| format!("ProxyJump 端口无效: {hop}"))?;
-            if port == 0 {
-                return Err(format!("ProxyJump 端口无效: {hop}"));
-            }
         }
     }
     Ok(())
@@ -463,7 +393,7 @@ fn ssh_failure(status: ExitStatus, stderr: &[u8]) -> String {
         || lower.contains("no supported authentication")
         || lower.contains("publickey")
     {
-        return "SSH 身份验证失败：主机概况采用无交互模式，不会识别或自动填写密码提示；请配置私钥或 ssh-agent".to_string();
+        return "SSH 身份验证失败：请检查已保存密码、私钥口令、私钥或 ssh-agent".to_string();
     }
     if lower.contains("host key verification failed")
         || lower.contains("no host key is known")
@@ -472,10 +402,10 @@ fn ssh_failure(status: ExitStatus, stderr: &[u8]) -> String {
         return "SSH 主机密钥校验失败：请先核对并将主机指纹加入系统 known_hosts".to_string();
     }
     if lower.contains("connection timed out") || lower.contains("operation timed out") {
-        return "连接主机超时，请检查地址、端口、网络或跳板机".to_string();
+        return "连接主机超时，请检查地址、端口或网络".to_string();
     }
     if lower.contains("could not resolve hostname") || lower.contains("name or service not known") {
-        return "无法解析主机地址或跳板机地址".to_string();
+        return "无法解析主机地址".to_string();
     }
     if lower.contains("connection refused") {
         return "SSH 连接被拒绝，请检查端口和服务状态".to_string();
@@ -490,17 +420,13 @@ fn ssh_failure(status: ExitStatus, stderr: &[u8]) -> String {
 fn fetch_remote_metrics_blocking(request: MonitorRequest) -> Result<RemoteMetrics, String> {
     validate_request(&request)?;
 
+    let use_askpass = request.credential_ref.is_some() || request.identity_passphrase_ref.is_some();
+
     let mut command = Command::new("ssh");
     command
         .arg("-T")
         .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("NumberOfPasswordPrompts=0")
-        .arg("-o")
-        .arg("PasswordAuthentication=no")
-        .arg("-o")
-        .arg("KbdInteractiveAuthentication=no")
+        .arg(if use_askpass { "BatchMode=no" } else { "BatchMode=yes" })
         .arg("-o")
         .arg("ConnectTimeout=8")
         .arg("-o")
@@ -516,13 +442,23 @@ fn fetch_remote_metrics_blocking(request: MonitorRequest) -> Result<RemoteMetric
         .arg("-p")
         .arg(request.port.to_string());
 
-    if let Some(proxy_jump) = request
-        .proxy_jump
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        command.arg("-J").arg(proxy_jump);
+    if use_askpass {
+        configure_process_ssh_askpass(
+            &mut command,
+            request.credential_ref.as_deref(),
+            request.identity_passphrase_ref.as_deref(),
+        )?;
+    } else {
+        command
+            .arg("-o")
+            .arg("NumberOfPasswordPrompts=0")
+            .arg("-o")
+            .arg("PasswordAuthentication=no")
+            .arg("-o")
+            .arg("KbdInteractiveAuthentication=no")
+            .env("SSH_ASKPASS_REQUIRE", "never");
     }
+
     if let Some(identity_file) = request
         .identity_file
         .as_deref()
@@ -540,10 +476,11 @@ fn fetch_remote_metrics_blocking(request: MonitorRequest) -> Result<RemoteMetric
         .arg(format!("{}@{}", request.username, request.host))
         .arg("sh")
         .arg("-s")
-        .env("SSH_ASKPASS_REQUIRE", "never")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    hide_console_window(&mut command);
 
     let mut child = command
         .spawn()
@@ -613,6 +550,17 @@ fn fetch_remote_metrics_blocking(request: MonitorRequest) -> Result<RemoteMetric
     parse_metrics(&output, request.host)
 }
 
+#[cfg(target_os = "windows")]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_console_window(_command: &mut Command) {}
+
 #[tauri::command]
 pub async fn fetch_remote_metrics(request: MonitorRequest) -> Result<RemoteMetrics, String> {
     tauri::async_runtime::spawn_blocking(move || fetch_remote_metrics_blocking(request))
@@ -629,8 +577,9 @@ mod tests {
             host: "203.0.113.10".to_string(),
             port: 22,
             username: "ops".to_string(),
-            proxy_jump: None,
             identity_file: None,
+            credential_ref: None,
+            identity_passphrase_ref: None,
         }
     }
 
@@ -646,9 +595,6 @@ mod tests {
         invalid_user.username = "root@other".to_string();
         assert!(validate_request(&invalid_user).is_err());
 
-        let mut invalid_jump = request();
-        invalid_jump.proxy_jump = Some("gateway:0".to_string());
-        assert!(validate_request(&invalid_jump).is_err());
     }
 
     #[test]
