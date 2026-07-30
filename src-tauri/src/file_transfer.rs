@@ -6,6 +6,7 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -33,6 +34,23 @@ const MAX_KEYSCAN_OUTPUT_SIZE: usize = 512 * 1024;
 const COPY_BUFFER_SIZE: usize = 128 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
+
+const PREFERRED_OPENSSH_KEX: &[&str] = &[
+    "mlkem768x25519-sha256",
+    "sntrup761x25519-sha512",
+    "sntrup761x25519-sha512@openssh.com",
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp521",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp256",
+    "diffie-hellman-group18-sha512",
+    "diffie-hellman-group16-sha512",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group14-sha256",
+];
+
+static OPENSSH_KEX_ALGORITHMS: OnceLock<Result<String, String>> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -847,24 +865,107 @@ fn trust_host_key_blocking(
     Ok(verified)
 }
 
+pub(crate) fn openssh_kex_algorithms() -> Result<String, String> {
+    OPENSSH_KEX_ALGORITHMS
+        .get_or_init(discover_openssh_kex_algorithms)
+        .clone()
+}
+
+fn discover_openssh_kex_algorithms() -> Result<String, String> {
+    let mut command = Command::new("ssh");
+    command.arg("-Q").arg("kex");
+    hide_console_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("无法查询系统 OpenSSH KEX 算法: {error}"))?;
+    if !output.status.success() {
+        return Err("系统 OpenSSH 不支持查询 KEX 算法，请升级 OpenSSH 客户端".to_string());
+    }
+    if output.stdout.len() > MAX_KEYSCAN_OUTPUT_SIZE {
+        return Err("OpenSSH KEX 算法列表超过安全上限".to_string());
+    }
+    select_openssh_kex_algorithms(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn select_openssh_kex_algorithms(output: &str) -> Result<String, String> {
+    let supported = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<HashSet<_>>();
+    let selected = PREFERRED_OPENSSH_KEX
+        .iter()
+        .copied()
+        .filter(|algorithm| supported.contains(algorithm))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err("系统 OpenSSH 没有 VPShell 支持的安全 KEX 算法".to_string());
+    }
+    Ok(selected.join(","))
+}
+
 fn scan_host_keys(host: &str, port: u16) -> Result<Vec<HostKeyMaterial>, String> {
-    let mut command = Command::new("ssh-keyscan");
+    let kex_algorithms = openssh_kex_algorithms()?;
+    let temp_known_hosts = TempFileGuard::new("hostkey-scan", "known_hosts");
+    let null_device = null_device();
+
+    let mut command = Command::new("ssh");
     command
+        .arg("-F")
+        .arg(null_device)
         .arg("-T")
-        .arg("8")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("NumberOfPasswordPrompts=0")
+        .arg("-o")
+        .arg("PreferredAuthentications=none")
+        .arg("-o")
+        .arg("PubkeyAuthentication=no")
+        .arg("-o")
+        .arg("PasswordAuthentication=no")
+        .arg("-o")
+        .arg("KbdInteractiveAuthentication=no")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("HashKnownHosts=no")
+        .arg("-o")
+        .arg(format!(
+            "UserKnownHostsFile={}",
+            temp_known_hosts.path().display()
+        ))
+        .arg("-o")
+        .arg(format!("GlobalKnownHostsFile={null_device}"))
+        .arg("-o")
+        .arg("ConnectTimeout=8")
+        .arg("-o")
+        .arg("ConnectionAttempts=1")
+        .arg("-o")
+        .arg("LogLevel=ERROR")
+        .arg("-o")
+        .arg(format!("KexAlgorithms={kex_algorithms}"))
         .arg("-p")
         .arg(port.to_string())
-        .arg(host);
+        .arg("-l")
+        .arg("vpshell-hostkey-probe")
+        .arg("--")
+        .arg(host)
+        .arg("exit");
     hide_console_window(&mut command);
     let output = command.output().map_err(|error| {
-        format!("无法启动系统 ssh-keyscan；请确认已安装 OpenSSH 客户端: {error}")
+        format!("无法启动系统 ssh；请确认已安装 OpenSSH 客户端: {error}")
     })?;
     if output.stdout.len() > MAX_KEYSCAN_OUTPUT_SIZE
         || output.stderr.len() > MAX_KEYSCAN_OUTPUT_SIZE
     {
-        return Err("ssh-keyscan 输出超过安全上限".to_string());
+        return Err("OpenSSH 主机指纹握手输出超过安全上限".to_string());
     }
-    let mut keys = parse_host_key_lines(&String::from_utf8_lossy(&output.stdout));
+    let known_hosts = fs::read(temp_known_hosts.path()).unwrap_or_default();
+    if known_hosts.len() > MAX_KEYSCAN_OUTPUT_SIZE {
+        return Err("临时 known_hosts 超过安全上限".to_string());
+    }
+    let mut keys = parse_host_key_lines(&String::from_utf8_lossy(&known_hosts));
     keys.sort_by_key(|material| host_key_algorithm_priority(&material.algorithm));
     keys.dedup();
     if keys.is_empty() {
@@ -876,12 +977,22 @@ fn scan_host_keys(host: &str, port: u16) -> Result<Vec<HostKeyMaterial>, String>
             .trim()
             .to_string();
         return Err(if detail.is_empty() {
-            "OpenSSH 主机指纹扫描失败：主机未响应或握手超时".to_string()
+            "OpenSSH 主机指纹握手失败：主机未响应或没有共同的安全 KEX 算法".to_string()
         } else {
-            format!("OpenSSH 主机指纹扫描失败: {detail}")
+            format!("OpenSSH 主机指纹握手失败: {detail}")
         });
     }
     Ok(keys)
+}
+
+#[cfg(windows)]
+fn null_device() -> &'static str {
+    "NUL"
+}
+
+#[cfg(not(windows))]
+fn null_device() -> &'static str {
+    "/dev/null"
 }
 
 fn lookup_known_host_keys(host: &str, port: u16) -> Result<Vec<HostKeyMaterial>, String> {
@@ -2557,6 +2668,21 @@ mod tests {
             host_key_algorithm_priority("ecdsa-sha2-nistp256")
                 < host_key_algorithm_priority("ssh-rsa")
         );
+    }
+
+    #[test]
+    fn selects_only_kex_algorithms_the_openssh_binary_reports() {
+        let selected = select_openssh_kex_algorithms(
+            "curve25519-sha256\ncurve25519-sha256@libssh.org\n\
+             diffie-hellman-group14-sha256\ndiffie-hellman-group14-sha1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            selected,
+            "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group14-sha256"
+        );
+        assert!(!selected.contains("sntrup"));
+        assert!(!selected.contains("group14-sha1"));
     }
 
     #[test]

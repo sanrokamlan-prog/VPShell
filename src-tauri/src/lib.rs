@@ -238,6 +238,11 @@ fn start_ssh_session(
     command.arg("ServerAliveCountMax=3");
     command.arg("-o");
     command.arg("StrictHostKeyChecking=yes");
+    command.arg("-o");
+    command.arg(format!(
+        "KexAlgorithms={}",
+        file_transfer::openssh_kex_algorithms()?
+    ));
     command.arg("-p");
     command.arg(request.port.to_string());
 

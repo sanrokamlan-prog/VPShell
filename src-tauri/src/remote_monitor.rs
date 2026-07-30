@@ -450,6 +450,11 @@ fn fetch_remote_metrics_blocking(request: MonitorRequest) -> Result<RemoteMetric
         .arg("-o")
         .arg("StrictHostKeyChecking=yes")
         .arg("-o")
+        .arg(format!(
+            "KexAlgorithms={}",
+            crate::file_transfer::openssh_kex_algorithms()?
+        ))
+        .arg("-o")
         .arg("LogLevel=ERROR")
         .arg("-p")
         .arg(request.port.to_string());
