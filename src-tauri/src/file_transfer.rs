@@ -1017,7 +1017,8 @@ fn host_key_probe_failure(detail: &str) -> String {
         return "SSH 端口拒绝连接；请确认 sshd 已启动且端口配置正确".to_string();
     }
     if detail.is_empty() {
-        "SSH 主机未返回指纹；可能未响应、在密钥交换前限流/断开，或没有共同的安全 KEX 算法".to_string()
+        "SSH 主机未返回指纹；可能未响应、在密钥交换前限流/断开，或没有共同的安全 KEX 算法"
+            .to_string()
     } else {
         format!("OpenSSH 主机指纹握手失败: {detail}")
     }
@@ -2725,9 +2726,8 @@ mod tests {
 
     #[test]
     fn classifies_disconnects_before_the_server_host_key() {
-        let message = host_key_probe_failure(
-            "kex_exchange_identification: Connection closed by remote host",
-        );
+        let message =
+            host_key_probe_failure("kex_exchange_identification: Connection closed by remote host");
         assert!(message.contains("主动关闭"));
         assert!(message.contains("MaxStartups"));
         assert!(!message.contains("没有共同"));
@@ -2735,9 +2735,8 @@ mod tests {
 
     #[test]
     fn classifies_missing_safe_key_exchange_separately() {
-        let message = host_key_probe_failure(
-            "Unable to negotiate: no matching key exchange method found",
-        );
+        let message =
+            host_key_probe_failure("Unable to negotiate: no matching key exchange method found");
         assert!(message.contains("没有共同的安全 KEX"));
         assert!(message.contains("SHA-1"));
     }
