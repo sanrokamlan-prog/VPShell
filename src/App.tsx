@@ -116,6 +116,11 @@ interface HostKeyInspection {
   fingerprint: string;
 }
 
+interface PendingHostKey extends HostKeyInspection {
+  hostId: string;
+  sessionId: string;
+}
+
 const providerLabels: Record<SyncProviderKind, string> = {
   local: "本地同步目录",
   webdav: "WebDAV",
@@ -224,7 +229,7 @@ function App() {
   const [installedFonts, setInstalledFonts] = useState<string[]>([]);
   const [fontRevision, setFontRevision] = useState(0);
   const [hostMetrics, setHostMetrics] = useState<Record<string, HostMetricsState>>({});
-  const [pendingHostKey, setPendingHostKey] = useState<HostKeyInspection | null>(null);
+  const [pendingHostKey, setPendingHostKey] = useState<PendingHostKey | null>(null);
   const [trustingHostKey, setTrustingHostKey] = useState(false);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
@@ -415,6 +420,37 @@ function App() {
     setBroadcastTargets((current) => current.filter((id) => id !== sessionId));
   }
 
+  async function startSshSession(session: TerminalSession, host: HostProfile) {
+    const identityPassphraseRef = appState.sshKeys.find(
+      (key) => key.privateKeyPath === host.identityFile,
+    )?.passphraseRef;
+    updateSession(session.id, { state: "connecting" });
+    await invoke("start_ssh_session", {
+      request: {
+        sessionId: session.id,
+        host: host.host,
+        port: host.port,
+        username: host.username,
+        identityFile: host.identityFile,
+        credentialRef: host.credentialRef,
+        identityPassphraseRef,
+        cols: 120,
+        rows: 32,
+      },
+    });
+    updateSession(session.id, { state: "connected" });
+    setAppState((current) => ({
+      ...current,
+      connectionHistory: [{
+        id: crypto.randomUUID(),
+        hostId: host.id,
+        connectedAt: new Date().toISOString(),
+        path: session.currentPath,
+      }, ...(current.connectionHistory ?? [])],
+    }));
+    showToast(`已连接 ${host.name}`);
+  }
+
   async function connectActiveSession() {
     if (!hasActiveHost) {
       setDialog("host");
@@ -431,7 +467,7 @@ function App() {
         request: { host: activeHost.host, port: activeHost.port },
       });
       if (inspection.status === "unknown") {
-        setPendingHostKey(inspection);
+        setPendingHostKey({ ...inspection, hostId: activeHost.id, sessionId: activeSession.id });
         setDialog("host-key");
         updateSession(activeSession.id, { state: "idle" });
         return;
@@ -442,30 +478,7 @@ function App() {
       if (inspection.status !== "verified") {
         throw new Error("无法验证 SSH 主机指纹，已拒绝连接");
       }
-      await invoke("start_ssh_session", {
-        request: {
-          sessionId: activeSession.id,
-          host: activeHost.host,
-          port: activeHost.port,
-          username: activeHost.username,
-          identityFile: activeHost.identityFile,
-          credentialRef: activeHost.credentialRef,
-          identityPassphraseRef: activeIdentityPassphraseRef,
-          cols: 120,
-          rows: 32,
-        },
-      });
-      updateSession(activeSession.id, { state: "connected" });
-      setAppState((current) => ({
-        ...current,
-        connectionHistory: [{
-          id: crypto.randomUUID(),
-          hostId: activeHost.id,
-          connectedAt: new Date().toISOString(),
-          path: activeSession.currentPath,
-        }, ...(current.connectionHistory ?? [])],
-      }));
-      showToast(`已连接 ${activeHost.name}`);
+      await startSshSession(activeSession, activeHost);
     } catch (error) {
       updateSession(activeSession.id, { state: "error" });
       showToast(String(error));
@@ -481,17 +494,25 @@ function App() {
 
   async function trustPendingHostKey() {
     if (!pendingHostKey || trustingHostKey) return;
+    const pending = pendingHostKey;
     setTrustingHostKey(true);
     try {
       await invoke<HostKeyInspection>("trust_host_key", {
-        request: { host: pendingHostKey.host, port: pendingHostKey.port },
-        expectedFingerprint: pendingHostKey.fingerprint,
+        request: { host: pending.host, port: pending.port },
+        expectedFingerprint: pending.fingerprint,
       });
       setPendingHostKey(null);
       setDialog(null);
+      const session = sessions.find((candidate) => candidate.id === pending.sessionId);
+      const host = appState.hosts.find((candidate) => candidate.id === pending.hostId);
+      if (!session || !host || host.host !== pending.host || host.port !== pending.port) {
+        showToast("主机指纹已保存；原会话已变化，请重新点击连接");
+        return;
+      }
       showToast("主机指纹已保存，正在连接");
-      await connectActiveSession();
+      await startSshSession(session, host);
     } catch (error) {
+      updateSession(pending.sessionId, { state: "error" });
       showToast(String(error));
     } finally {
       setTrustingHostKey(false);
@@ -1193,13 +1214,13 @@ function App() {
         <MigrationDialog onClose={() => setDialog(null)} onImported={handleFinalShellImport} showToast={showToast} />
       ) : null}
 
-      {dialog === "host-key" && pendingHostKey ? (
-        <Dialog
-          title="确认 SSH 主机指纹"
-          onClose={() => { setPendingHostKey(null); setDialog(null); }}
-          footer={(
-            <>
-              <button className="secondary-button" type="button" onClick={() => { setPendingHostKey(null); setDialog(null); }}>取消</button>
+        {dialog === "host-key" && pendingHostKey ? (
+          <Dialog
+            title="确认 SSH 主机指纹"
+            onClose={() => { if (!trustingHostKey) { setPendingHostKey(null); setDialog(null); } }}
+            footer={(
+              <>
+                <button className="secondary-button" type="button" disabled={trustingHostKey} onClick={() => { setPendingHostKey(null); setDialog(null); }}>取消</button>
               <button className="primary-button" type="button" disabled={trustingHostKey} onClick={() => void trustPendingHostKey()}>
                 {trustingHostKey ? <RefreshCw className="spin" size={14} /> : <ShieldCheck size={14} />}
                 {trustingHostKey ? "正在复核" : "信任并连接"}

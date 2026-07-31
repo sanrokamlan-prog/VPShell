@@ -750,7 +750,15 @@ struct HostKeyMaterial {
 fn inspect_scanned_host(host: &str, port: u16) -> Result<HostKeyInspection, String> {
     let scanned = scan_host_keys(host, port)?;
     let known = lookup_known_host_keys(host, port)?;
+    inspect_host_key_material(host, port, &scanned, &known)
+}
 
+fn inspect_host_key_material(
+    host: &str,
+    port: u16,
+    scanned: &[HostKeyMaterial],
+    known: &[HostKeyMaterial],
+) -> Result<HostKeyInspection, String> {
     if let Some(material) = scanned
         .iter()
         .find(|candidate| known.iter().any(|saved| saved == *candidate))
@@ -798,7 +806,11 @@ fn trust_host_key_blocking(
     expected_fingerprint: String,
 ) -> Result<HostKeyInspection, String> {
     validate_host(&request.host, request.port)?;
-    let inspection = inspect_scanned_host(&request.host, request.port)?;
+    // Re-scan exactly once after the user confirms the displayed fingerprint. The initial
+    // inspection and this confirmation may be separated by an arbitrary amount of time.
+    let scanned = scan_host_keys(&request.host, request.port)?;
+    let known = lookup_known_host_keys(&request.host, request.port)?;
+    let inspection = inspect_host_key_material(&request.host, request.port, &scanned, &known)?;
     if inspection.status == "verified" {
         return Ok(inspection);
     }
@@ -812,7 +824,6 @@ fn trust_host_key_blocking(
         return Err("服务器指纹在确认期间发生变化，已取消连接".to_string());
     }
 
-    let scanned = scan_host_keys(&request.host, request.port)?;
     let material = scanned
         .iter()
         .find(|material| host_key_fingerprint(&material.key) == expected_fingerprint)
@@ -858,11 +869,18 @@ fn trust_host_key_blocking(
         .and_then(|_| file.flush())
         .map_err(|error| format!("无法保存 known_hosts: {error}"))?;
 
-    let verified = inspect_scanned_host(&request.host, request.port)?;
-    if verified.status != "verified" {
+    // Verify the local write without opening another pre-auth SSH connection. The subsequent
+    // terminal and SFTP handshakes still enforce the saved key independently.
+    let saved = lookup_known_host_keys(&request.host, request.port)?;
+    if !saved.iter().any(|candidate| candidate == material) {
         return Err("主机指纹已写入，但复核失败".to_string());
     }
-    Ok(verified)
+    Ok(host_key_inspection(
+        &request.host,
+        request.port,
+        "verified",
+        material,
+    ))
 }
 
 pub(crate) fn openssh_kex_algorithms() -> Result<String, String> {
@@ -976,13 +994,33 @@ fn scan_host_keys(host: &str, port: u16) -> Result<Vec<HostKeyMaterial>, String>
             .collect::<String>()
             .trim()
             .to_string();
-        return Err(if detail.is_empty() {
-            "OpenSSH 主机指纹握手失败：主机未响应或没有共同的安全 KEX 算法".to_string()
-        } else {
-            format!("OpenSSH 主机指纹握手失败: {detail}")
-        });
+        return Err(host_key_probe_failure(&detail));
     }
     Ok(keys)
+}
+
+fn host_key_probe_failure(detail: &str) -> String {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("kex_exchange_identification")
+        || lower.contains("connection closed by remote host")
+        || lower.contains("connection reset by peer")
+    {
+        return "远端在发送 SSH 主机密钥前主动关闭连接；请检查 sshd、来源 IP 限制、防火墙/Fail2Ban 或 MaxStartups 限流".to_string();
+    }
+    if lower.contains("no matching key exchange method") {
+        return "与服务器没有共同的安全 KEX 算法；VPShell 不会自动启用 SHA-1 旧算法".to_string();
+    }
+    if lower.contains("connection timed out") || lower.contains("operation timed out") {
+        return "SSH 主机指纹握手超时；请检查地址、端口、防火墙和服务器状态".to_string();
+    }
+    if lower.contains("connection refused") {
+        return "SSH 端口拒绝连接；请确认 sshd 已启动且端口配置正确".to_string();
+    }
+    if detail.is_empty() {
+        "SSH 主机未返回指纹；可能未响应、在密钥交换前限流/断开，或没有共同的安全 KEX 算法".to_string()
+    } else {
+        format!("OpenSSH 主机指纹握手失败: {detail}")
+    }
 }
 
 #[cfg(windows)]
@@ -2683,6 +2721,25 @@ mod tests {
         );
         assert!(!selected.contains("sntrup"));
         assert!(!selected.contains("group14-sha1"));
+    }
+
+    #[test]
+    fn classifies_disconnects_before_the_server_host_key() {
+        let message = host_key_probe_failure(
+            "kex_exchange_identification: Connection closed by remote host",
+        );
+        assert!(message.contains("主动关闭"));
+        assert!(message.contains("MaxStartups"));
+        assert!(!message.contains("没有共同"));
+    }
+
+    #[test]
+    fn classifies_missing_safe_key_exchange_separately() {
+        let message = host_key_probe_failure(
+            "Unable to negotiate: no matching key exchange method found",
+        );
+        assert!(message.contains("没有共同的安全 KEX"));
+        assert!(message.contains("SHA-1"));
     }
 
     #[test]
