@@ -89,7 +89,7 @@ xterm.js <-> Tauri IPC <-> portable PTY <-> system ssh <-> target
 - 连接超时、取消、诊断和结构化退出原因；
 - 对 Windows OpenSSH 缺失或版本过旧的可操作提示。
 
-兼容引擎的信任源继续使用 OpenSSH `known_hosts`。alpha.4 在启动系统 OpenSSH 前通过系统 `ssh-keyscan` 读取公开主机密钥，并用 `ssh-keygen` 查询含哈希条目的本机信任库：匹配时继续，未知时展示算法和 SHA256 指纹并由用户明确确认保存，换钥时硬阻止。这样系统 OpenSSH 终端不再被 libssh2 的算法协商能力提前阻断；随后终端仍强制 `StrictHostKeyChecking=yes`，SFTP 与监控复用同一信任结果。应用不能自动回答 `yes`，也不能把主机换钥警告降级成普通终端文本。
+兼容引擎的信任源继续使用 OpenSSH `known_hosts`。alpha.5 起使用隔离临时 `known_hosts` 的无凭据系统 OpenSSH 握手读取公开主机密钥，并用 `ssh-keygen` 查询含哈希条目的本机信任库；KEX 列表只取当前 `ssh -Q kex` 实际报告且不含 SHA-1 的交集。匹配时继续，未知时展示算法和 SHA256 指纹并由用户明确确认保存，换钥时硬阻止。alpha.6 将确认路径收敛为一次远端重扫和一次本地写入校验，随后直接启动仍强制 `StrictHostKeyChecking=yes` 的终端，避免低配或限流主机被重复预认证连接压垮。SFTP 与监控复用同一信任结果。应用不能自动回答 `yes`，也不能把主机换钥警告降级成普通终端文本。
 
 当前终端、SFTP 和 Linux 概况仍是三条独立 SSH 连接。alpha.4 将它们按终端、SFTP、概况的顺序错峰启动，减少低配主机的预认证突发；长期方案是原生会话引擎在一次认证后的主连接上复用 Shell、SFTP 和监控通道。
 
@@ -302,6 +302,9 @@ SSH 参数调优、压缩或连接复用不能等同于海外线路加速。真�
 | 加密同步 | Local Folder + WebDAV、E2EE、冲突中心、恢复密钥 | 多设备离线冲突、远端篡改/删除/回滚演练通过 |
 | 扩展 provider | SFTP、S3、Gateway、TOTP 登录、附件分块 | Provider 兼容矩阵和限流/故障恢复通过 |
 | 原生 SSH | russh、原生 SFTP/跳板/转发；结构化 host key 已由兼容层先行实现 | 与系统 OpenSSH 的认证及服务器兼容测试达标，随时可回退 |
+| Android Preview | Tauri 2 Android 壳、触屏终端、原生 SSH/SFTP、Android Keystore、加密同步 | arm64 真机、网络切换/休眠恢复、软键盘、凭据与 Android 生命周期测试通过 |
 | 路线优化 | SOCKS/HTTP、自建 Relay、测速选路、可选 Mosh | 有实际节点、公开指标与隐私边界后才使用“加速”表述 |
 
 每个阶段都应以可回退、可迁移和可验证为准。路线图不是发布日期承诺，未通过门槛的模块不应仅凭界面存在就标记为已完成。
+
+Android 可以复用 Tauri 2 的 React WebView 与 Rust core，但不能假设存在桌面系统 OpenSSH、PTY、桌面钥匙串、任意本机编辑器或常驻后台进程。移动端通过与 UI 解耦的 `SshTransport`/`SftpTransport` 接口接入原生引擎，凭据适配 Android Keystore；桌面 compatibility engine 继续独立保留。APK/AAB 使用独立 GitHub Actions 工作流与签名密钥，不由桌面 Release 矩阵顺带生成。

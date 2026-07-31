@@ -4,6 +4,19 @@ All notable changes to VPShell are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/). Pre-release versions may change local data structures before the first stable release.
 
+## [0.1.0-alpha.6] - 2026-07-31
+
+### Fixed
+
+- Accepting a first-use host key no longer opens three additional pre-authentication probes and then starts a fifth inspection. Confirmation now performs one required remote re-scan, verifies the `known_hosts` write locally, and starts the strict OpenSSH session directly.
+- A pending host-key confirmation is bound to the original host and terminal tab. Switching tabs while the dialog is open can no longer connect a different profile with the completed confirmation.
+- The host-key dialog cannot be cancelled or closed while the trust write is running, preventing an apparently cancelled operation from continuing in the background.
+- Servers that accept TCP and close before sending an SSH banner/key are now reported separately from KEX incompatibility, with actionable checks for `sshd`, source-IP rules, firewall/Fail2Ban and `MaxStartups` throttling.
+
+### Changed
+
+- The roadmap now defines an Android client milestone that reuses the React workspace, data model and encrypted sync protocol while providing a mobile-native SSH/SFTP transport and Android Keystore credential boundary.
+
 ## [0.1.0-alpha.5] - 2026-07-30
 
 ### Fixed
@@ -113,6 +126,7 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - The system OpenSSH process does not expose structured authentication success, so a failed authentication attempt can still appear in recent connections.
 - Private-key files are written only to the user-selected local path; portable encrypted export is not implemented.
 
+[0.1.0-alpha.6]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.3
