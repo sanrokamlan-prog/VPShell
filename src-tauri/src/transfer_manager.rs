@@ -393,29 +393,30 @@ impl TransferTask {
             let mut runtime = lock(&self.record.runtime);
             let cancellation = runtime.cancel_requested
                 || matches!(result.as_ref(), Err(error) if error == TRANSFER_CANCELLED);
-            match result {
-                Ok(result) if !cancellation => {
-                    runtime.snapshot.status = TransferStatus::Completed;
-                    runtime.snapshot.phase = "completed".to_string();
-                    runtime.snapshot.transferred_bytes = result.bytes_transferred;
-                    runtime.snapshot.total_bytes = Some(result.bytes_transferred);
-                    runtime.snapshot.result = Some(result);
-                    runtime.snapshot.error = None;
-                    runtime.snapshot.partial_commit = false;
-                }
-                Ok(_) | Err(_) if cancellation => {
-                    runtime.snapshot.status = TransferStatus::Cancelled;
-                    runtime.snapshot.phase = "cancelled".to_string();
-                    runtime.snapshot.result = None;
-                    runtime.snapshot.error = None;
-                    runtime.snapshot.partial_commit = runtime.committed_units > 0;
-                }
-                Err(error) => {
-                    runtime.snapshot.status = TransferStatus::Failed;
-                    runtime.snapshot.phase = "failed".to_string();
-                    runtime.snapshot.result = None;
-                    runtime.snapshot.error = Some(error);
-                    runtime.snapshot.partial_commit = runtime.committed_units > 0;
+            if cancellation {
+                runtime.snapshot.status = TransferStatus::Cancelled;
+                runtime.snapshot.phase = "cancelled".to_string();
+                runtime.snapshot.result = None;
+                runtime.snapshot.error = None;
+                runtime.snapshot.partial_commit = runtime.committed_units > 0;
+            } else {
+                match result {
+                    Ok(result) => {
+                        runtime.snapshot.status = TransferStatus::Completed;
+                        runtime.snapshot.phase = "completed".to_string();
+                        runtime.snapshot.transferred_bytes = result.bytes_transferred;
+                        runtime.snapshot.total_bytes = Some(result.bytes_transferred);
+                        runtime.snapshot.result = Some(result);
+                        runtime.snapshot.error = None;
+                        runtime.snapshot.partial_commit = false;
+                    }
+                    Err(error) => {
+                        runtime.snapshot.status = TransferStatus::Failed;
+                        runtime.snapshot.phase = "failed".to_string();
+                        runtime.snapshot.result = None;
+                        runtime.snapshot.error = Some(error);
+                        runtime.snapshot.partial_commit = runtime.committed_units > 0;
+                    }
                 }
             }
             runtime.finalizing = false;
