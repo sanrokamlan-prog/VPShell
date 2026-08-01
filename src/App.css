@@ -1888,6 +1888,21 @@ button.sync-status {
   color: var(--green);
 }
 
+.transfer-summary.failed,
+.transfer-summary.cancelled {
+  background: #fff6f4;
+}
+
+.transfer-summary .icon-button {
+  flex: 0 0 24px;
+}
+
+.transfer-summary .icon-button.danger svg,
+.transfer-summary.failed > svg,
+.transfer-summary.cancelled > svg {
+  color: var(--red);
+}
+
 .statusbar {
   display: flex;
   height: 23px;

@@ -17,6 +17,7 @@ mod finalshell;
 mod key_management;
 mod network_tools;
 mod remote_monitor;
+mod transfer_manager;
 
 pub(crate) const CREDENTIAL_SERVICE: &str = "com.sanro.vpshell.credentials";
 pub(crate) const LEGACY_CREDENTIAL_SERVICE: &str = "com.sanro.opsshell.credentials";
@@ -488,6 +489,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(TerminalManager::default())
         .manage(external_editor::ExternalEditorManager::default())
+        .manage(transfer_manager::TransferManager::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -506,6 +508,10 @@ pub fn run() {
             file_transfer::list_remote_files,
             file_transfer::upload_remote,
             file_transfer::download_remote,
+            file_transfer::get_transfer_task,
+            file_transfer::list_transfer_tasks,
+            file_transfer::cancel_transfer_task,
+            file_transfer::dismiss_transfer_task,
             external_editor::begin_external_edit,
             external_editor::get_external_edit_status,
             external_editor::save_external_edit,

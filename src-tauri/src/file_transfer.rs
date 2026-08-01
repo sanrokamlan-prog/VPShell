@@ -6,6 +6,7 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     path::{Component, Path, PathBuf},
     process::Command,
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::OnceLock,
     time::Duration,
 };
@@ -14,13 +15,18 @@ use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ssh2::{
-    CheckResult, ExtendedData, FileStat, KeyboardInteractivePrompt, KnownHostFileKind, MethodType,
-    Prompt, Session, Sftp,
+    CheckResult, ErrorCode, ExtendedData, FileStat, KeyboardInteractivePrompt, KnownHostFileKind,
+    MethodType, Prompt, Session, Sftp,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
 use zeroize::Zeroizing;
 
-use crate::{CREDENTIAL_SERVICE, LEGACY_CREDENTIAL_SERVICE};
+use crate::{
+    transfer_manager::{
+        TransferManager, TransferResult, TransferSnapshot, TransferTask,
+    },
+    CREDENTIAL_SERVICE, LEGACY_CREDENTIAL_SERVICE,
+};
 
 const MAX_HOST_LENGTH: usize = 255;
 const MAX_USERNAME_LENGTH: usize = 128;
@@ -110,20 +116,6 @@ pub(crate) struct RemoteDirectoryResult {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TransferResult {
-    transfer_id: String,
-    mode: String,
-    files_transferred: u64,
-    bytes_transferred: u64,
-    skipped_symlinks: u64,
-    fallback_used: bool,
-    resumable: bool,
-    verification: String,
-    limitations: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct TransferProgress {
     transfer_id: String,
     phase: String,
@@ -136,6 +128,7 @@ struct TransferProgress {
 struct ProgressReporter {
     app: AppHandle,
     transfer_id: String,
+    task: TransferTask,
 }
 
 impl ProgressReporter {
@@ -145,17 +138,26 @@ impl ProgressReporter {
         current_path: impl Into<String>,
         bytes_done: u64,
         bytes_total: Option<u64>,
-    ) {
+    ) -> Result<(), String> {
+        let phase = phase.into();
+        let current_path = current_path.into();
+        self.task
+            .progress(&phase, &current_path, bytes_done, bytes_total)?;
         let _ = self.app.emit(
             "transfer-progress",
             TransferProgress {
                 transfer_id: self.transfer_id.clone(),
-                phase: phase.into(),
-                current_path: current_path.into(),
+                phase,
+                current_path,
                 transferred_bytes: bytes_done,
                 total_bytes: bytes_total,
             },
         );
+        Ok(())
+    }
+
+    fn checkpoint(&self) -> Result<(), String> {
+        self.task.checkpoint()
     }
 }
 
@@ -169,6 +171,26 @@ struct TransferStats {
 }
 
 struct TempFileGuard(PathBuf);
+
+struct CancellableReader<R> {
+    inner: R,
+    task: TransferTask,
+}
+
+impl<R> CancellableReader<R> {
+    fn new(inner: R, task: TransferTask) -> Self {
+        Self { inner, task }
+    }
+}
+
+impl<R: Read> Read for CancellableReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.task
+            .checkpoint()
+            .map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "传输已取消"))?;
+        self.inner.read(buffer)
+    }
+}
 
 impl TempFileGuard {
     fn new(transfer_id: &str, suffix: &str) -> Self {
@@ -226,57 +248,120 @@ pub(crate) async fn trust_host_key(
 #[tauri::command]
 pub(crate) async fn upload_remote(
     app: AppHandle,
+    manager: State<'_, TransferManager>,
     connection: ConnectionSpec,
     local_paths: Vec<String>,
     remote_directory: String,
     package_transfer: bool,
     transfer_id: String,
-) -> Result<TransferResult, String> {
+) -> Result<TransferSnapshot, String> {
     validate_transfer_id(&transfer_id)?;
+    let (accepted, task) = manager.accept(
+        &app,
+        transfer_id.clone(),
+        "upload",
+        &connection.host,
+        connection.port,
+        &connection.username,
+    )?;
     let reporter = ProgressReporter {
         app,
         transfer_id: transfer_id.clone(),
+        task: task.clone(),
     };
     tauri::async_runtime::spawn_blocking(move || {
-        upload_paths_blocking(
-            connection,
-            local_paths,
-            remote_directory,
-            package_transfer,
-            transfer_id,
-            reporter,
-        )
-    })
-    .await
-    .map_err(|error| format!("SFTP 上传任务异常结束: {error}"))?
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            task.start()?;
+            upload_paths_blocking(
+                connection,
+                local_paths,
+                remote_directory,
+                package_transfer,
+                transfer_id,
+                reporter,
+            )
+        }))
+        .unwrap_or_else(|_| Err("SFTP 上传任务发生内部异常".to_string()));
+        task.finish(result);
+    });
+    Ok(accepted)
 }
 
 #[tauri::command]
 pub(crate) async fn download_remote(
     app: AppHandle,
+    manager: State<'_, TransferManager>,
     connection: ConnectionSpec,
     remote_paths: Vec<String>,
     local_directory: String,
     package_transfer: bool,
     transfer_id: String,
-) -> Result<TransferResult, String> {
+) -> Result<TransferSnapshot, String> {
     validate_transfer_id(&transfer_id)?;
+    let (accepted, task) = manager.accept(
+        &app,
+        transfer_id.clone(),
+        "download",
+        &connection.host,
+        connection.port,
+        &connection.username,
+    )?;
     let reporter = ProgressReporter {
         app,
         transfer_id: transfer_id.clone(),
+        task: task.clone(),
     };
     tauri::async_runtime::spawn_blocking(move || {
-        download_paths_blocking(
-            connection,
-            remote_paths,
-            local_directory,
-            package_transfer,
-            transfer_id,
-            reporter,
-        )
-    })
-    .await
-    .map_err(|error| format!("SFTP 下载任务异常结束: {error}"))?
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            task.start()?;
+            download_paths_blocking(
+                connection,
+                remote_paths,
+                local_directory,
+                package_transfer,
+                transfer_id,
+                reporter,
+            )
+        }))
+        .unwrap_or_else(|_| Err("SFTP 下载任务发生内部异常".to_string()));
+        task.finish(result);
+    });
+    Ok(accepted)
+}
+
+#[tauri::command]
+pub(crate) fn get_transfer_task(
+    manager: State<'_, TransferManager>,
+    transfer_id: String,
+) -> Result<Option<TransferSnapshot>, String> {
+    validate_transfer_id(&transfer_id)?;
+    Ok(manager.get(&transfer_id))
+}
+
+#[tauri::command]
+pub(crate) fn list_transfer_tasks(
+    manager: State<'_, TransferManager>,
+) -> Vec<TransferSnapshot> {
+    manager.list()
+}
+
+#[tauri::command]
+pub(crate) fn cancel_transfer_task(
+    app: AppHandle,
+    manager: State<'_, TransferManager>,
+    transfer_id: String,
+) -> Result<TransferSnapshot, String> {
+    validate_transfer_id(&transfer_id)?;
+    manager.cancel(&app, &transfer_id)
+}
+
+#[tauri::command]
+pub(crate) fn dismiss_transfer_task(
+    manager: State<'_, TransferManager>,
+    transfer_id: String,
+) -> Result<(), String> {
+    validate_transfer_id(&transfer_id)?;
+    manager.dismiss(&transfer_id)
 }
 
 fn list_remote_files_blocking(
@@ -322,14 +407,14 @@ fn upload_paths_blocking(
 
     let mut inventory = TransferStats::default();
     for root in &roots {
-        inspect_local_entry(root, 0, &mut inventory)?;
+        inspect_local_entry(root, 0, &mut inventory, &reporter)?;
     }
     if inventory.files == 0 {
         return Err("没有可上传的普通文件（符号链接会被跳过）".to_string());
     }
 
-    reporter.emit("connecting", "", 0, Some(inventory.bytes));
-    let session = connect(&connection)?;
+    reporter.emit("connecting", "", 0, Some(inventory.bytes))?;
+    let session = connect_for_transfer(&connection, &reporter)?;
     let sftp = session
         .sftp()
         .map_err(|_| "无法建立 SFTP 子系统".to_string())?;
@@ -337,9 +422,10 @@ fn upload_paths_blocking(
 
     let mut fallback_used = false;
     let result = if package {
-        reporter.emit("checking", "tar + zstd", 0, Some(inventory.bytes));
-        if remote_supports_package_mode(&session)? {
+        reporter.emit("checking", "tar + zstd", 0, Some(inventory.bytes))?;
+        if remote_supports_package_mode(&session, &reporter)? {
             upload_package(
+                &connection,
                 &session,
                 &sftp,
                 &roots,
@@ -350,8 +436,9 @@ fn upload_paths_blocking(
             )?
         } else {
             fallback_used = true;
-            reporter.emit("fallback", "recursive SFTP", 0, Some(inventory.bytes));
+            reporter.emit("fallback", "recursive SFTP", 0, Some(inventory.bytes))?;
             upload_recursive_roots(
+                &connection,
                 &session,
                 &sftp,
                 &roots,
@@ -362,6 +449,7 @@ fn upload_paths_blocking(
         }
     } else {
         upload_recursive_roots(
+            &connection,
             &session,
             &sftp,
             &roots,
@@ -371,7 +459,8 @@ fn upload_paths_blocking(
         )?
     };
 
-    reporter.emit("completed", destination, result.bytes, Some(result.bytes));
+    reporter.task.begin_finalizing(&destination)?;
+    reporter.emit("completed", destination, result.bytes, Some(result.bytes))?;
     Ok(TransferResult {
         transfer_id,
         mode: if package && !fallback_used {
@@ -408,8 +497,8 @@ fn download_paths_blocking(
     let requested_paths = validate_remote_inputs(remote_paths)?;
     let local_root = prepare_local_directory(&local_directory)?;
 
-    reporter.emit("connecting", "", 0, None);
-    let session = connect(&connection)?;
+    reporter.emit("connecting", "", 0, None)?;
+    let session = connect_for_transfer(&connection, &reporter)?;
     let sftp = session
         .sftp()
         .map_err(|_| "无法建立 SFTP 子系统".to_string())?;
@@ -418,7 +507,7 @@ fn download_paths_blocking(
 
     let mut inventory = TransferStats::default();
     for root in &roots {
-        inspect_remote_entry(&sftp, root, 0, &mut inventory)?;
+        inspect_remote_entry(&sftp, root, 0, &mut inventory, &reporter)?;
     }
     if inventory.files == 0 {
         return Err("没有可下载的普通文件（符号链接不会下载）".to_string());
@@ -426,9 +515,10 @@ fn download_paths_blocking(
 
     let mut fallback_used = false;
     let result = if package {
-        reporter.emit("checking", "tar + zstd", 0, Some(inventory.bytes));
-        if remote_supports_package_mode(&session)? {
+        reporter.emit("checking", "tar + zstd", 0, Some(inventory.bytes))?;
+        if remote_supports_package_mode(&session, &reporter)? {
             download_package(
+                &connection,
                 &session,
                 &sftp,
                 &roots,
@@ -439,7 +529,7 @@ fn download_paths_blocking(
             )?
         } else {
             fallback_used = true;
-            reporter.emit("fallback", "recursive SFTP", 0, Some(inventory.bytes));
+            reporter.emit("fallback", "recursive SFTP", 0, Some(inventory.bytes))?;
             download_recursive_roots(
                 &session,
                 &sftp,
@@ -460,12 +550,15 @@ fn download_paths_blocking(
         )?
     };
 
+    reporter
+        .task
+        .begin_finalizing(local_root.display().to_string())?;
     reporter.emit(
         "completed",
         local_root.display().to_string(),
         result.bytes,
         Some(result.bytes),
-    );
+    )?;
     Ok(TransferResult {
         transfer_id,
         mode: if package && !fallback_used {
@@ -633,15 +726,49 @@ pub(crate) fn connect(connection: &ConnectionSpec) -> Result<Session, String> {
     Ok(session)
 }
 
+fn connect_for_transfer(
+    connection: &ConnectionSpec,
+    reporter: &ProgressReporter,
+) -> Result<Session, String> {
+    reporter.checkpoint()?;
+    let session = open_session_for_transfer(&connection.host, connection.port, reporter)?;
+    reporter.checkpoint()?;
+    verify_known_host(&session, &connection.host, connection.port)?;
+    reporter.checkpoint()?;
+    authenticate(&session, connection)?;
+    reporter.checkpoint()?;
+    Ok(session)
+}
+
 fn open_session(host: &str, port: u16) -> Result<Session, String> {
+    open_session_internal(host, port, None)
+}
+
+fn open_session_for_transfer(
+    host: &str,
+    port: u16,
+    reporter: &ProgressReporter,
+) -> Result<Session, String> {
+    open_session_internal(host, port, Some(reporter))
+}
+
+fn open_session_internal(
+    host: &str,
+    port: u16,
+    reporter: Option<&ProgressReporter>,
+) -> Result<Session, String> {
+    if let Some(reporter) = reporter {
+        reporter.checkpoint()?;
+    }
     let preferences = known_host_key_preferences(host, port, &known_hosts_files());
     for preference in preferences.iter().map(String::as_str).map(Some) {
-        match open_session_with_preference(host, port, preference) {
+        match open_session_with_preference(host, port, preference, reporter) {
             Ok(session) => return Ok(session),
+            Err(error) if error == crate::transfer_manager::TRANSFER_CANCELLED => return Err(error),
             Err(_) => continue,
         }
     }
-    match open_session_with_preference(host, port, None) {
+    match open_session_with_preference(host, port, None, reporter) {
         Ok(session) => Ok(session),
         // The unforced attempt reflects the server's actual negotiation result. A failure from an
         // earlier compatibility preference must not replace it and masquerade as a credential issue.
@@ -653,13 +780,20 @@ fn open_session_with_preference(
     host: &str,
     port: u16,
     host_key_preference: Option<&str>,
+    reporter: Option<&ProgressReporter>,
 ) -> Result<Session, String> {
+    if let Some(reporter) = reporter {
+        reporter.checkpoint()?;
+    }
     let mut last_error = None;
     let addresses = (host, port)
         .to_socket_addrs()
         .map_err(|_| "无法解析 SSH 主机地址".to_string())?;
     let mut tcp = None;
     for address in addresses.take(16) {
+        if let Some(reporter) = reporter {
+            reporter.checkpoint()?;
+        }
         match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
             Ok(stream) => {
                 tcp = Some(stream);
@@ -677,6 +811,12 @@ fn open_session_with_preference(
         .map_err(|error| format!("无法设置 SFTP 读取超时: {error}"))?;
     tcp.set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|error| format!("无法设置 SFTP 写入超时: {error}"))?;
+    if let Some(reporter) = reporter {
+        reporter.task.register_socket(
+            tcp.try_clone()
+                .map_err(|error| format!("无法注册可取消的 SFTP 连接: {error}"))?,
+        )?;
+    }
 
     let mut session = Session::new().map_err(|_| "无法初始化 SSH 会话".to_string())?;
     if let Some(preference) = host_key_preference {
@@ -686,6 +826,9 @@ fn open_session_with_preference(
     }
     session.set_tcp_stream(tcp);
     session.set_timeout(IO_TIMEOUT.as_millis() as u32);
+    if let Some(reporter) = reporter {
+        reporter.checkpoint()?;
+    }
     session.handshake().map_err(|error| {
         let preference = host_key_preference
             .map(|value| format!("，主机密钥偏好 {value}"))
@@ -1526,7 +1669,13 @@ fn ensure_unique_remote_names(paths: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn inspect_local_entry(path: &Path, depth: usize, stats: &mut TransferStats) -> Result<(), String> {
+fn inspect_local_entry(
+    path: &Path,
+    depth: usize,
+    stats: &mut TransferStats,
+    reporter: &ProgressReporter,
+) -> Result<(), String> {
+    reporter.checkpoint()?;
     check_depth_and_count(depth, stats)?;
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("无法读取本机路径 {}: {error}", path.display()))?;
@@ -1539,7 +1688,7 @@ fn inspect_local_entry(path: &Path, depth: usize, stats: &mut TransferStats) -> 
         stats.bytes = stats.bytes.saturating_add(metadata.len());
     } else if metadata.is_dir() {
         for child in sorted_local_children(path)? {
-            inspect_local_entry(&child, depth + 1, stats)?;
+            inspect_local_entry(&child, depth + 1, stats, reporter)?;
         }
     }
     Ok(())
@@ -1550,7 +1699,9 @@ fn inspect_remote_entry(
     path: &str,
     depth: usize,
     stats: &mut TransferStats,
+    reporter: &ProgressReporter,
 ) -> Result<(), String> {
+    reporter.checkpoint()?;
     check_depth_and_count(depth, stats)?;
     let metadata = sftp
         .lstat(Path::new(path))
@@ -1565,7 +1716,7 @@ fn inspect_remote_entry(
         stats.bytes = stats.bytes.saturating_add(metadata.size.unwrap_or(0));
     } else if file_type.is_dir() {
         for (child, _) in sorted_remote_children(sftp, path)? {
-            inspect_remote_entry(sftp, &child, depth + 1, stats)?;
+            inspect_remote_entry(sftp, &child, depth + 1, stats, reporter)?;
         }
     }
     Ok(())
@@ -1614,6 +1765,7 @@ fn sorted_remote_children(sftp: &Sftp, directory: &str) -> Result<Vec<(String, F
 }
 
 fn upload_recursive_roots(
+    connection: &ConnectionSpec,
     session: &Session,
     sftp: &Sftp,
     roots: &[PathBuf],
@@ -1631,6 +1783,7 @@ fn upload_recursive_roots(
             .and_then(|value| value.to_str())
             .ok_or_else(|| "上传路径缺少有效文件名".to_string())?;
         upload_local_entry(
+            connection,
             session,
             sftp,
             root,
@@ -1645,6 +1798,7 @@ fn upload_recursive_roots(
 }
 
 fn upload_local_entry(
+    connection: &ConnectionSpec,
     session: &Session,
     sftp: &Sftp,
     local_path: &Path,
@@ -1654,6 +1808,7 @@ fn upload_local_entry(
     total: u64,
     stats: &mut TransferStats,
 ) -> Result<(), String> {
+    reporter.checkpoint()?;
     check_depth_and_count(depth, stats)?;
     let metadata = fs::symlink_metadata(local_path)
         .map_err(|error| format!("无法读取本机路径 {}: {error}", local_path.display()))?;
@@ -1669,6 +1824,7 @@ fn upload_local_entry(
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| "本机目录包含无法传输的文件名".to_string())?;
             upload_local_entry(
+                connection,
                 session,
                 sftp,
                 &child,
@@ -1681,7 +1837,7 @@ fn upload_local_entry(
         }
     } else if metadata.is_file() {
         reject_remote_symlink_if_present(sftp, remote_path)?;
-        reporter.emit("uploading", remote_path, stats.bytes, Some(total));
+        reporter.emit("uploading", remote_path, stats.bytes, Some(total))?;
         let part_path = format!("{remote_path}.vpshell-{}.part", uuid::Uuid::new_v4());
         let expected_size = metadata.len();
         let result = (|| {
@@ -1714,20 +1870,22 @@ fn upload_local_entry(
                 return Err("上传文件大小校验失败，未提交 .part 文件".to_string());
             }
 
-            let local_hash = sha256_file(local_path)?;
-            if let Some(remote_hash) = remote_sha256(session, &part_path)? {
+            let local_hash = sha256_file(local_path, reporter)?;
+            if let Some(remote_hash) = remote_sha256(session, &part_path, reporter)? {
                 if remote_hash != local_hash {
                     return Err("上传文件 SHA-256 校验失败，未提交 .part 文件".to_string());
                 }
             } else {
                 stats.sha256_verified = false;
             }
+            reporter.checkpoint()?;
             sftp.rename(Path::new(&part_path), Path::new(remote_path), None)
                 .map_err(|error| format!("无法原子提交远程文件: {error}"))?;
+            reporter.task.note_commit();
             Ok(())
         })();
         if result.is_err() {
-            let _ = sftp.unlink(Path::new(&part_path));
+            cleanup_remote_artifacts(connection, sftp, &[&part_path], None, reporter);
         }
         result?;
         stats.files += 1;
@@ -1777,6 +1935,7 @@ fn download_remote_entry(
     total: u64,
     stats: &mut TransferStats,
 ) -> Result<(), String> {
+    reporter.checkpoint()?;
     check_depth_and_count(depth, stats)?;
     ensure_local_destination_safe(local_root, local_path)?;
     let metadata = sftp
@@ -1806,7 +1965,7 @@ fn download_remote_entry(
             )?;
         }
     } else if file_type.is_file() {
-        reporter.emit("downloading", remote_path, stats.bytes, Some(total));
+        reporter.emit("downloading", remote_path, stats.bytes, Some(total))?;
         if let Some(parent) = local_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("无法创建本机目录 {}: {error}", parent.display()))?;
@@ -1829,7 +1988,7 @@ fn download_remote_entry(
         let expected_size = metadata
             .size
             .ok_or_else(|| "SFTP 服务器未返回远程文件大小".to_string())?;
-        let remote_hash = remote_sha256(session, remote_path)?;
+        let remote_hash = remote_sha256(session, remote_path, reporter)?;
         let result = (|| {
             let mut input = sftp
                 .open(Path::new(remote_path))
@@ -1864,18 +2023,20 @@ fn download_remote_entry(
                 return Err("下载文件大小校验失败，未提交 .part 文件".to_string());
             }
             if let Some(remote_hash) = remote_hash.as_deref() {
-                if sha256_file(&part_path)? != remote_hash {
+                if sha256_file(&part_path, reporter)? != remote_hash {
                     return Err("下载文件 SHA-256 校验失败，未提交 .part 文件".to_string());
                 }
             } else {
                 stats.sha256_verified = false;
             }
+            reporter.checkpoint()?;
             fs::rename(&part_path, local_path)
                 .map_err(|error| format!("无法原子提交本机文件: {error}"))?;
+            reporter.task.note_commit();
             Ok(())
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&part_path);
+            cleanup_local_file(&part_path, reporter);
         }
         result?;
         stats.files += 1;
@@ -1894,6 +2055,7 @@ fn copy_with_progress<R: Read, W: Write>(
 ) -> Result<(), String> {
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     loop {
+        reporter.checkpoint()?;
         let length = input
             .read(&mut buffer)
             .map_err(|error| format!("读取传输数据失败: {error}"))?;
@@ -1904,7 +2066,7 @@ fn copy_with_progress<R: Read, W: Write>(
             .write_all(&buffer[..length])
             .map_err(|error| format!("写入传输数据失败: {error}"))?;
         *bytes_done = bytes_done.saturating_add(length as u64);
-        reporter.emit(phase, current_path, *bytes_done, bytes_total);
+        reporter.emit(phase, current_path, *bytes_done, bytes_total)?;
     }
     Ok(())
 }
@@ -1943,19 +2105,32 @@ fn reject_remote_symlink_if_present(sftp: &Sftp, path: &str) -> Result<(), Strin
     }
 }
 
-fn remote_supports_package_mode(session: &Session) -> Result<bool, String> {
+fn remote_supports_package_mode(
+    session: &Session,
+    reporter: &ProgressReporter,
+) -> Result<bool, String> {
     let status = run_remote_command(
         session,
         "command -v tar >/dev/null 2>&1 && command -v zstd >/dev/null 2>&1",
+        reporter,
     )?;
     Ok(status == 0)
 }
 
-fn run_remote_command(session: &Session, command: &str) -> Result<i32, String> {
-    run_remote_command_capture(session, command).map(|(status, _)| status)
+fn run_remote_command(
+    session: &Session,
+    command: &str,
+    reporter: &ProgressReporter,
+) -> Result<i32, String> {
+    run_remote_command_capture(session, command, reporter).map(|(status, _)| status)
 }
 
-fn run_remote_command_capture(session: &Session, command: &str) -> Result<(i32, String), String> {
+fn run_remote_command_capture(
+    session: &Session,
+    command: &str,
+    reporter: &ProgressReporter,
+) -> Result<(i32, String), String> {
+    reporter.checkpoint()?;
     if command.len() > 64 * 1024 || command.contains('\0') {
         return Err("远程命令无效或过长".to_string());
     }
@@ -1968,6 +2143,7 @@ fn run_remote_command_capture(session: &Session, command: &str) -> Result<(i32, 
     channel
         .exec(command)
         .map_err(|_| "无法执行远程打包命令".to_string())?;
+    reporter.checkpoint()?;
     let mut output = Vec::new();
     {
         let mut limited = (&mut channel).take(256 * 1024);
@@ -1979,19 +2155,24 @@ fn run_remote_command_capture(session: &Session, command: &str) -> Result<(i32, 
     channel
         .wait_close()
         .map_err(|_| "等待远程命令结束失败".to_string())?;
+    reporter.checkpoint()?;
     let status = channel
         .exit_status()
         .map_err(|_| "无法获取远程命令状态".to_string())?;
     Ok((status, String::from_utf8_lossy(&output).into_owned()))
 }
 
-fn remote_sha256(session: &Session, path: &str) -> Result<Option<String>, String> {
+fn remote_sha256(
+    session: &Session,
+    path: &str,
+    reporter: &ProgressReporter,
+) -> Result<Option<String>, String> {
     validate_remote_path(path)?;
     let quoted_path = quote_posix_literal(path);
     let command = format!(
         "if command -v sha256sum >/dev/null 2>&1; then sha256sum -- {quoted_path}; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -- {quoted_path}; else exit 125; fi"
     );
-    let (status, output) = run_remote_command_capture(session, &command)?;
+    let (status, output) = run_remote_command_capture(session, &command, reporter)?;
     if status == 125 {
         return Ok(None);
     }
@@ -2006,12 +2187,13 @@ fn remote_sha256(session: &Session, path: &str) -> Result<Option<String>, String
     Ok(Some(digest.to_ascii_lowercase()))
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
+fn sha256_file(path: &Path, reporter: &ProgressReporter) -> Result<String, String> {
     let mut file =
         fs::File::open(path).map_err(|error| format!("无法打开文件进行 SHA-256 校验: {error}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     loop {
+        reporter.checkpoint()?;
         let length = file
             .read(&mut buffer)
             .map_err(|error| format!("读取文件进行 SHA-256 校验失败: {error}"))?;
@@ -2024,6 +2206,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 }
 
 fn upload_package(
+    connection: &ConnectionSpec,
     session: &Session,
     sftp: &Sftp,
     roots: &[PathBuf],
@@ -2033,8 +2216,8 @@ fn upload_package(
     inventory: &TransferStats,
 ) -> Result<TransferStats, String> {
     let archive = TempFileGuard::new(transfer_id, "upload.tar.zst");
-    reporter.emit("packaging", archive.path().display().to_string(), 0, None);
-    create_local_archive(roots, archive.path())?;
+    reporter.emit("packaging", archive.path().display().to_string(), 0, None)?;
+    create_local_archive(roots, archive.path(), reporter)?;
 
     let remote_home = canonical_remote_path(sftp, ".")?;
     let cache = remote_join(&remote_home, ".cache/vpshell");
@@ -2082,8 +2265,8 @@ fn upload_package(
             return Err("上传打包文件大小校验失败，未提交 .part 文件".to_string());
         }
         let mut sha256_verified = false;
-        if let Some(remote_hash) = remote_sha256(session, &remote_part)? {
-            if remote_hash != sha256_file(archive.path())? {
+        if let Some(remote_hash) = remote_sha256(session, &remote_part, reporter)? {
+            if remote_hash != sha256_file(archive.path(), reporter)? {
                 return Err("上传打包文件 SHA-256 校验失败，未提交 .part 文件".to_string());
             }
             sha256_verified = true;
@@ -2092,7 +2275,7 @@ fn upload_package(
             .map_err(|error| format!("无法原子提交远程打包文件: {error}"))?;
 
         ensure_remote_directory(sftp, &remote_staging)?;
-        reporter.emit("extracting", &remote_staging, 0, Some(inventory.bytes));
+        reporter.emit("extracting", &remote_staging, 0, Some(inventory.bytes))?;
         let command = format!(
             "zstd -dc -- {} > {} && tar -xf {} -C {}; status=$?; rm -f -- {}; exit \"$status\"",
             quote_posix_literal(&remote_archive),
@@ -2101,11 +2284,12 @@ fn upload_package(
             quote_posix_literal(&remote_staging),
             quote_posix_literal(&remote_tar_part)
         );
-        let status = run_remote_command(session, &command)?;
+        let status = run_remote_command(session, &command, reporter)?;
         if status != 0 {
             return Err("远程 tar+zstd 解包失败".to_string());
         }
-        commit_remote_staged_roots(sftp, roots, &remote_staging, destination)?;
+        reporter.task.begin_finalizing(destination)?;
+        commit_remote_staged_roots(sftp, roots, &remote_staging, destination, reporter)?;
         Ok(TransferStats {
             files: inventory.files,
             bytes: inventory.bytes,
@@ -2114,10 +2298,14 @@ fn upload_package(
             sha256_verified,
         })
     })();
-    let _ = sftp.unlink(Path::new(&remote_part));
-    let _ = sftp.unlink(Path::new(&remote_tar_part));
-    let _ = sftp.unlink(Path::new(&remote_archive));
-    let _ = remove_remote_tree(sftp, &remote_staging, 0);
+    cleanup_remote_artifacts(
+        connection,
+        sftp,
+        &[&remote_part, &remote_tar_part, &remote_archive],
+        Some(&remote_staging),
+        reporter,
+    );
+    cleanup_local_file(archive.path(), reporter);
     result
 }
 
@@ -2126,7 +2314,9 @@ fn commit_remote_staged_roots(
     roots: &[PathBuf],
     staging_directory: &str,
     destination: &str,
+    reporter: &ProgressReporter,
 ) -> Result<(), String> {
+    reporter.checkpoint()?;
     let expected = roots
         .iter()
         .map(|path| {
@@ -2153,6 +2343,7 @@ fn commit_remote_staged_roots(
     }
 
     for name in &expected {
+        reporter.checkpoint()?;
         let target = remote_join(destination, name);
         if sftp.lstat(Path::new(&target)).is_ok() {
             return Err(format!(
@@ -2167,15 +2358,21 @@ fn commit_remote_staged_roots(
         let target = remote_join(destination, name);
         if let Err(error) = sftp.rename(Path::new(&source), Path::new(&target), None) {
             for committed_name in committed.iter().rev() {
-                let _ = sftp.rename(
+                match sftp.rename(
                     Path::new(&remote_join(destination, committed_name)),
                     Path::new(&remote_join(staging_directory, committed_name)),
                     None,
-                );
+                ) {
+                    Ok(()) => reporter.task.note_rollback(),
+                    Err(rollback_error) => reporter.task.cleanup_warning(format!(
+                        "远程提交回滚失败（{committed_name}）: {rollback_error}"
+                    )),
+                }
             }
             return Err(format!("无法原子提交远程条目: {error}"));
         }
         committed.push(name.clone());
+        reporter.task.note_commit();
     }
     Ok(())
 }
@@ -2186,7 +2383,8 @@ fn remove_remote_tree(sftp: &Sftp, path: &str, depth: usize) -> Result<(), Strin
     }
     let stat = match sftp.lstat(Path::new(path)) {
         Ok(stat) => stat,
-        Err(_) => return Ok(()),
+        Err(error) if is_sftp_not_found(&error) => return Ok(()),
+        Err(error) => return Err(format!("无法检查远程临时路径 {path}: {error}")),
     };
     if stat.file_type().is_dir() {
         for (child, _) in sorted_remote_children(sftp, path)? {
@@ -2200,7 +2398,105 @@ fn remove_remote_tree(sftp: &Sftp, path: &str, depth: usize) -> Result<(), Strin
     }
 }
 
-fn create_local_archive(roots: &[PathBuf], archive_path: &Path) -> Result<(), String> {
+fn cleanup_remote_artifacts(
+    connection: &ConnectionSpec,
+    sftp: &Sftp,
+    files: &[&str],
+    tree: Option<&str>,
+    reporter: &ProgressReporter,
+) {
+    reporter.task.begin_cleanup();
+    let mut failed_files = Vec::new();
+    for path in files {
+        if remove_remote_file_if_present(sftp, path).is_err() {
+            failed_files.push((*path).to_string());
+        }
+    }
+    let mut failed_tree = tree
+        .map(|path| remove_remote_tree(sftp, path, 0).is_err())
+        .unwrap_or(false);
+
+    if failed_files.is_empty() && !failed_tree {
+        return;
+    }
+
+    let retry = (|| {
+        let session = connect(connection)
+            .map_err(|error| format!("无法重连以清理传输临时文件: {error}"))?;
+        let retry_sftp = session
+            .sftp()
+            .map_err(|_| "无法重建 SFTP 子系统以清理临时文件".to_string())?;
+        failed_files.retain(|path| remove_remote_file_if_present(&retry_sftp, path).is_err());
+        if failed_tree {
+            failed_tree = tree
+                .map(|path| remove_remote_tree(&retry_sftp, path, 0).is_err())
+                .unwrap_or(false);
+        }
+        Ok::<(), String>(())
+    })();
+
+    if let Err(error) = retry {
+        reporter.task.cleanup_warning(error);
+    }
+    if !failed_files.is_empty() {
+        reporter.task.cleanup_warning(format!(
+            "远程临时文件清理不完整: {}",
+            failed_files.join(", ")
+        ));
+    }
+    if failed_tree {
+        reporter.task.cleanup_warning(format!(
+            "远程临时目录清理不完整: {}",
+            tree.unwrap_or_default()
+        ));
+    }
+}
+
+fn remove_remote_file_if_present(sftp: &Sftp, path: &str) -> Result<(), String> {
+    match sftp.lstat(Path::new(path)) {
+        Err(error) if is_sftp_not_found(&error) => Ok(()),
+        Err(error) => Err(format!("无法检查远程临时文件 {path}: {error}")),
+        Ok(stat) if stat.is_dir() => Err(format!("远程临时路径意外成为目录: {path}")),
+        Ok(_) => sftp
+            .unlink(Path::new(path))
+            .map_err(|error| format!("无法清理远程临时文件 {path}: {error}")),
+    }
+}
+
+fn is_sftp_not_found(error: &ssh2::Error) -> bool {
+    matches!(error.code(), ErrorCode::SFTP(2))
+}
+
+fn cleanup_local_file(path: &Path, reporter: &ProgressReporter) {
+    reporter.task.begin_cleanup();
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => reporter.task.cleanup_warning(format!(
+            "本机临时文件清理失败（{}）: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn cleanup_local_tree(path: &Path, reporter: &ProgressReporter) {
+    reporter.task.begin_cleanup();
+    match fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => reporter.task.cleanup_warning(format!(
+            "本机临时目录清理失败（{}）: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn create_local_archive(
+    roots: &[PathBuf],
+    archive_path: &Path,
+    reporter: &ProgressReporter,
+) -> Result<(), String> {
+    reporter.checkpoint()?;
     let output =
         fs::File::create(archive_path).map_err(|error| format!("无法创建本机打包文件: {error}"))?;
     let encoder = zstd::stream::write::Encoder::new(output, 3)
@@ -2211,7 +2507,7 @@ fn create_local_archive(roots: &[PathBuf], archive_path: &Path) -> Result<(), St
         let name = root
             .file_name()
             .ok_or_else(|| "上传路径缺少文件名".to_string())?;
-        append_local_archive_entry(&mut builder, root, Path::new(name), 0)?;
+        append_local_archive_entry(&mut builder, root, Path::new(name), 0, reporter)?;
     }
     let encoder = builder
         .into_inner()
@@ -2219,7 +2515,8 @@ fn create_local_archive(roots: &[PathBuf], archive_path: &Path) -> Result<(), St
     encoder
         .finish()
         .map_err(|error| format!("无法完成 zstd 压缩: {error}"))?;
-    validate_archive_contents(archive_path, None)?;
+    reporter.checkpoint()?;
+    validate_archive_contents(archive_path, None, reporter)?;
     Ok(())
 }
 
@@ -2228,7 +2525,9 @@ fn append_local_archive_entry<W: Write>(
     source: &Path,
     archive_path: &Path,
     depth: usize,
+    reporter: &ProgressReporter,
 ) -> Result<(), String> {
+    reporter.checkpoint()?;
     if depth > MAX_DIRECTORY_DEPTH {
         return Err("目录层级超过安全限制".to_string());
     }
@@ -2246,17 +2545,30 @@ fn append_local_archive_entry<W: Write>(
             let name = child
                 .file_name()
                 .ok_or_else(|| "本机目录包含无效文件名".to_string())?;
-            append_local_archive_entry(builder, &child, &archive_path.join(name), depth + 1)?;
+            append_local_archive_entry(
+                builder,
+                &child,
+                &archive_path.join(name),
+                depth + 1,
+                reporter,
+            )?;
         }
     } else if metadata.is_file() {
+        let mut input = fs::File::open(source)
+            .map_err(|error| format!("无法打开待打包文件 {}: {error}", source.display()))?;
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata(&metadata);
+        header.set_cksum();
+        let mut input = CancellableReader::new(&mut input, reporter.task.clone());
         builder
-            .append_path_with_name(source, archive_path)
+            .append_data(&mut header, archive_path, &mut input)
             .map_err(|error| format!("无法加入文件 {}: {error}", source.display()))?;
     }
     Ok(())
 }
 
 fn download_package(
+    connection: &ConnectionSpec,
     session: &Session,
     sftp: &Sftp,
     roots: &[String],
@@ -2293,8 +2605,8 @@ fn download_package(
             quote_posix_literal(&remote_part),
             quote_posix_literal(&remote_tar_part)
         );
-        reporter.emit("packaging", roots.join(", "), 0, Some(inventory.bytes));
-        let status = run_remote_command(session, &command)?;
+        reporter.emit("packaging", roots.join(", "), 0, Some(inventory.bytes))?;
+        let status = run_remote_command(session, &command, reporter)?;
         if status != 0 {
             return Err("远程 tar+zstd 打包失败".to_string());
         }
@@ -2304,7 +2616,7 @@ fn download_package(
             .map_err(|error| format!("无法读取远程打包文件: {error}"))?
             .size
             .ok_or_else(|| "SFTP 服务器未返回远程打包文件大小".to_string())?;
-        let remote_hash = remote_sha256(session, &remote_part)?;
+        let remote_hash = remote_sha256(session, &remote_part, reporter)?;
         sftp.rename(Path::new(&remote_part), Path::new(&remote_archive), None)
             .map_err(|error| format!("无法原子提交远程打包文件: {error}"))?;
         let mut input = sftp
@@ -2339,7 +2651,7 @@ fn download_package(
         }
         let mut sha256_verified = false;
         if let Some(remote_hash) = remote_hash {
-            if sha256_file(local_archive.path())? != remote_hash {
+            if sha256_file(local_archive.path(), reporter)? != remote_hash {
                 return Err("下载打包文件 SHA-256 校验失败，未处理临时文件".to_string());
             }
             sha256_verified = true;
@@ -2350,7 +2662,7 @@ fn download_package(
             local_directory.display().to_string(),
             0,
             Some(inventory.bytes),
-        );
+        )?;
         let staging_directory =
             local_directory.join(format!(".vpshell-{}.part", uuid::Uuid::new_v4()));
         fs::create_dir(&staging_directory)
@@ -2359,10 +2671,18 @@ fn download_package(
             .canonicalize()
             .map_err(|error| format!("无法规范化本机解包临时目录: {error}"))?;
         let extract_result = (|| {
-            extract_archive_safely(local_archive.path(), &staging_directory, inventory.bytes)?;
-            commit_staged_roots(roots, &staging_directory, local_directory)
+            extract_archive_safely(
+                local_archive.path(),
+                &staging_directory,
+                inventory.bytes,
+                reporter,
+            )?;
+            reporter
+                .task
+                .begin_finalizing(local_directory.display().to_string())?;
+            commit_staged_roots(roots, &staging_directory, local_directory, reporter)
         })();
-        let _ = fs::remove_dir_all(&staging_directory);
+        cleanup_local_tree(&staging_directory, reporter);
         extract_result?;
         Ok(TransferStats {
             files: inventory.files,
@@ -2372,9 +2692,14 @@ fn download_package(
             sha256_verified,
         })
     })();
-    let _ = sftp.unlink(Path::new(&remote_part));
-    let _ = sftp.unlink(Path::new(&remote_tar_part));
-    let _ = sftp.unlink(Path::new(&remote_archive));
+    cleanup_remote_artifacts(
+        connection,
+        sftp,
+        &[&remote_part, &remote_tar_part, &remote_archive],
+        None,
+        reporter,
+    );
+    cleanup_local_file(local_archive.path(), reporter);
     result
 }
 
@@ -2382,7 +2707,9 @@ fn commit_staged_roots(
     roots: &[String],
     staging_directory: &Path,
     destination: &Path,
+    reporter: &ProgressReporter,
 ) -> Result<(), String> {
+    reporter.checkpoint()?;
     let expected = roots
         .iter()
         .map(|path| remote_basename(path).map(str::to_string))
@@ -2402,6 +2729,7 @@ fn commit_staged_roots(
     }
 
     for name in &expected {
+        reporter.checkpoint()?;
         let target = destination.join(name);
         if target.exists() {
             return Err(format!(
@@ -2417,14 +2745,20 @@ fn commit_staged_roots(
         let target = destination.join(name);
         if let Err(error) = fs::rename(&source, &target) {
             for committed_name in committed.iter().rev() {
-                let _ = fs::rename(
+                match fs::rename(
                     destination.join(committed_name),
                     staging_directory.join(committed_name),
-                );
+                ) {
+                    Ok(()) => reporter.task.note_rollback(),
+                    Err(rollback_error) => reporter.task.cleanup_warning(format!(
+                        "本机提交回滚失败（{committed_name}）: {rollback_error}"
+                    )),
+                }
             }
             return Err(format!("无法原子提交下载条目: {error}"));
         }
         committed.push(name.clone());
+        reporter.task.note_commit();
     }
     Ok(())
 }
@@ -2432,6 +2766,7 @@ fn commit_staged_roots(
 fn validate_archive_contents(
     archive_path: &Path,
     expected_bytes: Option<u64>,
+    reporter: &ProgressReporter,
 ) -> Result<(), String> {
     let input =
         fs::File::open(archive_path).map_err(|error| format!("无法打开打包文件: {error}"))?;
@@ -2445,6 +2780,7 @@ fn validate_archive_contents(
         .entries()
         .map_err(|error| format!("无法读取 tar 目录: {error}"))?
     {
+        reporter.checkpoint()?;
         let entry = entry.map_err(|error| format!("无法读取 tar 条目: {error}"))?;
         entries_seen += 1;
         if entries_seen > MAX_TRANSFER_ENTRIES {
@@ -2467,8 +2803,9 @@ fn extract_archive_safely(
     archive_path: &Path,
     destination: &Path,
     expected_bytes: u64,
+    reporter: &ProgressReporter,
 ) -> Result<(), String> {
-    validate_archive_contents(archive_path, Some(expected_bytes))?;
+    validate_archive_contents(archive_path, Some(expected_bytes), reporter)?;
     let input =
         fs::File::open(archive_path).map_err(|error| format!("无法打开下载的打包文件: {error}"))?;
     let decoder = zstd::stream::read::Decoder::new(input)
@@ -2484,6 +2821,7 @@ fn extract_archive_safely(
         .entries()
         .map_err(|error| format!("无法读取 tar 目录: {error}"))?;
     for entry in entries {
+        reporter.checkpoint()?;
         let mut entry = entry.map_err(|error| format!("无法读取 tar 条目: {error}"))?;
         entries_seen += 1;
         if entries_seen > MAX_TRANSFER_ENTRIES {

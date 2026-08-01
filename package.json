@@ -1,7 +1,7 @@
 {
   "name": "vpshell",
   "private": true,
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0-alpha.7",
   "description": "A lightweight, auditable SSH operations workspace with user-controlled sync.",
   "author": "sanrokamlan-prog",
   "license": "Apache-2.0",

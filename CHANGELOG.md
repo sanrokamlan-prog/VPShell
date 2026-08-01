@@ -4,6 +4,27 @@ All notable changes to VPShell are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/). Pre-release versions may change local data structures before the first stable release.
 
+## [0.1.0-alpha.7] - 2026-08-01
+
+### Added
+
+- SFTP uploads and downloads now run as backend-owned tasks with query, list, cancel and dismiss commands. Up to six tasks may run concurrently, and bounded terminal records remain available for the current application process.
+- The file panel restores the matching task after it is closed, reopened or switched away from, and polls the backend as a fallback when a frontend event is missed.
+- Cancellation distinguishes queued, running, cancelling, finalizing and terminal states, reports partial commits, and interrupts the active SSH socket when cooperative checkpoints alone cannot stop I/O promptly.
+- Known local and remote temporary paths are cleaned after success, failure or cancellation. Remote cleanup retries once with a fresh direct connection and surfaces explicit warnings when cleanup cannot be completed.
+- Added a license-aware open-source reference ledger documenting ideas studied from Tabby, Electerm, WindTerm, Termora and openFinalShell, separately from actual third-party code notices.
+
+### Changed
+
+- Transfer commands return an accepted task snapshot immediately instead of tying task lifetime to the mounted file panel.
+- Package validation, hashing, recursive traversal, copying, extraction and atomic commit boundaries now include cancellation checkpoints. Once final commit starts, cancellation is rejected rather than pretending it succeeded.
+
+### Known limitations
+
+- Transfer task records live in process memory. Application restart does not resume or recover active transfers.
+- Pause/resume, interrupted-transfer continuation and a persistent retry queue remain roadmap work.
+- A remote package command may continue briefly if the server has already detached it before the SSH socket is interrupted; cleanup reports the remaining artifact when it cannot be removed.
+
 ## [0.1.0-alpha.6] - 2026-07-31
 
 ### Fixed
@@ -126,6 +147,7 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 - The system OpenSSH process does not expose structured authentication success, so a failed authentication attempt can still appear in recent connections.
 - Private-key files are written only to the user-selected local path; portable encrypted export is not implemented.
 
+[0.1.0-alpha.7]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.4

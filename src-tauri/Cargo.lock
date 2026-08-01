@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "vpshell"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64 0.23.0",
  "des",

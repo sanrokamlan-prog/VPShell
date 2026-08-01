@@ -5,6 +5,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ArrowUp,
+  CircleStop,
   CheckCircle2,
   Download,
   File,
@@ -49,28 +50,44 @@ interface RemoteDirectoryResult {
   entries: RemoteFileEntry[];
 }
 
-type TransferStatus = "preparing" | "packaging" | "transferring" | "extracting" | "completed" | "failed" | "cancelled";
+type TransferTaskStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled";
+type TransferDisplayStatus = TransferTaskStatus | "finalizing";
+type TransferCleanupStatus = "notRequired" | "pending" | "completed" | "warning";
 
-interface TransferProgressEvent {
+interface TransferResult {
   transferId: string;
-  status?: string;
-  phase?: string;
-  transferredBytes?: number;
-  bytesTransferred?: number;
-  totalBytes?: number;
-  currentPath?: string;
-  path?: string;
-  message?: string;
+  mode: string;
+  filesTransferred: number;
+  bytesTransferred: number;
+  skippedSymlinks: number;
+  fallbackUsed: boolean;
+  resumable: boolean;
+  verification: string;
+  limitations: string[];
 }
 
-interface ActiveTransfer {
-  id: string;
-  direction: "upload" | "download";
-  status: TransferStatus;
+interface TransferSnapshot {
+  transferId: string;
+  kind: "upload" | "download";
+  host: string;
+  port: number;
+  username: string;
+  status: TransferTaskStatus;
+  seq: number;
+  phase: string;
+  currentPath: string;
   transferredBytes: number;
-  totalBytes: number;
-  currentPath?: string;
-  message?: string;
+  totalBytes: number | null;
+  result: TransferResult | null;
+  error: string | null;
+  partialCommit: boolean;
+  cleanupStatus: TransferCleanupStatus;
+  cleanupWarnings: string[];
+  finalizing: boolean;
+  canCancel: boolean;
+  canDismiss: boolean;
+  createdAt: number;
+  updatedAt: number;
 }
 
 interface BeginExternalEditResult {
@@ -188,28 +205,76 @@ function formatModified(value: RemoteFileEntry["modified"]) {
   });
 }
 
-function normalizedTransferStatus(value: string | undefined): TransferStatus {
-  if (value === "completed" || value === "done") return "completed";
-  if (value === "failed" || value === "error") return "failed";
-  if (value === "cancelled") return "cancelled";
-  if (value === "packaging") return "packaging";
-  if (value === "extracting") return "extracting";
-  if (value === "connecting" || value === "checking") return "preparing";
-  return "transferring";
+function isActiveTransfer(snapshot: TransferSnapshot | null) {
+  return snapshot !== null && ["queued", "running", "cancelling"].includes(snapshot.status);
 }
 
-function transferStatusText(transfer: ActiveTransfer) {
-  const action = transfer.direction === "upload" ? "上传" : "下载";
-  const labels: Record<TransferStatus, string> = {
-    preparing: `正在准备${action}`,
+function displayTransferStatus(snapshot: TransferSnapshot): TransferDisplayStatus {
+  return snapshot.finalizing || snapshot.phase === "finalizing" ? "finalizing" : snapshot.status;
+}
+
+function transferStatusText(snapshot: TransferSnapshot) {
+  const action = snapshot.kind === "upload" ? "上传" : "下载";
+  const status = displayTransferStatus(snapshot);
+  if (status === "queued") return `${action}任务已排队`;
+  if (status === "cancelling") return `正在取消${action}`;
+  if (status === "finalizing") return `正在提交${action}结果`;
+  if (status === "completed") return `${action}完成`;
+  if (status === "failed") return `${action}失败`;
+  if (status === "cancelled") return `${action}已取消`;
+
+  const phaseLabels: Record<string, string> = {
+    starting: `正在准备${action}`,
+    connecting: "正在建立 SFTP 连接",
+    checking: "正在检查打包传输能力",
+    fallback: "正在切换到逐文件传输",
     packaging: "正在打包",
-    transferring: `正在${action}`,
-    extracting: "正在远端解包",
-    completed: `${action}完成`,
-    failed: `${action}失败`,
-    cancelled: `${action}已取消`,
+    extracting: "正在解包",
+    uploading: "正在上传",
+    downloading: "正在下载",
   };
-  return labels[transfer.status];
+  return phaseLabels[snapshot.phase] ?? `正在${action}`;
+}
+
+function normalizeHost(host: string) {
+  return host.trim().replace(/^\[|\]$/g, "").toLocaleLowerCase("en-US");
+}
+
+function snapshotMatchesConnection(snapshot: TransferSnapshot, connection: SshConnectionSpec) {
+  return normalizeHost(snapshot.host) === normalizeHost(connection.host)
+    && snapshot.port === connection.port
+    && snapshot.username === connection.username;
+}
+
+function makePendingSnapshot(
+  transferId: string,
+  kind: TransferSnapshot["kind"],
+  connection: SshConnectionSpec,
+): TransferSnapshot {
+  const now = Date.now();
+  return {
+    transferId,
+    kind,
+    host: connection.host,
+    port: connection.port,
+    username: connection.username,
+    status: "queued",
+    seq: 0,
+    phase: "queued",
+    currentPath: "",
+    transferredBytes: 0,
+    totalBytes: null,
+    result: null,
+    error: null,
+    partialCommit: false,
+    cleanupStatus: "notRequired",
+    cleanupWarnings: [],
+    finalizing: false,
+    canCancel: false,
+    canDismiss: false,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 function entryIcon(kind: RemoteEntryKind) {
@@ -240,6 +305,9 @@ export function FileTransferPanel({
   const editSaveInFlightRef = useRef<Set<string>>(new Set());
   const autoSaveRevisionRef = useRef<Set<string>>(new Set());
   const autoUploadEditedFilesRef = useRef(autoUploadEditedFiles);
+  const transferSequenceRef = useRef<Map<string, number>>(new Map());
+  const handledTerminalTransfersRef = useRef<Set<string>>(new Set());
+  const transferRecoveryGenerationRef = useRef(0);
   const [path, setPath] = useState(initialPath.trim() || "/");
   const [pathInput, setPathInput] = useState(initialPath.trim() || "/");
   const [entries, setEntries] = useState<RemoteFileEntry[]>([]);
@@ -247,7 +315,8 @@ export function FileTransferPanel({
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [packageTransfer, setPackageTransfer] = useState(initialPackageTransferSetting);
-  const [activeTransfer, setActiveTransfer] = useState<ActiveTransfer | null>(null);
+  const [activeTransfer, setActiveTransfer] = useState<TransferSnapshot | null>(null);
+  const [transferActionError, setTransferActionError] = useState<string | null>(null);
   const [dragInside, setDragInside] = useState(false);
   const [dragItemCount, setDragItemCount] = useState(0);
   const [editOpeningPath, setEditOpeningPath] = useState<string | null>(null);
@@ -282,8 +351,47 @@ export function FileTransferPanel({
     ? selectedEntries[0]
     : null;
 
-  const transferBusy = activeTransfer !== null
-    && !["completed", "failed", "cancelled"].includes(activeTransfer.status);
+  const transferBusy = isActiveTransfer(activeTransfer);
+
+  function applyTransferSnapshot(snapshot: TransferSnapshot) {
+    if (!snapshotMatchesConnection(snapshot, connectionRef.current)) return false;
+    const previousSequence = transferSequenceRef.current.get(snapshot.transferId) ?? -1;
+    if (snapshot.seq <= previousSequence) return false;
+    transferSequenceRef.current.set(snapshot.transferId, snapshot.seq);
+
+    setActiveTransfer((current) => {
+      if (current?.transferId === snapshot.transferId) return snapshot;
+      if (isActiveTransfer(current)) return current;
+      if (isActiveTransfer(snapshot)) return snapshot;
+      if (current === null || snapshot.updatedAt >= current.updatedAt) return snapshot;
+      return current;
+    });
+    return true;
+  }
+
+  async function recoverTransfer(transferId: string) {
+    try {
+      const snapshot = await invoke<TransferSnapshot | null>("get_transfer_task", { transferId });
+      if (snapshot) applyTransferSnapshot(snapshot);
+      return snapshot;
+    } catch {
+      return null;
+    }
+  }
+
+  function failPendingTransfer(transferId: string, error: unknown) {
+    setActiveTransfer((current) => current?.transferId === transferId
+      ? {
+          ...current,
+          status: "failed",
+          phase: "failed",
+          error: String(error),
+          canCancel: false,
+          canDismiss: true,
+          updatedAt: Date.now(),
+        }
+      : current);
+  }
 
   async function loadDirectory(targetPath: string) {
     const requestedPath = targetPath.trim() || "/";
@@ -334,31 +442,25 @@ export function FileTransferPanel({
     }
 
     const transferId = makeTransferId();
-    setActiveTransfer({
-      id: transferId,
-      direction: "upload",
-      status: "preparing",
-      transferredBytes: 0,
-      totalBytes: 0,
-    });
+    transferSequenceRef.current.delete(transferId);
+    handledTerminalTransfersRef.current.delete(transferId);
+    setTransferActionError(null);
+    setActiveTransfer(makePendingSnapshot(transferId, "upload", connectionRef.current));
     try {
-      await invoke("upload_remote", {
+      const snapshot = await invoke<TransferSnapshot>("upload_remote", {
         connection: connectionRef.current,
         localPaths,
         remoteDirectory: pathRef.current,
         packageTransfer,
         transferId,
       });
-      setActiveTransfer((current) => current?.id === transferId
-        ? { ...current, status: "completed" }
-        : current);
-      showToast(`已上传 ${localPaths.length} 项`);
-      await loadDirectory(pathRef.current);
+      applyTransferSnapshot(snapshot);
     } catch (error) {
-      setActiveTransfer((current) => current?.id === transferId
-        ? { ...current, status: "failed", message: String(error) }
-        : current);
-      showToast("上传失败，请查看传输状态");
+      const recovered = await recoverTransfer(transferId);
+      if (!recovered) {
+        failPendingTransfer(transferId, error);
+        showToast("上传任务未能启动，请查看传输状态");
+      }
     }
   }
 
@@ -573,21 +675,46 @@ export function FileTransferPanel({
 
   useEffect(() => {
     if (!isDesktopRuntime()) return undefined;
+    const generation = transferRecoveryGenerationRef.current + 1;
+    transferRecoveryGenerationRef.current = generation;
+    transferSequenceRef.current.clear();
+    setActiveTransfer(null);
+    setTransferActionError(null);
+
+    void invoke<TransferSnapshot[]>("list_transfer_tasks")
+      .then((tasks) => {
+        if (generation !== transferRecoveryGenerationRef.current) return;
+        const matching = tasks
+          .filter((task) => snapshotMatchesConnection(task, connectionRef.current))
+          .sort((left, right) => {
+            const activeDifference = Number(isActiveTransfer(right)) - Number(isActiveTransfer(left));
+            return activeDifference || right.updatedAt - left.updatedAt || right.seq - left.seq;
+          });
+        matching.forEach((task) => {
+          transferSequenceRef.current.set(task.transferId, task.seq);
+          if (!isActiveTransfer(task)) handledTerminalTransfersRef.current.add(task.transferId);
+        });
+        setActiveTransfer(matching[0] ?? null);
+      })
+      .catch((error) => {
+        if (generation === transferRecoveryGenerationRef.current) {
+          setTransferActionError(`无法恢复传输任务：${String(error)}`);
+        }
+      });
+
+    return () => {
+      if (transferRecoveryGenerationRef.current === generation) {
+        transferRecoveryGenerationRef.current += 1;
+      }
+    };
+  }, [connectionKey]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void listen<TransferProgressEvent>("transfer-progress", (event) => {
-      const progress = event.payload;
-      setActiveTransfer((current) => {
-        if (!current || current.id !== progress.transferId) return current;
-        return {
-          ...current,
-          status: normalizedTransferStatus(progress.status ?? progress.phase),
-          transferredBytes: progress.transferredBytes ?? progress.bytesTransferred ?? current.transferredBytes,
-          totalBytes: progress.totalBytes ?? current.totalBytes,
-          currentPath: progress.currentPath ?? progress.path ?? current.currentPath,
-          message: progress.message ?? current.message,
-        };
-      });
+    void listen<TransferSnapshot>("transfer-task-updated", (event) => {
+      applyTransferSnapshot(event.payload);
     }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
@@ -597,6 +724,52 @@ export function FileTransferPanel({
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    const transferId = activeTransfer?.transferId;
+    if (!transferId || !transferBusy || !isDesktopRuntime()) return undefined;
+    let disposed = false;
+
+    async function pollTransfer() {
+      try {
+        const snapshot = await invoke<TransferSnapshot | null>("get_transfer_task", { transferId });
+        if (disposed) return;
+        if (snapshot) applyTransferSnapshot(snapshot);
+        else setActiveTransfer((current) => current?.transferId === transferId ? null : current);
+      } catch {
+        // Events are primary; polling only closes gaps caused by a suspended or hidden webview.
+      }
+    }
+
+    const timer = window.setInterval(() => void pollTransfer(), 1_250);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTransfer?.transferId, transferBusy]);
+
+  useEffect(() => {
+    if (!activeTransfer || isActiveTransfer(activeTransfer)) return;
+    if (handledTerminalTransfersRef.current.has(activeTransfer.transferId)) return;
+    handledTerminalTransfersRef.current.add(activeTransfer.transferId);
+
+    const action = activeTransfer.kind === "upload" ? "上传" : "下载";
+    if (activeTransfer.status === "completed") {
+      const count = activeTransfer.result?.filesTransferred;
+      showToast(count ? `${action}完成，共 ${count} 项` : `${action}完成`);
+      if (activeTransfer.kind === "upload"
+        && connectedRef.current
+        && snapshotMatchesConnection(activeTransfer, connectionRef.current)) {
+        void loadDirectory(pathRef.current);
+      }
+    } else if (activeTransfer.status === "failed") {
+      showToast(`${action}失败，请查看传输状态`);
+    } else if (activeTransfer.partialCommit || activeTransfer.cleanupStatus === "warning") {
+      showToast(`${action}已取消，但有部分结果或临时文件需要核对`);
+    } else {
+      showToast(`${action}已取消`);
+    }
+  }, [activeTransfer?.transferId, activeTransfer?.status, activeTransfer?.seq]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return undefined;
@@ -701,36 +874,79 @@ export function FileTransferPanel({
     if (typeof localDirectory !== "string") return;
 
     const transferId = makeTransferId();
-    setActiveTransfer({
-      id: transferId,
-      direction: "download",
-      status: "preparing",
-      transferredBytes: 0,
-      totalBytes: 0,
-    });
+    transferSequenceRef.current.delete(transferId);
+    handledTerminalTransfersRef.current.delete(transferId);
+    setTransferActionError(null);
+    setActiveTransfer(makePendingSnapshot(transferId, "download", connectionRef.current));
     try {
-      await invoke("download_remote", {
+      const snapshot = await invoke<TransferSnapshot>("download_remote", {
         connection: connectionRef.current,
         remotePaths: selectedEntries.map((entry) => entry.path),
         localDirectory,
         packageTransfer,
         transferId,
       });
-      setActiveTransfer((current) => current?.id === transferId
-        ? { ...current, status: "completed" }
-        : current);
-      showToast(`已下载 ${selectedEntries.length} 项`);
+      applyTransferSnapshot(snapshot);
     } catch (error) {
-      setActiveTransfer((current) => current?.id === transferId
-        ? { ...current, status: "failed", message: String(error) }
-        : current);
-      showToast("下载失败，请查看传输状态");
+      const recovered = await recoverTransfer(transferId);
+      if (!recovered) {
+        failPendingTransfer(transferId, error);
+        showToast("下载任务未能启动，请查看传输状态");
+      }
     }
   }
 
-  const transferPercent = activeTransfer && activeTransfer.totalBytes > 0
+  async function cancelActiveTransfer() {
+    if (!activeTransfer?.canCancel || !isDesktopRuntime()) return;
+    const transferId = activeTransfer.transferId;
+    setTransferActionError(null);
+    try {
+      const snapshot = await invoke<TransferSnapshot>("cancel_transfer_task", { transferId });
+      applyTransferSnapshot(snapshot);
+    } catch (error) {
+      const message = `取消请求失败：${String(error)}`;
+      setTransferActionError(message);
+      showToast(message);
+      await recoverTransfer(transferId);
+    }
+  }
+
+  async function dismissActiveTransfer() {
+    if (!activeTransfer?.canDismiss || !isDesktopRuntime()) return;
+    const transferId = activeTransfer.transferId;
+    if (activeTransfer.seq === 0) {
+      setActiveTransfer(null);
+      setTransferActionError(null);
+      return;
+    }
+    try {
+      await invoke("dismiss_transfer_task", { transferId });
+      setActiveTransfer((current) => current?.transferId === transferId ? null : current);
+      setTransferActionError(null);
+      transferSequenceRef.current.delete(transferId);
+      handledTerminalTransfersRef.current.delete(transferId);
+    } catch (error) {
+      const message = `无法清除传输记录：${String(error)}`;
+      setTransferActionError(message);
+      showToast(message);
+    }
+  }
+
+  const transferPercent = activeTransfer && activeTransfer.totalBytes !== null && activeTransfer.totalBytes > 0
     ? Math.min(100, Math.max(0, activeTransfer.transferredBytes / activeTransfer.totalBytes * 100))
     : 0;
+  const transferNotices = activeTransfer ? [
+    transferActionError,
+    activeTransfer.error,
+    activeTransfer.partialCommit ? "已有部分文件提交，请核对目标目录" : null,
+    activeTransfer.cleanupStatus === "pending" ? "正在清理未完成传输的临时文件" : null,
+    activeTransfer.cleanupStatus === "warning"
+      ? `临时文件清理不完整${activeTransfer.cleanupWarnings.length > 0 ? `：${activeTransfer.cleanupWarnings.join("；")}` : ""}`
+      : null,
+  ].filter((message): message is string => Boolean(message)) : [];
+  const transferDetail = transferNotices.join(" · ") || activeTransfer?.currentPath || "";
+  const transferHasWarning = transferNotices.length > 0;
+  const activeTransferDisplayStatus = activeTransfer ? displayTransferStatus(activeTransfer) : "idle";
   const previewOnly = !connected || !isDesktopRuntime();
 
   return (
@@ -1004,7 +1220,7 @@ export function FileTransferPanel({
       </div>
 
       <div
-        className={`transfer-summary ${activeTransfer?.status ?? "idle"}`}
+        className={`transfer-summary ${activeTransferDisplayStatus}`}
         role="status"
         aria-live="polite"
         style={activeTransfer ? { minHeight: 42, height: "auto", flexBasis: 42, position: "relative", paddingBottom: 5 } : undefined}
@@ -1014,19 +1230,50 @@ export function FileTransferPanel({
             {transferBusy ? <LoaderCircle className="spin" size={14} />
               : activeTransfer.status === "completed" ? <CheckCircle2 size={14} />
                 : <TriangleAlert size={14} />}
-            <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span
+              title={transferDetail || undefined}
+              style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            >
               {transferStatusText(activeTransfer)}
-              {activeTransfer.currentPath ? ` · ${activeTransfer.currentPath}` : ""}
-              {activeTransfer.message ? ` · ${activeTransfer.message}` : ""}
+              {transferDetail ? ` · ${transferDetail}` : ""}
             </span>
-            {activeTransfer.totalBytes > 0 ? <span>{transferPercent.toFixed(0)}%</span> : null}
+            {activeTransfer.totalBytes !== null && activeTransfer.totalBytes > 0
+              ? <span>{transferPercent.toFixed(0)}%</span>
+              : null}
+            {activeTransfer.canCancel ? (
+              <button
+                className="icon-button compact danger"
+                type="button"
+                title="取消传输"
+                aria-label="取消当前传输"
+                onClick={() => void cancelActiveTransfer()}
+              >
+                <CircleStop size={14} />
+              </button>
+            ) : null}
+            {activeTransfer.canDismiss ? (
+              <button
+                className="icon-button compact"
+                type="button"
+                title="清除传输记录"
+                aria-label="清除当前传输记录"
+                onClick={() => void dismissActiveTransfer()}
+              >
+                <X size={14} />
+              </button>
+            ) : null}
             {transferBusy ? (
               <span
                 aria-hidden="true"
                 style={{ position: "absolute", right: 0, bottom: 0, left: 0, height: 2, overflow: "hidden", background: "var(--border)" }}
               >
                 <span
-                  style={{ display: "block", width: activeTransfer.totalBytes > 0 ? `${transferPercent}%` : "35%", height: "100%", background: "var(--green)" }}
+                  style={{
+                    display: "block",
+                    width: activeTransfer.totalBytes !== null && activeTransfer.totalBytes > 0 ? `${transferPercent}%` : "35%",
+                    height: "100%",
+                    background: transferHasWarning ? "var(--red, #c94f49)" : "var(--green)",
+                  }}
                 />
               </span>
             ) : null}

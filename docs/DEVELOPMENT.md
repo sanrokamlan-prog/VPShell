@@ -27,6 +27,7 @@ WebView 负责展示和用户操作；网络、进程、文件系统、凭据、
 | Credential/key management | OS keyring 引用、密钥生成、敏感内存清零 | 向前端返回密码、私钥正文或同步主密码 |
 | Migration adapters | 只读解析用户选择的数据源，产出统一 profile | 修改源客户端配置、绕过主密码或系统钥匙串 |
 | Transfer core | SFTP list/stat/upload/download、任务队列、进度、取消和原子提交 | 借终端 PTY 猜测传输状态、用 UI 提供的任意命令执行文件操作 |
+| Transfer manager (`src-tauri/src/transfer_manager.rs`) | 任务身份、单调快照、并发上限、取消状态、socket 中断和有界终态记录 | SFTP 路径操作、持久化凭据、由前端生命周期决定任务是否存在 |
 | Archive transport | `tar + zstd` 能力探测、流式归档、安全解包和 SFTP 回退 | 信任归档内路径、设备节点、链接或声明大小 |
 | Remote file dock | 当前路径、目录列表、拖放意图、覆盖确认、任务视图 | 把静态示例显示成真实远端数据 |
 | Host monitor | 有界采样 CPU、内存、磁盘、负载、网络和进程摘要 | 无提示安装 agent、持续执行高开销命令、把采样值当精确计费数据 |
