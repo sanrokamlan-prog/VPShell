@@ -4,9 +4,9 @@ use std::{
     fs::OpenOptions,
     io::{self, Read, Seek, SeekFrom, Write},
     net::{TcpStream, ToSocketAddrs},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
     process::Command,
-    panic::{catch_unwind, AssertUnwindSafe},
     sync::OnceLock,
     time::Duration,
 };
@@ -22,10 +22,8 @@ use tauri::{AppHandle, Emitter, State};
 use zeroize::Zeroizing;
 
 use crate::{
-    transfer_manager::{
-        TransferManager, TransferResult, TransferSnapshot, TransferTask,
-    },
     CREDENTIAL_SERVICE, LEGACY_CREDENTIAL_SERVICE,
+    transfer_manager::{TransferManager, TransferResult, TransferSnapshot, TransferTask},
 };
 
 const MAX_HOST_LENGTH: usize = 255;
@@ -339,9 +337,7 @@ pub(crate) fn get_transfer_task(
 }
 
 #[tauri::command]
-pub(crate) fn list_transfer_tasks(
-    manager: State<'_, TransferManager>,
-) -> Vec<TransferSnapshot> {
+pub(crate) fn list_transfer_tasks(manager: State<'_, TransferManager>) -> Vec<TransferSnapshot> {
     manager.list()
 }
 
@@ -764,7 +760,9 @@ fn open_session_internal(
     for preference in preferences.iter().map(String::as_str).map(Some) {
         match open_session_with_preference(host, port, preference, reporter) {
             Ok(session) => return Ok(session),
-            Err(error) if error == crate::transfer_manager::TRANSFER_CANCELLED => return Err(error),
+            Err(error) if error == crate::transfer_manager::TRANSFER_CANCELLED => {
+                return Err(error);
+            }
             Err(_) => continue,
         }
     }
@@ -2421,8 +2419,8 @@ fn cleanup_remote_artifacts(
     }
 
     let retry = (|| {
-        let session = connect(connection)
-            .map_err(|error| format!("无法重连以清理传输临时文件: {error}"))?;
+        let session =
+            connect(connection).map_err(|error| format!("无法重连以清理传输临时文件: {error}"))?;
         let retry_sftp = session
             .sftp()
             .map_err(|_| "无法重建 SFTP 子系统以清理临时文件".to_string())?;

@@ -2,8 +2,8 @@ use std::{
     collections::HashMap,
     net::{Shutdown, TcpStream},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -266,9 +266,8 @@ impl TransferManager {
         runtime.snapshot.seq = self.next_seq();
         runtime.snapshot.updated_at = now_millis();
         runtime.snapshot.finalizing = runtime.finalizing;
-        runtime.snapshot.can_cancel = runtime.snapshot.status.is_active()
-            && !runtime.cancel_requested
-            && !runtime.finalizing;
+        runtime.snapshot.can_cancel =
+            runtime.snapshot.status.is_active() && !runtime.cancel_requested && !runtime.finalizing;
         runtime.snapshot.can_dismiss = runtime.snapshot.status.is_terminal();
         runtime.snapshot.clone()
     }
@@ -340,10 +339,7 @@ impl TransferTask {
         lock(&self.record.runtime).socket = None;
     }
 
-    pub(crate) fn begin_finalizing(
-        &self,
-        current_path: impl Into<String>,
-    ) -> Result<(), String> {
+    pub(crate) fn begin_finalizing(&self, current_path: impl Into<String>) -> Result<(), String> {
         let snapshot = {
             let mut runtime = lock(&self.record.runtime);
             if runtime.cancel_requested {
@@ -438,7 +434,9 @@ fn emit_snapshot(app: &AppHandle, snapshot: &TransferSnapshot) {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn now_millis() -> u64 {
