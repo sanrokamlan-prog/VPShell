@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-remote-file-operation-recovery"
+description = "Enables the preview_remote_file_operation_recovery command without any pre-configured scope."
+commands.allow = ["preview_remote_file_operation_recovery"]
+
+[[permission]]
+identifier = "deny-preview-remote-file-operation-recovery"
+description = "Denies the preview_remote_file_operation_recovery command without any pre-configured scope."
+commands.deny = ["preview_remote_file_operation_recovery"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fetch-remote-metrics"
+description = "Enables the fetch_remote_metrics command without any pre-configured scope."
+commands.allow = ["fetch_remote_metrics"]
+
+[[permission]]
+identifier = "deny-fetch-remote-metrics"
+description = "Denies the fetch_remote_metrics command without any pre-configured scope."
+commands.deny = ["fetch_remote_metrics"]

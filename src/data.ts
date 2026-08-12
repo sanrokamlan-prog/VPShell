@@ -379,6 +379,7 @@ export const initialState: AppState = {
   settings: {
     externalEditorPath: "",
     autoUploadEditedFiles: false,
+    packageTransfersEnabled: true,
   },
   onboardingCompleted: false,
 };

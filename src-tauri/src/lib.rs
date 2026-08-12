@@ -9,14 +9,42 @@ use std::{
 use base64::prelude::*;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
+mod android_mobile;
+#[allow(dead_code)] // The Android shell consumes the Rust-owned SSH/SFTP transport boundary.
+mod android_native_transport;
+#[allow(dead_code)] // The Android shell consumes this shared preview policy and lifecycle model.
+mod android_preview;
+mod app_store;
 mod external_editor;
 mod file_transfer;
 mod finalshell;
 mod key_management;
+mod local_assets;
+mod migration;
 mod network_tools;
+mod remote_file_ops;
 mod remote_monitor;
+mod safe_broadcast;
+mod security_regression;
+mod shell_integration;
+#[allow(dead_code)] // The coordinator/UI phases consume this opt-in credential vault API.
+mod sync_credential_vault;
+#[allow(dead_code)] // The coordinator/provider phases consume this bounded crypto API.
+mod sync_crypto;
+#[allow(dead_code)] // The sync coordinator/UI phases consume the deterministic merge model.
+mod sync_merge;
+#[allow(dead_code)] // The merge/coordinator phases consume the durable sync journal.
+mod sync_outbox;
+#[allow(dead_code)] // Cross-module protocol compatibility and failure fixtures.
+mod sync_protocol_regression;
+#[allow(dead_code)] // The outbox/coordinator phases consume the provider boundary.
+mod sync_provider;
+#[allow(dead_code)] // Provider coordination selects these structured backend adapters.
+mod sync_provider_ext;
+#[allow(dead_code)] // The coordinator/UI phases consume recovery and encrypted export APIs.
+mod sync_recovery;
 mod transfer_manager;
 
 pub(crate) const CREDENTIAL_SERVICE: &str = "com.sanro.vpshell.credentials";
@@ -25,10 +53,19 @@ const ASKPASS_MODE_ENV: &str = "VPSHELL_SSH_ASKPASS";
 const ASKPASS_PASSWORD_REF_ENV: &str = "VPSHELL_SSH_CREDENTIAL_REF";
 const ASKPASS_KEY_REF_ENV: &str = "VPSHELL_SSH_KEY_PASSPHRASE_REF";
 
+#[cfg(target_os = "android")]
+fn initialize_android_keyring() -> Result<(), String> {
+    let store = android_native_keyring_store::Store::new()
+        .map_err(|_| "无法初始化 Android Keystore 凭据存储".to_string())?;
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
 struct TerminalHandle {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    integration: Arc<Mutex<shell_integration::ShellIntegrationParser>>,
 }
 
 #[derive(Default)]
@@ -299,6 +336,7 @@ fn start_ssh_session(
         .take_writer()
         .map_err(|error| format!("无法写入终端: {error}"))?;
     let killer = child.clone_killer();
+    let integration = Arc::new(Mutex::new(shell_integration::ShellIntegrationParser::new()));
 
     lock_sessions(&manager)?.insert(
         session_id.clone(),
@@ -306,6 +344,7 @@ fn start_ssh_session(
             writer,
             master: pair.master,
             killer,
+            integration: Arc::clone(&integration),
         },
     );
 
@@ -317,13 +356,29 @@ fn start_ssh_session(
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(length) => {
-                    let _ = output_app.emit(
-                        "terminal-output",
-                        TerminalOutputEvent {
-                            session_id: output_session_id.clone(),
-                            data: BASE64_STANDARD.encode(&buffer[..length]),
-                        },
-                    );
+                    let (visible, updates) = integration
+                        .lock()
+                        .map(|mut parser| parser.feed(&buffer[..length]))
+                        .unwrap_or_else(|_| (buffer[..length].to_vec(), Vec::new()));
+                    for (stack, warning) in updates {
+                        let _ = output_app.emit(
+                            "terminal-context",
+                            shell_integration::TerminalContextEvent {
+                                session_id: output_session_id.clone(),
+                                stack,
+                                warning,
+                            },
+                        );
+                    }
+                    if !visible.is_empty() {
+                        let _ = output_app.emit(
+                            "terminal-output",
+                            TerminalOutputEvent {
+                                session_id: output_session_id.clone(),
+                                data: BASE64_STANDARD.encode(visible),
+                            },
+                        );
+                    }
                 }
                 Err(_) => break,
             }
@@ -348,6 +403,121 @@ fn start_ssh_session(
     });
 
     Ok(StartSshResponse { session_id })
+}
+
+#[tauri::command]
+fn enable_shell_integration(
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+) -> Result<(), String> {
+    let mut sessions = lock_sessions(&manager)?;
+    let session = sessions
+        .get_mut(&session_id)
+        .ok_or_else(|| "终端会话不存在或已关闭".to_string())?;
+    let command = session
+        .integration
+        .lock()
+        .map_err(|_| "Shell Integration 状态已损坏".to_string())?
+        .activation_command();
+    session
+        .writer
+        .write_all(command.as_bytes())
+        .map_err(|error| format!("写入 Shell Integration 启用命令失败: {error}"))?;
+    session
+        .writer
+        .flush()
+        .map_err(|error| format!("刷新 Shell Integration 启用命令失败: {error}"))
+}
+
+#[tauri::command]
+fn preview_broadcast(
+    manager: State<'_, TerminalManager>,
+    broadcasts: State<'_, safe_broadcast::SafeBroadcastManager>,
+    command: String,
+    targets: Vec<safe_broadcast::BroadcastTargetRequest>,
+) -> Result<safe_broadcast::BroadcastPreview, String> {
+    let sessions = lock_sessions(&manager)?;
+    let mut verified = Vec::with_capacity(targets.len());
+    for target in targets {
+        let session = sessions
+            .get(&target.session_id)
+            .ok_or_else(|| format!("广播目标 {} 已断开或不存在", target.label))?;
+        let context_revision = session
+            .integration
+            .lock()
+            .map_err(|_| "Shell Integration 状态已损坏".to_string())?
+            .revision();
+        verified.push(safe_broadcast::VerifiedBroadcastTarget {
+            session_id: target.session_id,
+            label: target.label,
+            environment: target.environment,
+            context_revision,
+        });
+    }
+    broadcasts.preview(command, verified)
+}
+
+#[tauri::command]
+fn execute_broadcast(
+    manager: State<'_, TerminalManager>,
+    broadcasts: State<'_, safe_broadcast::SafeBroadcastManager>,
+    confirmation_token: String,
+) -> Result<safe_broadcast::BroadcastResult, String> {
+    let pending = broadcasts.consume(&confirmation_token)?;
+    let mut items = Vec::with_capacity(pending.targets.len());
+    for target in pending.targets {
+        let context_revision = {
+            let sessions = lock_sessions(&manager)?;
+            sessions.get(&target.session_id).and_then(|session| {
+                session
+                    .integration
+                    .lock()
+                    .ok()
+                    .map(|parser| parser.revision())
+            })
+        };
+        let Some(context_revision) = context_revision else {
+            items.push(safe_broadcast::BroadcastItemResult {
+                session_id: target.session_id,
+                label: target.label,
+                outcome: "skipped".to_string(),
+                message: "目标已断开或上下文状态不可用".to_string(),
+            });
+            continue;
+        };
+        if context_revision != target.context_revision {
+            items.push(safe_broadcast::BroadcastItemResult {
+                session_id: target.session_id,
+                label: target.label,
+                outcome: "skipped".to_string(),
+                message: "目标上下文在确认后发生变化，已跳过".to_string(),
+            });
+            continue;
+        }
+        match write_to_session(
+            &manager,
+            &target.session_id,
+            format!("{}\r", pending.command).as_bytes(),
+        ) {
+            Ok(()) => {
+                items.push(safe_broadcast::BroadcastItemResult {
+                    session_id: target.session_id,
+                    label: target.label,
+                    outcome: "succeeded".to_string(),
+                    message: "已写入终端输入流；远端命令结果仍由该终端单独返回".to_string(),
+                });
+            }
+            Err(error) => {
+                items.push(safe_broadcast::BroadcastItemResult {
+                    session_id: target.session_id,
+                    label: target.label,
+                    outcome: "failed".to_string(),
+                    message: error,
+                });
+            }
+        }
+    }
+    Ok(safe_broadcast::summarize_results(items))
 }
 
 #[tauri::command]
@@ -399,6 +569,89 @@ async fn import_finalshell(
     })
     .await
     .map_err(|error| format!("FinalShell 导入任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn initialize_app_store(
+    store: State<'_, app_store::AppStore>,
+    request: app_store::InitializeAppStoreRequest,
+) -> Result<app_store::AppStoreSnapshot, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || store.initialize(request))
+        .await
+        .map_err(|error| format!("本地事件库初始化任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn save_app_state(
+    store: State<'_, app_store::AppStore>,
+    request: app_store::SaveAppStateRequest,
+) -> Result<app_store::SaveAppStateResult, String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || store.save(request))
+        .await
+        .map_err(|error| format!("本地状态保存任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn install_wallpaper_asset(
+    manager: State<'_, local_assets::LocalAssetManager>,
+    request: local_assets::InstallWallpaperRequest,
+) -> Result<local_assets::RenderAsset, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.install_wallpaper(request))
+        .await
+        .map_err(|error| format!("壁纸资产任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn load_wallpaper_asset(
+    manager: State<'_, local_assets::LocalAssetManager>,
+) -> Result<Option<local_assets::RenderAsset>, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.load_wallpaper())
+        .await
+        .map_err(|error| format!("壁纸资产读取任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn install_font_asset(
+    manager: State<'_, local_assets::LocalAssetManager>,
+    request: local_assets::InstallFontRequest,
+) -> Result<local_assets::RenderAsset, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.install_font(request))
+        .await
+        .map_err(|error| format!("字体资产任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn load_font_asset(
+    manager: State<'_, local_assets::LocalAssetManager>,
+) -> Result<Option<local_assets::RenderAsset>, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.load_font())
+        .await
+        .map_err(|error| format!("字体资产读取任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn preview_migration(
+    manager: State<'_, migration::MigrationManager>,
+    request: migration::MigrationPreviewRequest,
+) -> Result<migration::MigrationPreview, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.preview(request))
+        .await
+        .map_err(|error| format!("迁移预览任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+fn apply_migration(
+    manager: State<'_, migration::MigrationManager>,
+    request: migration::MigrationApplyRequest,
+) -> Result<migration::MigrationApplyResult, String> {
+    manager.apply(request)
 }
 
 #[tauri::command]
@@ -488,8 +741,33 @@ fn delete_credential(reference: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(TerminalManager::default())
-        .manage(external_editor::ExternalEditorManager::default())
-        .manage(transfer_manager::TransferManager::default())
+        .manage(android_mobile::AndroidMobileManager::default())
+        .manage(remote_file_ops::RemoteFileOperationManager::default())
+        .manage(remote_monitor::RemoteMonitorManager::default())
+        .manage(safe_broadcast::SafeBroadcastManager::default())
+        .manage(migration::MigrationManager::default())
+        .setup(|app| {
+            #[cfg(target_os = "android")]
+            initialize_android_keyring()?;
+            let app_data_directory = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("无法定位 VPShell 应用数据目录: {error}"))?;
+            let app_cache_directory = app
+                .path()
+                .app_cache_dir()
+                .map_err(|error| format!("无法定位 VPShell 应用缓存目录: {error}"))?;
+            app.manage(external_editor::ExternalEditorManager::load(
+                app_data_directory.clone(),
+                app_cache_directory,
+            ));
+            app.manage(app_store::AppStore::load(app_data_directory.clone())?);
+            app.manage(local_assets::LocalAssetManager::load(
+                app_data_directory.clone(),
+            )?);
+            app.manage(transfer_manager::TransferManager::load(app_data_directory));
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -497,10 +775,21 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_ssh_session,
             write_terminal,
+            enable_shell_integration,
+            preview_broadcast,
+            execute_broadcast,
             resize_terminal,
             stop_terminal,
             delete_credential,
             import_finalshell,
+            initialize_app_store,
+            save_app_state,
+            install_wallpaper_asset,
+            load_wallpaper_asset,
+            install_font_asset,
+            load_font_asset,
+            preview_migration,
+            apply_migration,
             file_transfer::inspect_host_key,
             file_transfer::trust_host_key,
             generate_ssh_key,
@@ -510,9 +799,18 @@ pub fn run() {
             file_transfer::download_remote,
             file_transfer::get_transfer_task,
             file_transfer::list_transfer_tasks,
+            file_transfer::get_transfer_recovery_status,
+            file_transfer::retry_transfer_task,
             file_transfer::cancel_transfer_task,
             file_transfer::dismiss_transfer_task,
+            remote_file_ops::preview_remote_file_operation,
+            remote_file_ops::preview_remote_file_operation_recovery,
+            remote_file_ops::execute_remote_file_operation,
             external_editor::begin_external_edit,
+            external_editor::list_external_edit_recovery,
+            external_editor::resume_external_edit,
+            external_editor::discard_external_edit_recovery,
+            external_editor::export_external_edit_copy,
             external_editor::get_external_edit_status,
             external_editor::save_external_edit,
             external_editor::reload_external_edit,
@@ -520,7 +818,25 @@ pub fn run() {
             network_tools::trace_route,
             network_tools::download_speed_test,
             network_tools::udp_speed_test,
-            remote_monitor::fetch_remote_metrics
+            remote_monitor::fetch_remote_metrics,
+            remote_monitor::start_remote_monitor,
+            remote_monitor::get_remote_monitor_snapshot,
+            remote_monitor::set_remote_monitor_paused,
+            remote_monitor::set_remote_monitor_interval,
+            remote_monitor::stop_remote_monitor,
+            android_mobile::android_preview_status,
+            android_mobile::android_inspect_host_key,
+            android_mobile::android_set_lifecycle,
+            android_mobile::android_connect_host,
+            android_mobile::android_disconnect_host,
+            android_mobile::android_list_remote_files,
+            android_mobile::android_open_terminal,
+            android_mobile::android_write_terminal,
+            android_mobile::android_read_terminal,
+            android_mobile::android_resize_terminal,
+            android_mobile::android_close_terminal,
+            android_mobile::android_store_credential,
+            android_mobile::android_delete_credential
         ])
         .run(tauri::generate_context!())
         .expect("error while running VPShell");

@@ -6,6 +6,8 @@ import {
   HardDrive,
   MemoryStick,
   Network,
+  Pause,
+  Play,
   Server,
   UserRound,
 } from "lucide-react";
@@ -45,6 +47,20 @@ export interface HostOverviewProps {
   currentIdentity?: HostOverviewCurrentIdentity;
   loading?: boolean;
   error?: string;
+  history?: Array<{
+    sampledAtMs: number;
+    cpuPercent: number;
+    memoryPercent: number;
+    diskPercent: number;
+    loadOne: number;
+    rxBytesPerSecond: number;
+    txBytesPerSecond: number;
+  }>;
+  paused?: boolean;
+  intervalSeconds?: number;
+  droppedSamples?: number;
+  onPausedChange?: (paused: boolean) => void;
+  onIntervalChange?: (seconds: number) => void;
   onCopied?: (message: string) => void;
 }
 
@@ -141,6 +157,39 @@ function MetricRow({ icon, label, percent }: { icon: ReactNode; label: string; p
   );
 }
 
+function TrendLine({
+  label,
+  values,
+  color,
+}: {
+  label: string;
+  values: number[];
+  color: string;
+}) {
+  if (values.length < 2) return null;
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (finite.length < 2) return null;
+  const maximum = Math.max(...finite, 1);
+  const points = values.map((value, index) => {
+    const normalized = Number.isFinite(value) ? value / maximum : 0;
+    return `${(index / Math.max(values.length - 1, 1)) * 100},${28 - normalized * 24}`;
+  }).join(" ");
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "38px minmax(0, 1fr)", alignItems: "center", gap: 5 }}>
+      <span style={{ ...mutedStyle, fontSize: 10 }}>{label}</span>
+      <svg
+        role="img"
+        aria-label={`${label}趋势，${values.length}个采样点`}
+        viewBox="0 0 100 28"
+        preserveAspectRatio="none"
+        style={{ width: "100%", height: 28, overflow: "visible", borderBottom: "1px solid var(--border, #d8dee4)" }}
+      >
+        <polyline points={points} fill="none" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      </svg>
+    </div>
+  );
+}
+
 export function HostOverview({
   host,
   state,
@@ -148,6 +197,12 @@ export function HostOverview({
   currentIdentity,
   loading = false,
   error,
+  history = [],
+  paused = false,
+  intervalSeconds = 15,
+  droppedSamples = 0,
+  onPausedChange,
+  onIntervalChange,
   onCopied,
 }: HostOverviewProps) {
   const stateDetail = stateDetails[state];
@@ -251,6 +306,46 @@ export function HostOverview({
         ) : null}
         {loading ? <small style={{ ...mutedStyle, paddingTop: 3 }}>正在采样...</small> : null}
         {error ? <small title={error} style={{ color: "var(--red, #c13c37)", lineHeight: 1.4 }}>采样失败：{error}</small> : null}
+      </div>
+
+      <div aria-label="监控控制与趋势" style={{ display: "grid", gap: 7, paddingTop: 6, borderTop: "1px solid var(--border, #d8dee4)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+          <strong style={{ fontSize: 10 }}>监控趋势</strong>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <label style={{ ...mutedStyle, fontSize: 10 }} htmlFor={`monitor-interval-${host.id}`}>频率</label>
+            <select
+              id={`monitor-interval-${host.id}`}
+              aria-label="监控采样频率"
+              value={intervalSeconds}
+              onChange={(event) => onIntervalChange?.(Number(event.target.value))}
+              style={{ maxWidth: 74, padding: "2px 3px", fontSize: 10 }}
+            >
+              {[5, 15, 30, 60, 120].map((seconds) => <option key={seconds} value={seconds}>{seconds} 秒</option>)}
+            </select>
+            <button
+              className="icon-button compact"
+              type="button"
+              title={paused ? "恢复监控采样" : "暂停监控采样"}
+              aria-label={paused ? "恢复监控采样" : "暂停监控采样"}
+              onClick={() => onPausedChange?.(!paused)}
+              style={{ display: "inline-grid", width: 26, height: 26, padding: 0, placeItems: "center" }}
+            >
+              {paused ? <Play size={13} aria-hidden="true" /> : <Pause size={13} aria-hidden="true" />}
+            </button>
+          </span>
+        </div>
+        {history.length >= 2 ? (
+          <>
+            <TrendLine label="CPU" values={history.map((point) => point.cpuPercent)} color="#238636" />
+            <TrendLine label="内存" values={history.map((point) => point.memoryPercent)} color="#0969da" />
+            <TrendLine label="磁盘" values={history.map((point) => point.diskPercent)} color="#b35900" />
+            <TrendLine label="负载" values={history.map((point) => point.loadOne)} color="#8250df" />
+            <TrendLine label="网络" values={history.map((point) => point.rxBytesPerSecond + point.txBytesPerSecond)} color="#cf222e" />
+          </>
+        ) : (
+          <small style={mutedStyle}>{paused ? "监控已暂停" : "等待至少两个采样点"}</small>
+        )}
+        {droppedSamples > 0 ? <small style={mutedStyle}>历史已保留最近 120 点，已淘汰 {droppedSamples} 点</small> : null}
       </div>
 
       {metrics?.topProcesses?.length ? (

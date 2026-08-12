@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   AlertTriangle,
   BookOpenText,
@@ -23,7 +24,6 @@ import {
   Image,
   KeyRound,
   Library,
-  LockKeyhole,
   MoreHorizontal,
   Minus,
   Network,
@@ -55,13 +55,12 @@ import { Dialog } from "./components/Dialog";
 import { FileTransferPanel } from "./components/FileTransferPanel";
 import { HostOverview } from "./components/HostOverview";
 import { KeyManagerDialog } from "./components/KeyManagerDialog";
-import { MigrationDialog, type FinalShellImportResult } from "./components/MigrationDialog";
+import { MigrationDialog, type MigrationImportResult } from "./components/MigrationDialog";
 import { NetworkToolsDialog, type NetworkToolMode } from "./components/NetworkToolsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TerminalView } from "./components/TerminalView";
 import { usePersistedState } from "./hooks/usePersistedState";
-import { loadStoredCustomFont, saveAndRegisterCustomFont } from "./fontStorage";
 import brandMark from "./assets/vpshell.svg";
 import type {
   AppState,
@@ -103,9 +102,63 @@ interface RemoteMetricsResponse {
 
 interface HostMetricsState {
   metrics?: RemoteMetricsResponse;
+  history: MonitorTrendPoint[];
   loading: boolean;
+  paused: boolean;
+  intervalSeconds: number;
+  totalSamples: number;
+  droppedSamples: number;
   error?: string;
   sampledAt?: string;
+}
+
+interface MonitorTrendPoint {
+  sampledAtMs: number;
+  cpuPercent: number;
+  memoryPercent: number;
+  diskPercent: number;
+  loadOne: number;
+  rxBytesPerSecond: number;
+  txBytesPerSecond: number;
+}
+
+interface MonitorSnapshotResponse {
+  sessionId: string;
+  intervalSeconds: number;
+  paused: boolean;
+  sampling: boolean;
+  latest?: RemoteMetricsResponse;
+  history: MonitorTrendPoint[];
+  lastError?: string;
+  totalSamples: number;
+  droppedSamples: number;
+}
+
+interface BroadcastPreviewResponse {
+  confirmationToken: string;
+  command: string;
+  targets: Array<{
+    sessionId: string;
+    label: string;
+    environment: EnvironmentKind;
+  }>;
+  risk: "normal" | "high";
+  warning: string;
+  productionTargets: number;
+  expiresAt: number;
+}
+
+interface BroadcastResultResponse {
+  outcome: "completed" | "partial" | "failed" | "skipped";
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  items: Array<{
+    sessionId: string;
+    label: string;
+    outcome: "succeeded" | "failed" | "skipped";
+    message: string;
+  }>;
 }
 
 interface HostKeyInspection {
@@ -115,6 +168,15 @@ interface HostKeyInspection {
   algorithm: string;
   fingerprint: string;
 }
+
+interface RenderAsset {
+  dataUrl: string;
+  label: string;
+  mediaType: string;
+  size: number;
+}
+
+const CUSTOM_FONT_FAMILY = "VPShell Custom Font";
 
 interface PendingHostKey extends HostKeyInspection {
   hostId: string;
@@ -144,12 +206,13 @@ const sidebarLabels: Record<SidebarView, { eyebrow: string; title: string; place
 
 function makeSession(host: HostProfile): TerminalSession {
   return {
-    id: `session-${host.id}-${Date.now()}`,
+    id: crypto.randomUUID(),
     hostId: host.id,
     title: host.name,
     state: "idle",
     currentPath: host.lastPath ?? "~",
     contextSource: "profile",
+    contextStack: [],
   };
 }
 
@@ -166,7 +229,11 @@ const emptyHost: HostProfile = {
 };
 
 function isDesktopRuntime() {
-  return "__TAURI_INTERNALS__" in window;
+  return "__TAURI_INTERNALS__" in window && !isAndroidRuntime();
+}
+
+function isAndroidRuntime() {
+  return "__TAURI_INTERNALS__" in window && /Android/i.test(navigator.userAgent);
 }
 
 function relativeTime(value?: string) {
@@ -179,6 +246,18 @@ function relativeTime(value?: string) {
 
 function shellQuote(value: string) {
   return `'${value.split("'").join(`'"'"'`)}'`;
+}
+
+function encodeUtf8Base64(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function hostCredentialReferences(host: HostProfile) {
+  return [host.credentialRef, host.androidKeyRef, host.androidKeyPassphraseRef]
+    .filter((reference): reference is string => Boolean(reference));
 }
 
 function scoreIntent(query: string, fields: string[]) {
@@ -203,12 +282,30 @@ function explicitlyRequestsDestructiveAction(query: string) {
   return ["重装", "dd", "擦除", "格式化", "重新安装系统"].some((term) => normalized.includes(term));
 }
 
+function migrateAppStateIntoSqlite(value: AppState) {
+  const migrated = migratePersistedAppState(value);
+  try {
+    const saved = localStorage.getItem("vpshell.package-transfer.enabled")
+      ?? localStorage.getItem("opsshell.package-transfer.enabled");
+    if (saved !== null) {
+      return {
+        ...migrated,
+        settings: { ...migrated.settings, packageTransfersEnabled: saved !== "false" },
+      };
+    }
+  } catch {
+    // The default remains enabled when legacy WebView storage is unavailable.
+  }
+  return migrated;
+}
+
 function App() {
-  const [appState, setAppState] = usePersistedState<AppState>(
+  const [appState, setAppState, appStoreStatus] = usePersistedState<AppState>(
     "vpshell-state-v1",
     initialState,
     ["opsshell-state-v6"],
-    migratePersistedAppState,
+    migrateAppStateIntoSqlite,
+    ["vpshell.package-transfer.enabled", "opsshell.package-transfer.enabled"],
   );
   const [sessions, setSessions] = useState<TerminalSession[]>([makeSession(appState.hosts[0] ?? emptyHost)]);
   const [activeSessionId, setActiveSessionId] = useState(sessions[0].id);
@@ -224,13 +321,19 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [broadcastOpen, setBroadcastOpen] = useState(false);
   const [broadcastTargets, setBroadcastTargets] = useState<string[]>([]);
+  const [broadcastPreview, setBroadcastPreview] = useState<BroadcastPreviewResponse | null>(null);
+  const [broadcastResult, setBroadcastResult] = useState<BroadcastResultResponse | null>(null);
+  const [broadcastExecuting, setBroadcastExecuting] = useState(false);
   const [syncPassword, setSyncPassword] = useState("");
   const [toast, setToast] = useState<string | null>(null);
   const [installedFonts, setInstalledFonts] = useState<string[]>([]);
   const [fontRevision, setFontRevision] = useState(0);
+  const [renderedWallpaper, setRenderedWallpaper] = useState("");
   const [hostMetrics, setHostMetrics] = useState<Record<string, HostMetricsState>>({});
   const [pendingHostKey, setPendingHostKey] = useState<PendingHostKey | null>(null);
   const [trustingHostKey, setTrustingHostKey] = useState(false);
+  const [androidTerminalIds, setAndroidTerminalIds] = useState<Record<string, string>>({});
+  const [androidCredentialKind, setAndroidCredentialKind] = useState<"password" | "privateKey">("password");
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
@@ -238,7 +341,43 @@ function App() {
   const activeIdentityPassphraseRef = appState.sshKeys.find(
     (key) => key.privateKeyPath === activeHost.identityFile,
   )?.passphraseRef;
+  const activeShellContext = activeSession.contextStack?.[activeSession.contextStack.length - 1];
   const deletedHosts = appState.deletedHosts ?? [];
+
+  useEffect(() => {
+    if (!isAndroidRuntime()) return undefined;
+    const setLifecycle = (lifecycle: "background" | "foreground") => {
+      void invoke("android_set_lifecycle", {
+        lifecycle,
+      }).catch(() => undefined);
+    };
+    const updateLifecycle = () => setLifecycle(document.hidden ? "background" : "foreground");
+    const enterBackground = () => setLifecycle("background");
+    const enterForeground = () => setLifecycle("foreground");
+    updateLifecycle();
+    document.addEventListener("visibilitychange", updateLifecycle);
+    window.addEventListener("vpshell-native-background", enterBackground);
+    window.addEventListener("vpshell-native-foreground", enterForeground);
+    return () => {
+      document.removeEventListener("visibilitychange", updateLifecycle);
+      window.removeEventListener("vpshell-native-background", enterBackground);
+      window.removeEventListener("vpshell-native-foreground", enterForeground);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!appStoreStatus.ready || appState.hosts.length === 0) return;
+    if (sessions.length === 1 && sessions[0].hostId === emptyHost.id) {
+      const restored = makeSession(appState.hosts[0]);
+      setSessions([restored]);
+      setActiveSessionId(restored.id);
+    }
+  }, [appState.hosts, appStoreStatus.ready, sessions]);
+
+  useEffect(() => {
+    if (appStoreStatus.error) setToast(`本地事件库：${appStoreStatus.error}`);
+    else if (appStoreStatus.recoveryNote) setToast(appStoreStatus.recoveryNote);
+  }, [appStoreStatus.error, appStoreStatus.recoveryNote]);
 
   useEffect(() => {
     const now = Date.now();
@@ -246,18 +385,19 @@ function App() {
     if (expired.length === 0) return;
 
     void (async () => {
-      if (isDesktopRuntime()) {
+      if (isDesktopRuntime() || isAndroidRuntime()) {
         const retainedReferences = new Set([
-          ...appState.hosts.map((host) => host.credentialRef),
+          ...appState.hosts.flatMap(hostCredentialReferences),
           ...deletedHosts
             .filter((item) => Date.parse(item.expiresAt) > now)
-            .map((item) => item.host.credentialRef),
-        ].filter((reference): reference is string => Boolean(reference)));
+            .flatMap((item) => hostCredentialReferences(item.host)),
+        ]);
         await Promise.all(expired.map(async (item) => {
-          const reference = item.host.credentialRef;
-          if (reference && !retainedReferences.has(reference)) {
-            await invoke("delete_credential", { reference }).catch(() => undefined);
-          }
+          await Promise.all(hostCredentialReferences(item.host).map((reference) => (
+            retainedReferences.has(reference)
+              ? Promise.resolve()
+              : invoke(isAndroidRuntime() ? "android_delete_credential" : "delete_credential", { reference }).catch(() => undefined)
+          )));
         }));
       }
       setAppState((current) => ({
@@ -330,57 +470,132 @@ function App() {
     window.setTimeout(() => setToast(null), 3200);
   }, []);
 
+  const applyMonitorSnapshot = useCallback((snapshot: MonitorSnapshotResponse) => {
+    const latestPoint = snapshot.history[snapshot.history.length - 1];
+    setHostMetrics((current) => ({
+      ...current,
+      [snapshot.sessionId]: {
+        metrics: snapshot.latest,
+        history: snapshot.history,
+        loading: snapshot.sampling,
+        paused: snapshot.paused,
+        intervalSeconds: snapshot.intervalSeconds,
+        totalSamples: snapshot.totalSamples,
+        droppedSamples: snapshot.droppedSamples,
+        error: snapshot.lastError,
+        sampledAt: latestPoint
+          ? new Date(latestPoint.sampledAtMs).toLocaleTimeString("zh-CN", { hour12: false })
+          : undefined,
+      },
+    }));
+  }, []);
+
   useEffect(() => {
     if (!isDesktopRuntime() || activeSession.state !== "connected") return;
     let disposed = false;
-    let timer: number | undefined;
+    let stopListening: (() => void) | undefined;
 
-    async function sample() {
-      setHostMetrics((current) => ({
-        ...current,
-        [activeSession.id]: { ...current[activeSession.id], loading: true, error: undefined },
-      }));
+    async function startMonitor() {
       try {
-        const metrics = await invoke<RemoteMetricsResponse>("fetch_remote_metrics", {
+        const unlisten = await listen<MonitorSnapshotResponse>("remote-monitor-update", (event) => {
+          if (!disposed && event.payload.sessionId === activeSession.id) {
+            applyMonitorSnapshot(event.payload);
+          }
+        });
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        stopListening = unlisten;
+        const snapshot = await invoke<MonitorSnapshotResponse>("start_remote_monitor", {
           request: {
-            host: activeHost.host,
-            port: activeHost.port,
-            username: activeHost.username,
-            identityFile: activeHost.identityFile,
-            credentialRef: activeHost.credentialRef,
-            identityPassphraseRef: activeIdentityPassphraseRef,
+            sessionId: activeSession.id,
+            intervalSeconds: 15,
+            connection: {
+              host: activeHost.host,
+              port: activeHost.port,
+              username: activeHost.username,
+              identityFile: activeHost.identityFile,
+              credentialRef: activeHost.credentialRef,
+              identityPassphraseRef: activeIdentityPassphraseRef,
+            },
           },
         });
-        if (!disposed) {
-          setHostMetrics((current) => ({
-            ...current,
-            [activeSession.id]: { metrics, loading: false, sampledAt: new Date().toLocaleTimeString("zh-CN", { hour12: false }) },
-          }));
+        if (disposed) {
+          await invoke("stop_remote_monitor", { sessionId: activeSession.id }).catch(() => undefined);
+          return;
         }
+        applyMonitorSnapshot(snapshot);
       } catch (error) {
         if (!disposed) {
           setHostMetrics((current) => ({
             ...current,
-            [activeSession.id]: { ...current[activeSession.id], loading: false, error: String(error) },
+            [activeSession.id]: {
+              history: current[activeSession.id]?.history ?? [],
+              loading: false,
+              paused: false,
+              intervalSeconds: current[activeSession.id]?.intervalSeconds ?? 15,
+              totalSamples: current[activeSession.id]?.totalSamples ?? 0,
+              droppedSamples: current[activeSession.id]?.droppedSamples ?? 0,
+              metrics: current[activeSession.id]?.metrics,
+              sampledAt: current[activeSession.id]?.sampledAt,
+              error: String(error),
+            },
           }));
         }
-      } finally {
-        if (!disposed) timer = window.setTimeout(() => void sample(), 15_000);
       }
     }
 
-    // Stagger the third SSH connection behind the terminal and SFTP startup. This avoids
-    // pre-auth connection bursts on small servers while keeping metrics automatic.
-    timer = window.setTimeout(() => void sample(), 5_000);
+    void startMonitor();
     return () => {
       disposed = true;
-      if (timer !== undefined) window.clearTimeout(timer);
+      stopListening?.();
+      void invoke("stop_remote_monitor", { sessionId: activeSession.id }).catch(() => undefined);
     };
-  }, [activeHost.credentialRef, activeHost.host, activeHost.identityFile, activeHost.port, activeHost.username, activeIdentityPassphraseRef, activeSession.id, activeSession.state]);
+  }, [activeHost.credentialRef, activeHost.host, activeHost.identityFile, activeHost.port, activeHost.username, activeIdentityPassphraseRef, activeSession.id, activeSession.state, applyMonitorSnapshot]);
+
+  const setMonitorPaused = useCallback(async (sessionId: string, paused: boolean) => {
+    try {
+      const snapshot = await invoke<MonitorSnapshotResponse>("set_remote_monitor_paused", { sessionId, paused });
+      applyMonitorSnapshot(snapshot);
+    } catch (error) {
+      showToast(`无法${paused ? "暂停" : "恢复"}监控：${String(error)}`);
+    }
+  }, [applyMonitorSnapshot, showToast]);
+
+  const setMonitorInterval = useCallback(async (sessionId: string, intervalSeconds: number) => {
+    try {
+      const snapshot = await invoke<MonitorSnapshotResponse>("set_remote_monitor_interval", { sessionId, intervalSeconds });
+      applyMonitorSnapshot(snapshot);
+    } catch (error) {
+      showToast(`无法调整监控频率：${String(error)}`);
+    }
+  }, [applyMonitorSnapshot, showToast]);
 
   useEffect(() => {
-    void loadStoredCustomFont().then((family) => { if (family) setFontRevision((value) => value + 1); }).catch(() => undefined);
-  }, []);
+    if (!appStoreStatus.ready || !isDesktopRuntime()) return;
+    void invoke<RenderAsset | null>("load_font_asset").then((asset) => {
+      if (asset) void registerFontAsset(asset);
+    }).catch(() => undefined);
+    if (appState.wallpaper.source === "none") {
+      setRenderedWallpaper("");
+      return;
+    }
+    if (appState.wallpaper.source === "local" && appState.wallpaper.value.startsWith("data:image/")) {
+      void invoke<RenderAsset>("install_wallpaper_asset", {
+        request: { source: "legacy-data", value: appState.wallpaper.value },
+      }).then((asset) => {
+        setRenderedWallpaper(asset.dataUrl);
+        setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, value: asset.label } }));
+      }).catch((error) => showToast(`旧壁纸迁移失败：${String(error)}`));
+      return;
+    }
+    void invoke<RenderAsset | null>("load_wallpaper_asset")
+      .then((asset) => setRenderedWallpaper(asset?.dataUrl ?? ""))
+      .catch(() => setRenderedWallpaper(""));
+  // Managed assets are restored once after the SQLite snapshot is ready.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appStoreStatus.ready]);
 
   const updateSession = useCallback((sessionId: string, patch: Partial<TerminalSession>) => {
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, ...patch } : session));
@@ -390,6 +605,31 @@ function App() {
     updateSession(sessionId, { state: message ? "error" : "closed" });
     if (message) showToast(message);
   }, [showToast, updateSession]);
+
+  const handleContextChanged = useCallback((
+    sessionId: string,
+    stack: Array<{ hostname: string; username: string; cwd: string }>,
+    warning?: string,
+  ) => {
+    const current = stack[stack.length - 1];
+    updateSession(sessionId, {
+      contextStack: stack,
+      contextSource: current ? "shell-integration" : "profile",
+      reportedHostname: current?.hostname,
+      currentPath: current?.cwd ?? "~",
+    });
+    if (warning) showToast(warning);
+  }, [showToast, updateSession]);
+
+  async function enableShellIntegration() {
+    if (activeSession.state !== "connected" || !isDesktopRuntime()) return;
+    try {
+      await invoke("enable_shell_integration", { sessionId: activeSession.id });
+      showToast("已向当前 Shell 注入一次有界上下文探针；嵌套 SSH 后可再次点击识别");
+    } catch (error) {
+      showToast(`无法启用 Shell Integration：${String(error)}`);
+    }
+  }
 
   function openHost(host: HostProfile) {
     const existing = sessions.find((session) => session.hostId === host.id && session.state !== "closed");
@@ -408,7 +648,14 @@ function App() {
 
   function closeSession(sessionId: string) {
     const closing = sessions.find((session) => session.id === sessionId);
-    if (closing?.state === "connected" && isDesktopRuntime()) {
+    if (closing?.state === "connected" && isAndroidRuntime()) {
+      void invoke("android_disconnect_host", { sessionId }).catch(() => undefined);
+      setAndroidTerminalIds((current) => {
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      });
+    } else if (closing?.state === "connected" && isDesktopRuntime()) {
       void invoke("stop_terminal", { sessionId }).catch(() => undefined);
     }
     setSessions((current) => {
@@ -421,6 +668,49 @@ function App() {
   }
 
   async function startSshSession(session: TerminalSession, host: HostProfile) {
+    if (isAndroidRuntime()) {
+      const credentialRef = host.androidKeyRef ?? host.credentialRef;
+      if (!credentialRef || !host.hostKeySha256) {
+        throw new Error("Android 连接需要已保存凭据和已确认的 SHA256 主机指纹");
+      }
+      const sessionId = await invoke<string>("android_connect_host", {
+        request: {
+          sessionId: session.id,
+          host: host.host,
+          port: host.port,
+          username: host.username,
+          hostKeySha256: host.hostKeySha256,
+          timeoutSeconds: 15,
+          authKind: host.androidKeyRef ? "privateKeyReference" : "passwordReference",
+          credentialRef,
+          passphraseRef: host.androidKeyPassphraseRef,
+        },
+      });
+      let terminalId: string;
+      try {
+        terminalId = await invoke<string>("android_open_terminal", {
+          sessionId,
+          cols: 120,
+          rows: 32,
+        });
+      } catch (error) {
+        await invoke("android_disconnect_host", { sessionId }).catch(() => undefined);
+        throw error;
+      }
+      setAndroidTerminalIds((current) => ({ ...current, [sessionId]: terminalId }));
+      updateSession(session.id, { state: "connected" });
+      setAppState((current) => ({
+        ...current,
+        connectionHistory: [{
+          id: crypto.randomUUID(),
+          hostId: host.id,
+          connectedAt: new Date().toISOString(),
+          path: session.currentPath,
+        }, ...(current.connectionHistory ?? [])],
+      }));
+      showToast(`已连接 ${host.name}`);
+      return;
+    }
     const identityPassphraseRef = appState.sshKeys.find(
       (key) => key.privateKeyPath === host.identityFile,
     )?.passphraseRef;
@@ -457,15 +747,26 @@ function App() {
       showToast("请先添加或导入主机配置");
       return;
     }
-    if (!isDesktopRuntime()) {
+    if (!isDesktopRuntime() && !isAndroidRuntime()) {
       showToast("浏览器预览不启动 SSH；桌面应用中可直接连接");
       return;
     }
     updateSession(activeSession.id, { state: "connecting" });
     try {
-      const inspection = await invoke<HostKeyInspection>("inspect_host_key", {
-        request: { host: activeHost.host, port: activeHost.port },
-      });
+      const inspection: HostKeyInspection = isAndroidRuntime()
+        ? await invoke<HostKeyInspection>("android_inspect_host_key", {
+          host: activeHost.host,
+          port: activeHost.port,
+          timeoutSeconds: 15,
+        }).then((value): HostKeyInspection => ({
+          ...value,
+          status: activeHost.hostKeySha256
+            ? (value.fingerprint === activeHost.hostKeySha256 ? "verified" : "changed")
+            : "unknown",
+        }))
+        : await invoke<HostKeyInspection>("inspect_host_key", {
+          request: { host: activeHost.host, port: activeHost.port },
+        });
       if (inspection.status === "unknown") {
         setPendingHostKey({ ...inspection, hostId: activeHost.id, sessionId: activeSession.id });
         setDialog("host-key");
@@ -486,7 +787,14 @@ function App() {
   }
 
   async function disconnectActiveSession() {
-    if (isDesktopRuntime()) {
+    if (isAndroidRuntime()) {
+      await invoke("android_disconnect_host", { sessionId: activeSession.id }).catch((error) => showToast(String(error)));
+      setAndroidTerminalIds((current) => {
+        const next = { ...current };
+        delete next[activeSession.id];
+        return next;
+      });
+    } else if (isDesktopRuntime()) {
       await invoke("stop_terminal", { sessionId: activeSession.id }).catch((error) => showToast(String(error)));
     }
     updateSession(activeSession.id, { state: "closed" });
@@ -497,10 +805,21 @@ function App() {
     const pending = pendingHostKey;
     setTrustingHostKey(true);
     try {
-      await invoke<HostKeyInspection>("trust_host_key", {
-        request: { host: pending.host, port: pending.port },
-        expectedFingerprint: pending.fingerprint,
-      });
+      if (isAndroidRuntime()) {
+        const currentHost = appState.hosts.find((host) => host.id === pending.hostId);
+        if (!currentHost || currentHost.host !== pending.host || currentHost.port !== pending.port) {
+          throw new Error("主机资料已变化，请重新检查指纹");
+        }
+        setAppState((current) => ({
+          ...current,
+          hosts: current.hosts.map((host) => host.id === pending.hostId ? { ...host, hostKeySha256: pending.fingerprint } : host),
+        }));
+      } else {
+        await invoke<HostKeyInspection>("trust_host_key", {
+          request: { host: pending.host, port: pending.port },
+          expectedFingerprint: pending.fingerprint,
+        });
+      }
       setPendingHostKey(null);
       setDialog(null);
       const session = sessions.find((candidate) => candidate.id === pending.sessionId);
@@ -510,7 +829,10 @@ function App() {
         return;
       }
       showToast("主机指纹已保存，正在连接");
-      await startSshSession(session, host);
+      await startSshSession(
+        session,
+        isAndroidRuntime() ? { ...host, hostKeySha256: pending.fingerprint } : host,
+      );
     } catch (error) {
       updateSession(pending.sessionId, { state: "error" });
       showToast(String(error));
@@ -521,7 +843,19 @@ function App() {
 
   async function writeToSessions(command: string, targetIds: string[]) {
     const targetSessions = sessions.filter((session) => targetIds.includes(session.id));
-    if (isDesktopRuntime()) {
+    if (isAndroidRuntime()) {
+      await Promise.all(targetSessions.filter((session) => session.state === "connected").map((session) => {
+        const terminalId = androidTerminalIds[session.id];
+        if (!terminalId) return Promise.reject(new Error("Android 终端尚未就绪"));
+        return invoke("android_write_terminal", {
+          request: {
+            sessionId: session.id,
+            terminalId,
+            dataBase64: encodeUtf8Base64(`${command}\r`),
+          },
+        });
+      }));
+    } else if (isDesktopRuntime()) {
       await Promise.all(targetSessions.filter((session) => session.state === "connected").map((session) =>
         invoke("write_terminal", { sessionId: session.id, data: `${command}\r` }),
       ));
@@ -550,9 +884,78 @@ function App() {
   async function submitCommand() {
     const command = commandInput.trim();
     if (!command) return;
-    const targetIds = broadcastOpen && broadcastTargets.length > 0 ? broadcastTargets : [activeSession.id];
-    await writeToSessions(command, targetIds);
+    if (broadcastOpen) {
+      if (broadcastTargets.length === 0) {
+        showToast("广播模式必须先明确选择至少一个已连接目标");
+        return;
+      }
+      const targets = sessions
+        .filter((session) => broadcastTargets.includes(session.id) && session.state === "connected")
+        .map((session) => {
+          const host = appState.hosts.find((candidate) => candidate.id === session.hostId);
+          return {
+            sessionId: session.id,
+            label: session.title,
+            environment: host?.environment ?? "development",
+          };
+        });
+      try {
+        const preview = await invoke<BroadcastPreviewResponse>("preview_broadcast", { command, targets });
+        setBroadcastPreview(preview);
+        setBroadcastResult(null);
+      } catch (error) {
+        showToast(`广播已阻止：${String(error)}`);
+      }
+      return;
+    }
+    await writeToSessions(command, [activeSession.id]);
     setCommandInput("");
+  }
+
+  async function confirmBroadcast() {
+    if (!broadcastPreview || broadcastExecuting) return;
+    setBroadcastExecuting(true);
+    try {
+      const result = await invoke<BroadcastResultResponse>("execute_broadcast", {
+        confirmationToken: broadcastPreview.confirmationToken,
+      });
+      const successfulIds = result.items
+        .filter((item) => item.outcome === "succeeded")
+        .map((item) => item.sessionId);
+      if (successfulIds.length > 0) {
+        const now = new Date().toISOString();
+        setAppState((current) => ({
+          ...current,
+          commandHistory: [
+            ...sessions.filter((session) => successfulIds.includes(session.id)).map((session, index) => ({
+              id: `history-${Date.now()}-${index}`,
+              command: broadcastPreview.command,
+              hostId: session.hostId,
+              path: session.currentPath,
+              createdAt: now,
+            })),
+            ...current.commandHistory,
+          ],
+        }));
+      }
+      setBroadcastResult(result);
+      setBroadcastPreview(null);
+      setBroadcastTargets([]);
+      setCommandInput("");
+      showToast(`广播结果：成功 ${result.succeeded}，失败 ${result.failed}，跳过 ${result.skipped}`);
+    } catch (error) {
+      setBroadcastPreview(null);
+      showToast(`广播确认失败：${String(error)}`);
+    } finally {
+      setBroadcastExecuting(false);
+    }
+  }
+
+  function closeBroadcast() {
+    setBroadcastOpen(false);
+    setBroadcastTargets([]);
+    setBroadcastPreview(null);
+    setBroadcastResult(null);
   }
 
   function chooseScript(script: ScriptRecipe) {
@@ -589,7 +992,7 @@ function App() {
     else chooseCommand(suggestion.item as CommandRecipe);
   }
 
-  function handleFinalShellImport(result: FinalShellImportResult) {
+  function handleMigrationImport(result: MigrationImportResult) {
     const hostKey = (host: HostProfile) => `${host.username}\0${host.host}\0${host.port}`;
     const importedByKey = new Map(result.profiles.map((host) => [hostKey(host), host]));
     const existingKeys = new Set(appState.hosts.map(hostKey));
@@ -624,7 +1027,7 @@ function App() {
         .map((reference) => invoke("delete_credential", { reference }).catch(() => undefined)));
     }
     setSidebarView("hosts");
-    showToast(`新增 ${additions.length} 台，更新 ${updatedCredentials} 台凭据，安全保存 ${result.credentialsImported} 个密码`);
+    showToast(`${result.sourceLabel}：新增 ${additions.length} 台，更新 ${updatedCredentials} 台凭据，安全保存 ${result.credentialsImported} 个密码`);
   }
 
   async function runWindowAction(action: "minimize" | "toggleMaximize" | "close") {
@@ -643,8 +1046,36 @@ function App() {
     }
   }
 
-  function addHost(form: HTMLFormElement) {
+  async function addHost(form: HTMLFormElement) {
     const data = new FormData(form);
+    let credentialRef: string | undefined;
+    let androidKeyRef: string | undefined;
+    let androidKeyPassphraseRef: string | undefined;
+    if (isAndroidRuntime()) {
+      try {
+        const value = String(data.get("androidCredential") || "");
+        if (androidCredentialKind === "password") {
+          if (value) {
+            credentialRef = await invoke<string>("android_store_credential", {
+              request: { kind: "password", value },
+            });
+          }
+        } else {
+          androidKeyRef = await invoke<string>("android_store_credential", {
+            request: { kind: "privateKey", value },
+          });
+          const passphrase = String(data.get("androidPassphrase") || "");
+          if (passphrase) {
+            androidKeyPassphraseRef = await invoke<string>("android_store_credential", {
+              request: { kind: "privateKeyPassphrase", value: passphrase },
+            });
+          }
+        }
+      } catch (error) {
+        showToast(`Android 凭据保存失败：${String(error)}`);
+        return;
+      }
+    }
     const host: HostProfile = {
       id: crypto.randomUUID(),
       name: String(data.get("name") || data.get("host")),
@@ -654,11 +1085,15 @@ function App() {
       username: String(data.get("username") || "root"),
       environment: String(data.get("environment") || "development") as EnvironmentKind,
       identityFile: String(data.get("identityFile") || "") || undefined,
+      credentialRef,
+      androidKeyRef,
+      androidKeyPassphraseRef,
       tags: [],
       lastPath: "~",
     };
     setAppState((current) => ({ ...current, hosts: [...current.hosts, host] }));
     setDialog(null);
+    setAndroidCredentialKind("password");
     openHost(host);
   }
 
@@ -669,7 +1104,11 @@ function App() {
     if (!confirmed) return;
 
     const hostSessions = sessions.filter((session) => session.hostId === host.id);
-    if (isDesktopRuntime()) {
+    if (isAndroidRuntime()) {
+      await Promise.all(hostSessions
+        .filter((session) => session.state === "connected" || session.state === "connecting")
+        .map((session) => invoke("android_disconnect_host", { sessionId: session.id }).catch(() => undefined)));
+    } else if (isDesktopRuntime()) {
       await Promise.all(hostSessions
         .filter((session) => session.state === "connected" || session.state === "connecting")
         .map((session) => invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined)));
@@ -744,16 +1183,15 @@ function App() {
     const deleted = deletedHosts.find((item) => item.id === itemId);
     if (!deleted || !window.confirm(`永久删除“${deleted.host.name}”吗？此操作无法恢复。`)) return;
     let credentialError: string | undefined;
-    const reference = deleted.host.credentialRef;
-    const referencedElsewhere = reference && (
-      appState.hosts.some((host) => host.credentialRef === reference)
-      || deletedHosts.some((item) => item.id !== itemId && item.host.credentialRef === reference)
-    );
-    if (reference && !referencedElsewhere && isDesktopRuntime()) {
-      try {
-        await invoke("delete_credential", { reference });
-      } catch (error) {
-        credentialError = String(error);
+    for (const reference of hostCredentialReferences(deleted.host)) {
+      const referencedElsewhere = appState.hosts.some((host) => hostCredentialReferences(host).includes(reference))
+        || deletedHosts.some((item) => item.id !== itemId && hostCredentialReferences(item.host).includes(reference));
+      if (!referencedElsewhere && (isDesktopRuntime() || isAndroidRuntime())) {
+        try {
+          await invoke(isAndroidRuntime() ? "android_delete_credential" : "delete_credential", { reference });
+        } catch (error) {
+          credentialError = String(error);
+        }
       }
     }
     setAppState((current) => ({
@@ -785,30 +1223,68 @@ function App() {
     setSidebarView("scripts");
   }
 
-  function applyLocalWallpaper(file?: File) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setAppState((current) => ({
-        ...current,
-        wallpaper: { ...current.wallpaper, source: "local", value: String(reader.result) },
-      }));
-      setFontRevision((value) => value + 1);
-    };
-    reader.readAsDataURL(file);
+  async function registerFontAsset(asset: RenderAsset) {
+    const font = new FontFace(CUSTOM_FONT_FAMILY, `url(${asset.dataUrl})`);
+    const loaded = await font.load();
+    document.fonts.add(loaded);
+    setFontRevision((value) => value + 1);
   }
 
-  async function applyLocalFont(file?: File) {
-    if (!file) return;
+  async function chooseLocalWallpaper() {
     try {
-      const family = await saveAndRegisterCustomFont(file);
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        title: "选择终端壁纸",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp"] }],
+      });
+      if (typeof selected !== "string") return;
+      const asset = await invoke<RenderAsset>("install_wallpaper_asset", {
+        request: { source: "local", value: selected },
+      });
+      setRenderedWallpaper(asset.dataUrl);
       setAppState((current) => ({
         ...current,
-        terminalAppearance: { ...current.terminalAppearance, fontFamily: family, customFontName: file.name },
+        wallpaper: { ...current.wallpaper, source: "local", value: asset.label },
       }));
-      showToast(`已启用本机字体 ${file.name}`);
+      showToast(`已启用本机壁纸 ${asset.label}`);
     } catch (error) {
-      showToast(String(error));
+      showToast(`壁纸安装失败：${String(error)}`);
+    }
+  }
+
+  async function applyRemoteWallpaper() {
+    try {
+      const asset = await invoke<RenderAsset>("install_wallpaper_asset", {
+        request: { source: "url", value: appState.wallpaper.value.trim() },
+      });
+      setRenderedWallpaper(asset.dataUrl);
+      showToast("HTTPS 壁纸已由 Rust 下载并缓存");
+    } catch (error) {
+      showToast(`壁纸下载失败：${String(error)}`);
+    }
+  }
+
+  async function chooseLocalFont() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        title: "选择终端字体",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "字体", extensions: ["ttf", "otf", "woff", "woff2"] }],
+      });
+      if (typeof selected !== "string") return;
+      const asset = await invoke<RenderAsset>("install_font_asset", { request: { path: selected } });
+      await registerFontAsset(asset);
+      setAppState((current) => ({
+        ...current,
+        terminalAppearance: { ...current.terminalAppearance, fontFamily: CUSTOM_FONT_FAMILY, customFontName: asset.label },
+      }));
+      showToast(`已启用本机字体 ${asset.label}`);
+    } catch (error) {
+      showToast(`字体安装失败：${String(error)}`);
     }
   }
 
@@ -1044,13 +1520,19 @@ function App() {
                 sampledAt: hostMetrics[activeSession.id].sampledAt,
               } : undefined}
               currentIdentity={activeSession.state === "connected" ? {
-                address: hostMetrics[activeSession.id]?.metrics?.primaryIp ?? activeHost.host,
-                hostname: hostMetrics[activeSession.id]?.metrics?.hostname,
-                username: activeHost.username,
-                source: "transport",
+                address: activeShellContext ? undefined : hostMetrics[activeSession.id]?.metrics?.primaryIp ?? activeHost.host,
+                hostname: activeShellContext?.hostname ?? hostMetrics[activeSession.id]?.metrics?.hostname,
+                username: activeShellContext?.username ?? activeHost.username,
+                source: activeShellContext ? "shell-integration" : "transport",
               } : undefined}
               loading={hostMetrics[activeSession.id]?.loading}
               error={hostMetrics[activeSession.id]?.error}
+              history={hostMetrics[activeSession.id]?.history}
+              paused={hostMetrics[activeSession.id]?.paused}
+              intervalSeconds={hostMetrics[activeSession.id]?.intervalSeconds}
+              droppedSamples={hostMetrics[activeSession.id]?.droppedSamples}
+              onPausedChange={(paused) => void setMonitorPaused(activeSession.id, paused)}
+              onIntervalChange={(seconds) => void setMonitorInterval(activeSession.id, seconds)}
               onCopied={showToast}
             />
           ) : null}
@@ -1074,7 +1556,7 @@ function App() {
           </div>
           <div className="terminal-actions">
             <button className="icon-button" type="button" title="分屏" aria-label="分屏"><Columns2 size={16} /></button>
-            <button className={`icon-button ${broadcastOpen ? "active warning" : ""}`} type="button" title="多终端广播" aria-label="多终端广播" onClick={() => setBroadcastOpen((value) => !value)}><RadioTower size={16} /></button>
+            <button className={`icon-button ${broadcastOpen ? "active warning" : ""}`} type="button" disabled={isAndroidRuntime()} title={isAndroidRuntime() ? "Android Preview 不支持广播" : "多终端广播"} aria-label={isAndroidRuntime() ? "Android Preview 不支持广播" : "多终端广播"} onClick={() => broadcastOpen ? closeBroadcast() : setBroadcastOpen(true)}><RadioTower size={16} /></button>
             <button className={`icon-button ${filePanelOpen ? "active" : ""}`} type="button" title={filePanelOpen ? "关闭文件面板" : "打开文件面板"} aria-label="文件面板" onClick={() => setFilePanelOpen((value) => !value)}>
               {filePanelOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
             </button>
@@ -1091,12 +1573,24 @@ function App() {
                 <ChevronRight size={14} />
                 <strong className={`route-node current ${activeHost.environment}`}>{activeHost.name}</strong>
                 <code>{activeHost.username}@{activeHost.host}</code>
+                {(activeSession.contextStack ?? []).map((context, index) => (
+                  <span className="identity-breadcrumb-segment" key={`${context.username}@${context.hostname}-${index}`}>
+                    <ChevronRight size={14} />
+                    <strong className="route-node current">{context.hostname}</strong>
+                    <code>{context.username}:{context.cwd}</code>
+                  </span>
+                ))}
               </>
             ) : <span className="empty-host-hint">请选择、添加或导入主机</span>}
           </div>
           <div className="context-meta">
             {hasActiveHost ? <span className={`environment-badge ${activeHost.environment}`}>{environmentLabels[activeHost.environment]}</span> : null}
             {hasActiveHost ? <span className="context-source"><Check size={13} /> 配置视图</span> : null}
+            {activeSession.state === "connected" ? (
+              <button className="secondary-button compact" type="button" onClick={() => void enableShellIntegration()}>
+                <Braces size={13} /> 识别当前 Shell
+              </button>
+            ) : null}
             {hasActiveHost ? <span>{activeHost.latency ? `${activeHost.latency} ms` : "未测速"}</span> : null}
             {activeSession.state === "connected" ? (
               <button className="disconnect-button" type="button" onClick={disconnectActiveSession}><WifiOff size={14} /> 断开</button>
@@ -1110,7 +1604,7 @@ function App() {
 
         {broadcastOpen ? (
           <section className="broadcast-banner">
-            <div><RadioTower size={17} /><strong>多终端广播</strong><span>已选 {broadcastTargets.length} 台，发送后保持选择</span></div>
+            <div><RadioTower size={17} /><strong>安全广播</strong><span>已选 {broadcastTargets.length} 台，发送前冻结目标并预览</span></div>
             <div className="broadcast-targets">
               {sessions.map((session) => (
                 <label className={session.state !== "connected" ? "unavailable" : ""} key={session.id}>
@@ -1118,7 +1612,11 @@ function App() {
                     type="checkbox"
                     checked={broadcastTargets.includes(session.id)}
                     disabled={session.state !== "connected"}
-                    onChange={(event) => setBroadcastTargets((current) => event.target.checked ? [...current, session.id] : current.filter((id) => id !== session.id))}
+                    onChange={(event) => {
+                      setBroadcastPreview(null);
+                      setBroadcastResult(null);
+                      setBroadcastTargets((current) => event.target.checked ? [...current, session.id] : current.filter((id) => id !== session.id));
+                    }}
                   />
                   <span className={`session-state ${session.state}`} />
                   <span>{session.title}</span>
@@ -1126,10 +1624,42 @@ function App() {
               ))}
             </div>
             <div className="broadcast-controls">
-              <button type="button" onClick={() => setBroadcastTargets(sessions.filter((session) => session.state === "connected").map((session) => session.id))}>全选已连接</button>
-              <button type="button" disabled={broadcastTargets.length === 0} onClick={() => setBroadcastTargets([])}>清空</button>
+              <button type="button" onClick={() => { setBroadcastPreview(null); setBroadcastResult(null); setBroadcastTargets(sessions.filter((session) => session.state === "connected").map((session) => session.id)); }}>全选已连接</button>
+              <button type="button" disabled={broadcastTargets.length === 0} onClick={() => { setBroadcastPreview(null); setBroadcastResult(null); setBroadcastTargets([]); }}>清空</button>
             </div>
-            <button className="icon-button" type="button" title="关闭广播" aria-label="关闭广播" onClick={() => setBroadcastOpen(false)}><X size={16} /></button>
+            <button className="icon-button" type="button" title="关闭广播并清空目标" aria-label="关闭广播并清空目标" onClick={closeBroadcast}><X size={16} /></button>
+          </section>
+        ) : null}
+
+        {broadcastPreview ? (
+          <section className={`broadcast-preview ${broadcastPreview.productionTargets > 0 || broadcastPreview.risk === "high" ? "warning" : ""}`} aria-label="广播发送预览">
+            <div className="broadcast-preview-heading">
+              <ShieldCheck size={16} aria-hidden="true" />
+              <strong>确认广播目标</strong>
+              <span>{broadcastPreview.warning}</span>
+            </div>
+            <code>{broadcastPreview.command}</code>
+            <div className="broadcast-preview-targets">
+              {broadcastPreview.targets.map((target) => (
+                <span className={target.environment} key={target.sessionId}>{target.label} · {environmentLabels[target.environment]}</span>
+              ))}
+            </div>
+            <div className="broadcast-preview-actions">
+              <button className="secondary-button" type="button" disabled={broadcastExecuting} onClick={() => setBroadcastPreview(null)}>取消</button>
+              <button className="primary-button" type="button" disabled={broadcastExecuting} onClick={() => void confirmBroadcast()}>
+                {broadcastExecuting ? <RefreshCw className="spin" size={14} /> : <RadioTower size={14} />} 确认发送一次
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        {broadcastResult ? (
+          <section className={`broadcast-result ${broadcastResult.outcome}`} aria-label="广播逐目标结果" aria-live="polite">
+            <strong>成功 {broadcastResult.succeeded} · 失败 {broadcastResult.failed} · 跳过 {broadcastResult.skipped}</strong>
+            {broadcastResult.items.map((item) => (
+              <span className={item.outcome} key={item.sessionId}><b>{item.label}</b>{item.message}</span>
+            ))}
+            <button className="icon-button compact" type="button" title="关闭广播结果" aria-label="关闭广播结果" onClick={() => setBroadcastResult(null)}><X size={13} /></button>
           </section>
         ) : null}
 
@@ -1138,10 +1668,12 @@ function App() {
             <TerminalView
               session={activeSession}
               host={activeHost}
-              wallpaper={appState.wallpaper}
+              wallpaper={{ ...appState.wallpaper, value: renderedWallpaper }}
               appearance={appState.terminalAppearance}
               appearanceRevision={fontRevision}
+              androidTerminalId={androidTerminalIds[activeSession.id]}
               onDisconnected={handleDisconnected}
+              onContextChanged={handleContextChanged}
             />
             <div className="path-history-bar">
               <Clock3 size={14} />
@@ -1165,7 +1697,7 @@ function App() {
               ) : null}
               <form className={`command-composer ${broadcastOpen ? "broadcasting" : ""}`} onSubmit={(event) => { event.preventDefault(); void submitCommand(); }}>
                 <Command size={16} />
-                <input value={commandInput} onChange={(event) => setCommandInput(event.target.value)} placeholder={broadcastOpen ? `发送到 ${broadcastTargets.length} 个终端` : "输入命令，或搜索想做的事"} />
+                <input value={commandInput} onChange={(event) => { setCommandInput(event.target.value); setBroadcastPreview(null); setBroadcastResult(null); }} placeholder={broadcastOpen ? `发送到 ${broadcastTargets.length} 个终端` : "输入命令，或搜索想做的事"} />
                 <button className="composer-history" type="button" title="命令历史" onClick={() => setSidebarView("history")}><History size={15} /></button>
                 <button className="run-command-button" type="submit" title="执行命令"><Play size={14} /><span>执行</span></button>
               </form>
@@ -1183,9 +1715,15 @@ function App() {
                 identityPassphraseRef: activeIdentityPassphraseRef,
               }}
               connected={activeSession.state === "connected"}
-              initialPath={activeSession.currentPath}
+              androidSessionId={isAndroidRuntime() ? activeSession.id : undefined}
+              initialPath={isAndroidRuntime() && !activeSession.currentPath.startsWith("/") ? "/" : activeSession.currentPath}
               externalEditorPath={appState.settings.externalEditorPath}
               autoUploadEditedFiles={appState.settings.autoUploadEditedFiles}
+              packageTransfer={appState.settings.packageTransfersEnabled}
+              onPackageTransferChanged={(packageTransfersEnabled) => setAppState((current) => ({
+                ...current,
+                settings: { ...current.settings, packageTransfersEnabled },
+              }))}
               onPathChanged={(path) => {
                 updateSession(activeSession.id, { currentPath: path });
                 setAppState((current) => ({
@@ -1203,15 +1741,15 @@ function App() {
         </div>
 
         <footer className="statusbar">
-          <span><SquareTerminal size={13} /> OpenSSH 兼容引擎</span>
-          <span><LockKeyhole size={13} /> 本地资料库</span>
+          <span><SquareTerminal size={13} /> {isAndroidRuntime() ? "Rust libssh2 移动引擎" : "OpenSSH 兼容引擎"}</span>
+          <span><Database size={13} /> SQLite {appStoreStatus.saving ? "保存中" : appStoreStatus.ready ? "已同步" : "初始化失败"}</span>
           <span className="status-spacer" />
           <span>UTF-8</span><span>xterm-256color</span><span>{activeSession.currentPath}</span>
         </footer>
       </main>
 
       {dialog === "migration" ? (
-        <MigrationDialog onClose={() => setDialog(null)} onImported={handleFinalShellImport} showToast={showToast} />
+        <MigrationDialog onClose={() => setDialog(null)} onImported={handleMigrationImport} showToast={showToast} />
       ) : null}
 
         {dialog === "host-key" && pendingHostKey ? (
@@ -1262,7 +1800,10 @@ function App() {
         <SettingsDialog
           externalEditorPath={appState.settings.externalEditorPath}
           autoUploadEditedFiles={appState.settings.autoUploadEditedFiles}
-          onSave={(settings) => setAppState((current) => ({ ...current, settings }))}
+          onSave={(settings) => setAppState((current) => ({
+            ...current,
+            settings: { ...current.settings, ...settings },
+          }))}
           onClose={() => setDialog(null)}
           showToast={showToast}
         />
@@ -1270,14 +1811,23 @@ function App() {
 
       {dialog === "host" ? (
         <Dialog title="添加 SSH 主机" onClose={() => setDialog(null)} footer={<><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="submit" form="host-form">保存并打开</button></>}>
-          <form id="host-form" className="form-grid" onSubmit={(event) => { event.preventDefault(); addHost(event.currentTarget); }}>
+          <form id="host-form" className="form-grid" onSubmit={(event) => { event.preventDefault(); void addHost(event.currentTarget); }}>
             <label className="field full"><span>名称</span><input name="name" placeholder="例如：新加坡生产 03" required /></label>
             <label className="field span-2"><span>主机地址</span><input name="host" placeholder="IP 或域名" required /></label>
             <label className="field"><span>端口</span><input name="port" type="number" defaultValue="22" min="1" max="65535" required /></label>
             <label className="field"><span>用户名</span><input name="username" defaultValue="root" required /></label>
             <label className="field"><span>环境</span><select name="environment" defaultValue="development"><option value="production">生产</option><option value="staging">基础设施</option><option value="development">测试</option></select></label>
             <label className="field"><span>分组</span><input name="group" defaultValue="我的主机" /></label>
-            <label className="field full"><span>私钥路径</span><input name="identityFile" placeholder="使用系统 OpenSSH 路径（可选）" /></label>
+            {!isAndroidRuntime() ? <label className="field full"><span>私钥路径</span><input name="identityFile" placeholder="使用系统 OpenSSH 路径（可选）" /></label> : null}
+            {isAndroidRuntime() ? (
+              <>
+                <label className="field full"><span>Android 认证方式</span><select value={androidCredentialKind} onChange={(event) => setAndroidCredentialKind(event.target.value as "password" | "privateKey")}><option value="password">密码</option><option value="privateKey">OpenSSH 私钥</option></select></label>
+                {androidCredentialKind === "password" ? <label className="field full"><span>密码（使用 Android Keystore 保存）</span><input name="androidCredential" type="password" autoComplete="new-password" /></label> : <>
+                  <label className="field full"><span>OpenSSH 私钥正文（只在 Rust 内存中短暂使用）</span><textarea name="androidCredential" rows={6} spellCheck={false} autoComplete="off" /></label>
+                  <label className="field full"><span>私钥口令（可选）</span><input name="androidPassphrase" type="password" autoComplete="new-password" /></label>
+                </>}
+              </>
+            ) : null}
           </form>
         </Dialog>
       ) : null}
@@ -1371,11 +1921,11 @@ function App() {
       {dialog === "wallpaper" ? (
         <Dialog title="终端外观" wide onClose={() => setDialog(null)} footer={<button className="primary-button" type="button" onClick={() => setDialog(null)}>完成</button>}>
           <div className="wallpaper-options">
-            <label className={appState.wallpaper.source === "none" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "none"} onChange={() => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "none", value: "" } }))} /><span>纯色背景</span></label>
-            <label className={appState.wallpaper.source === "local" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "local"} readOnly /><span>本机图片</span><input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => applyLocalWallpaper(event.target.files?.[0])} /></label>
-            <label className={appState.wallpaper.source === "url" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "url"} onChange={() => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url" } }))} /><span>URL 图片</span></label>
+            <label className={appState.wallpaper.source === "none" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "none"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "none", value: "" } })); }} /><span>纯色背景</span></label>
+            <button className={appState.wallpaper.source === "local" ? "active" : ""} type="button" onClick={() => void chooseLocalWallpaper()}><Image size={15} /><span>本机图片</span></button>
+            <label className={appState.wallpaper.source === "url" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "url"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: "" } })); }} /><span>URL 图片</span></label>
           </div>
-          <label className="field full"><span>图片地址</span><input type="url" disabled={appState.wallpaper.source !== "url"} value={appState.wallpaper.source === "url" ? appState.wallpaper.value : ""} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: event.target.value } }))} placeholder="https://image.example.com/background.webp" /></label>
+          <label className="field full"><span>图片地址</span><div className="path-picker"><input type="url" disabled={appState.wallpaper.source !== "url"} value={appState.wallpaper.source === "url" ? appState.wallpaper.value : ""} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: event.target.value } }))} placeholder="https://image.example.com/background.webp" /><button className="secondary-button" type="button" disabled={appState.wallpaper.source !== "url" || !appState.wallpaper.value.trim()} onClick={() => void applyRemoteWallpaper()}><Download size={14} /> 应用</button></div></label>
           <label className="slider-field"><span>背景可见度</span><input type="range" min="0.05" max="0.65" step="0.05" value={appState.wallpaper.opacity} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, opacity: Number(event.target.value) } }))} /><output>{Math.round(appState.wallpaper.opacity * 100)}%</output></label>
           <label className="sync-wallpaper"><input type="checkbox" disabled /><span>加密同步接通后可选择同步</span></label>
           <div className="appearance-divider" />
@@ -1386,7 +1936,7 @@ function App() {
               {[...new Set(["Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Consolas", "Fira Code", "Source Code Pro", ...installedFonts])].map((font) => <option value={font} key={font} />)}
             </datalist>
             <button className="secondary-button" type="button" onClick={() => void readInstalledFonts()}><Search size={14} /> 读取系统字体</button>
-            <label className="secondary-button font-file-button"><Upload size={14} /> 选择字体文件<input type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2" onChange={(event) => void applyLocalFont(event.target.files?.[0])} /></label>
+            <button className="secondary-button" type="button" onClick={() => void chooseLocalFont()}><Upload size={14} /> 选择字体文件</button>
           </div>
           <label className="slider-field"><span>字号</span><input type="range" min="9" max="28" step="1" value={appState.terminalAppearance.fontSize} onChange={(event) => setAppState((current) => ({ ...current, terminalAppearance: { ...current.terminalAppearance, fontSize: Number(event.target.value) } }))} /><output>{appState.terminalAppearance.fontSize}px</output></label>
           <label className="slider-field"><span>行高</span><input type="range" min="1" max="1.8" step="0.05" value={appState.terminalAppearance.lineHeight} onChange={(event) => setAppState((current) => ({ ...current, terminalAppearance: { ...current.terminalAppearance, lineHeight: Number(event.target.value) } }))} /><output>{appState.terminalAppearance.lineHeight.toFixed(2)}</output></label>

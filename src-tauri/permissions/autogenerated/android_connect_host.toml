@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-android-connect-host"
+description = "Enables the android_connect_host command without any pre-configured scope."
+commands.allow = ["android_connect_host"]
+
+[[permission]]
+identifier = "deny-android-connect-host"
+description = "Denies the android_connect_host command without any pre-configured scope."
+commands.deny = ["android_connect_host"]

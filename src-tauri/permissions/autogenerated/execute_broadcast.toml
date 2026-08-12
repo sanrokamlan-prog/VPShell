@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execute-broadcast"
+description = "Enables the execute_broadcast command without any pre-configured scope."
+commands.allow = ["execute_broadcast"]
+
+[[permission]]
+identifier = "deny-execute-broadcast"
+description = "Denies the execute_broadcast command without any pre-configured scope."
+commands.deny = ["execute_broadcast"]

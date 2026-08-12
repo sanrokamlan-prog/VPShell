@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-wallpaper-asset"
+description = "Enables the load_wallpaper_asset command without any pre-configured scope."
+commands.allow = ["load_wallpaper_asset"]
+
+[[permission]]
+identifier = "deny-load-wallpaper-asset"
+description = "Denies the load_wallpaper_asset command without any pre-configured scope."
+commands.deny = ["load_wallpaper_asset"]

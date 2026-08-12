@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-install-font-asset"
+description = "Enables the install_font_asset command without any pre-configured scope."
+commands.allow = ["install_font_asset"]
+
+[[permission]]
+identifier = "deny-install-font-asset"
+description = "Denies the install_font_asset command without any pre-configured scope."
+commands.deny = ["install_font_asset"]

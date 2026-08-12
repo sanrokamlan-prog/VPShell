@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trust-host-key"
+description = "Enables the trust_host_key command without any pre-configured scope."
+commands.allow = ["trust_host_key"]
+
+[[permission]]
+identifier = "deny-trust-host-key"
+description = "Denies the trust_host_key command without any pre-configured scope."
+commands.deny = ["trust_host_key"]

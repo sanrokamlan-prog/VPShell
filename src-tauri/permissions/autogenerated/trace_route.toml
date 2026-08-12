@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trace-route"
+description = "Enables the trace_route command without any pre-configured scope."
+commands.allow = ["trace_route"]
+
+[[permission]]
+identifier = "deny-trace-route"
+description = "Denies the trace_route command without any pre-configured scope."
+commands.deny = ["trace_route"]

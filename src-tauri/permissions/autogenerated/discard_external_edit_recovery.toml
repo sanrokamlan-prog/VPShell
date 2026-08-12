@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-external-edit-recovery"
+description = "Enables the discard_external_edit_recovery command without any pre-configured scope."
+commands.allow = ["discard_external_edit_recovery"]
+
+[[permission]]
+identifier = "deny-discard-external-edit-recovery"
+description = "Denies the discard_external_edit_recovery command without any pre-configured scope."
+commands.deny = ["discard_external_edit_recovery"]

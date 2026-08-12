@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-external-edit-status"
+description = "Enables the get_external_edit_status command without any pre-configured scope."
+commands.allow = ["get_external_edit_status"]
+
+[[permission]]
+identifier = "deny-get-external-edit-status"
+description = "Denies the get_external_edit_status command without any pre-configured scope."
+commands.deny = ["get_external_edit_status"]

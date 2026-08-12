@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resume-external-edit"
+description = "Enables the resume_external_edit command without any pre-configured scope."
+commands.allow = ["resume_external_edit"]
+
+[[permission]]
+identifier = "deny-resume-external-edit"
+description = "Denies the resume_external_edit command without any pre-configured scope."
+commands.deny = ["resume_external_edit"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-android-inspect-host-key"
+description = "Enables the android_inspect_host_key command without any pre-configured scope."
+commands.allow = ["android_inspect_host_key"]
+
+[[permission]]
+identifier = "deny-android-inspect-host-key"
+description = "Denies the android_inspect_host_key command without any pre-configured scope."
+commands.deny = ["android_inspect_host_key"]

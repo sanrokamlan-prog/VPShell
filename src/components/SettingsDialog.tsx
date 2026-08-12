@@ -191,7 +191,7 @@ export function SettingsDialog({
         <section className="settings-section" aria-labelledby="settings-editor-title">
           <div className="settings-section-heading">
             <FileCode2 size={17} />
-            <div><h3 id="settings-editor-title">远程文件编辑器</h3><p>双击远程文本文件时调用本机编辑器。</p></div>
+            <div><h3 id="settings-editor-title">远程文件编辑器</h3><p>支持 Notepad++、VS Code/VSCodium、自定义程序和系统默认编辑器。</p></div>
           </div>
           <div className="form-grid">
             <label className="field full">
@@ -200,7 +200,7 @@ export function SettingsDialog({
                 <input
                   value={editorPath}
                   onChange={(event) => setEditorPath(event.target.value)}
-                  placeholder="C:\\Program Files\\Notepad++\\notepad++.exe"
+                  placeholder="Notepad++ 或 VS Code 的绝对可执行文件路径"
                   spellCheck={false}
                 />
                 <button className="secondary-button" type="button" disabled={!desktopRuntime} onClick={() => void chooseEditor()}>

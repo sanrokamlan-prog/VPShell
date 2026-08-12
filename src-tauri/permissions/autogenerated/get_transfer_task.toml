@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-transfer-task"
+description = "Enables the get_transfer_task command without any pre-configured scope."
+commands.allow = ["get_transfer_task"]
+
+[[permission]]
+identifier = "deny-get-transfer-task"
+description = "Denies the get_transfer_task command without any pre-configured scope."
+commands.deny = ["get_transfer_task"]

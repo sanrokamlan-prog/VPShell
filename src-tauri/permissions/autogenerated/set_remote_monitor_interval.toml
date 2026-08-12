@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-remote-monitor-interval"
+description = "Enables the set_remote_monitor_interval command without any pre-configured scope."
+commands.allow = ["set_remote_monitor_interval"]
+
+[[permission]]
+identifier = "deny-set-remote-monitor-interval"
+description = "Denies the set_remote_monitor_interval command without any pre-configured scope."
+commands.deny = ["set_remote_monitor_interval"]

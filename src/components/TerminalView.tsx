@@ -12,7 +12,13 @@ interface TerminalViewProps {
   wallpaper: WallpaperSettings;
   appearance: TerminalAppearanceSettings;
   appearanceRevision: number;
+  androidTerminalId?: string;
   onDisconnected: (sessionId: string, message?: string) => void;
+  onContextChanged: (
+    sessionId: string,
+    stack: Array<{ hostname: string; username: string; cwd: string }>,
+    warning?: string,
+  ) => void;
 }
 
 interface TerminalOutputEvent {
@@ -25,6 +31,12 @@ interface TerminalExitEvent {
   message?: string;
 }
 
+interface TerminalContextEvent {
+  sessionId: string;
+  stack: Array<{ hostname: string; username: string; cwd: string }>;
+  warning?: string;
+}
+
 function decodeBase64(value: string) {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -32,6 +44,13 @@ function decodeBase64(value: string) {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
+}
+
+function encodeBase64(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 function welcomeText(host: HostProfile) {
@@ -53,7 +72,7 @@ function welcomeText(host: HostProfile) {
   ].join("\r\n");
 }
 
-export function TerminalView({ session, host, wallpaper, appearance, appearanceRevision, onDisconnected }: TerminalViewProps) {
+export function TerminalView({ session, host, wallpaper, appearance, appearanceRevision, androidTerminalId, onDisconnected, onContextChanged }: TerminalViewProps) {
   const terminalElementRef = useRef<HTMLDivElement>(null);
   const connectionStateRef = useRef(session.state);
   const terminalRef = useRef<Terminal | null>(null);
@@ -123,6 +142,16 @@ export function TerminalView({ session, host, wallpaper, appearance, appearanceR
 
     let previewLine = "";
     const dataDisposable = terminal.onData((data) => {
+      if (connectionStateRef.current === "connected" && androidTerminalId) {
+        void invoke("android_write_terminal", {
+          request: {
+            sessionId: session.id,
+            terminalId: androidTerminalId,
+            dataBase64: encodeBase64(data),
+          },
+        }).catch((error) => onDisconnected(session.id, String(error)));
+        return;
+      }
       if (connectionStateRef.current === "connected" && "__TAURI_INTERNALS__" in window) {
         void invoke("write_terminal", { sessionId: session.id, data }).catch((error) => {
           onDisconnected(session.id, String(error));
@@ -153,8 +182,33 @@ export function TerminalView({ session, host, wallpaper, appearance, appearanceR
     let disposed = false;
     let stopOutputListener: (() => void) | undefined;
     let stopExitListener: (() => void) | undefined;
+    let stopContextListener: (() => void) | undefined;
+    let androidPollTimer: number | undefined;
 
-    if ("__TAURI_INTERNALS__" in window) {
+    if (androidTerminalId) {
+      const poll = async () => {
+        if (disposed || connectionStateRef.current !== "connected") return;
+        try {
+          const output = await invoke<{ dataBase64: string; eof: boolean }>("android_read_terminal", {
+            request: { sessionId: session.id, terminalId: androidTerminalId },
+          });
+          if (disposed) return;
+          if (output.dataBase64) terminal.write(decodeBase64(output.dataBase64));
+          if (output.eof) {
+            onDisconnected(session.id, "Android SSH 终端已关闭");
+            return;
+          }
+        } catch (error) {
+          if (disposed) return;
+          if (!String(error).includes("超时")) {
+            onDisconnected(session.id, String(error));
+            return;
+          }
+        }
+        androidPollTimer = window.setTimeout(() => void poll(), 25);
+      };
+      void poll();
+    } else if ("__TAURI_INTERNALS__" in window) {
       void import("@tauri-apps/api/event").then(async ({ listen }) => {
         if (disposed) return;
         stopOutputListener = await listen<TerminalOutputEvent>("terminal-output", (event) => {
@@ -168,12 +222,21 @@ export function TerminalView({ session, host, wallpaper, appearance, appearanceR
             onDisconnected(session.id, event.payload.message);
           }
         });
+        stopContextListener = await listen<TerminalContextEvent>("terminal-context", (event) => {
+          if (event.payload.sessionId === session.id) {
+            onContextChanged(session.id, event.payload.stack, event.payload.warning);
+          }
+        });
       });
     }
 
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
-      if (connectionStateRef.current === "connected" && "__TAURI_INTERNALS__" in window) {
+      if (connectionStateRef.current === "connected" && androidTerminalId) {
+        void invoke("android_resize_terminal", {
+          request: { sessionId: session.id, terminalId: androidTerminalId, cols: terminal.cols, rows: terminal.rows },
+        });
+      } else if (connectionStateRef.current === "connected" && "__TAURI_INTERNALS__" in window) {
         void invoke("resize_terminal", {
           sessionId: session.id,
           cols: terminal.cols,
@@ -185,23 +248,21 @@ export function TerminalView({ session, host, wallpaper, appearance, appearanceR
 
     return () => {
       disposed = true;
+      if (androidPollTimer !== undefined) window.clearTimeout(androidPollTimer);
       stopOutputListener?.();
       stopExitListener?.();
+      stopContextListener?.();
       resizeObserver.disconnect();
       dataDisposable.dispose();
       terminal.dispose();
       if (terminalRef.current === terminal) terminalRef.current = null;
       if (fitAddonRef.current === fitAddon) fitAddonRef.current = null;
     };
-  }, [host, onDisconnected, session.id]);
+  }, [androidTerminalId, host, onContextChanged, onDisconnected, session.id]);
 
   let backgroundImage: string | undefined;
-  if (wallpaper.source !== "none" && wallpaper.value) {
+  if (wallpaper.source !== "none" && wallpaper.value.startsWith("data:image/")) {
     try {
-      if (wallpaper.source === "url") {
-        const url = new URL(wallpaper.value);
-        if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Unsupported wallpaper URL");
-      }
       backgroundImage = `url(${JSON.stringify(wallpaper.value)})`;
     } catch {
       backgroundImage = undefined;

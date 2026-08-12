@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-migration"
+description = "Enables the preview_migration command without any pre-configured scope."
+commands.allow = ["preview_migration"]
+
+[[permission]]
+identifier = "deny-preview-migration"
+description = "Denies the preview_migration command without any pre-configured scope."
+commands.deny = ["preview_migration"]

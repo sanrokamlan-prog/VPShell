@@ -1,6 +1,6 @@
 [package]
 name = "vpshell"
-version = "0.1.0-alpha.7"
+version = "0.1.0-alpha.8"
 description = "A fast cross-platform SSH operations workspace"
 authors = ["sanrokamlan-prog"]
 edition = "2024"
@@ -35,9 +35,23 @@ zeroize = "1.9.0"
 tauri-plugin-dialog = "2.7.2"
 ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ed25519", "rsa", "encryption", "getrandom"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
-ssh2 = "0.9.6"
 tar = ">=0.4.46, <0.5"
 zstd = "0.13.3"
 sha2 = "0.10.9"
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
+hkdf = { version = "=0.12.4", default-features = false }
+getrandom = { version = "=0.3.4", default-features = false }
+quick-xml = { version = "=0.41.0", default-features = false }
+percent-encoding = { version = "=2.3.2", default-features = false }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
+android-native-keyring-store = "1.0.0"
+keyring-core = "1.0.0"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+ssh2 = "0.9.6"

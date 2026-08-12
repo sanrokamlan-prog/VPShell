@@ -14,7 +14,10 @@ export interface HostProfile {
   tags: string[];
   identityFile?: string;
   credentialRef?: string;
-  source?: "manual" | "finalshell";
+  androidKeyRef?: string;
+  androidKeyPassphraseRef?: string;
+  hostKeySha256?: string;
+  source?: "manual" | "finalshell" | "openssh" | "putty" | "xshell" | "securecrt" | "mobaxterm" | "tabby" | "termius";
   lastPath?: string;
   latency?: number;
 }
@@ -27,6 +30,11 @@ export interface TerminalSession {
   currentPath: string;
   reportedHostname?: string;
   contextSource: "profile" | "shell-integration";
+  contextStack?: Array<{
+    hostname: string;
+    username: string;
+    cwd: string;
+  }>;
 }
 
 export interface ScriptRecipe {
@@ -125,6 +133,7 @@ export interface TerminalAppearanceSettings {
 export interface ApplicationSettings {
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
+  packageTransfersEnabled: boolean;
 }
 
 export interface AppState {

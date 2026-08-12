@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-android-list-remote-files"
+description = "Enables the android_list_remote_files command without any pre-configured scope."
+commands.allow = ["android_list_remote_files"]
+
+[[permission]]
+identifier = "deny-android-list-remote-files"
+description = "Denies the android_list_remote_files command without any pre-configured scope."
+commands.deny = ["android_list_remote_files"]

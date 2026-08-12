@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-android-preview-status"
+description = "Enables the android_preview_status command without any pre-configured scope."
+commands.allow = ["android_preview_status"]
+
+[[permission]]
+identifier = "deny-android-preview-status"
+description = "Denies the android_preview_status command without any pre-configured scope."
+commands.deny = ["android_preview_status"]

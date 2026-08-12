@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-export-external-edit-copy"
+description = "Enables the export_external_edit_copy command without any pre-configured scope."
+commands.allow = ["export_external_edit_copy"]
+
+[[permission]]
+identifier = "deny-export-external-edit-copy"
+description = "Denies the export_external_edit_copy command without any pre-configured scope."
+commands.deny = ["export_external_edit_copy"]

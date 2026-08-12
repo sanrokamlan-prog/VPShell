@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execute-remote-file-operation"
+description = "Enables the execute_remote_file_operation command without any pre-configured scope."
+commands.allow = ["execute_remote_file_operation"]
+
+[[permission]]
+identifier = "deny-execute-remote-file-operation"
+description = "Denies the execute_remote_file_operation command without any pre-configured scope."
+commands.deny = ["execute_remote_file_operation"]

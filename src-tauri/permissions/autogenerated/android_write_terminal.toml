@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-android-write-terminal"
+description = "Enables the android_write_terminal command without any pre-configured scope."
+commands.allow = ["android_write_terminal"]
+
+[[permission]]
+identifier = "deny-android-write-terminal"
+description = "Denies the android_write_terminal command without any pre-configured scope."
+commands.deny = ["android_write_terminal"]

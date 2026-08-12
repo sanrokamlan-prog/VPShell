@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-broadcast"
+description = "Enables the preview_broadcast command without any pre-configured scope."
+commands.allow = ["preview_broadcast"]
+
+[[permission]]
+identifier = "deny-preview-broadcast"
+description = "Denies the preview_broadcast command without any pre-configured scope."
+commands.deny = ["preview_broadcast"]

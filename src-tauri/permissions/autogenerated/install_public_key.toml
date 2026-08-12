@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-install-public-key"
+description = "Enables the install_public_key command without any pre-configured scope."
+commands.allow = ["install_public_key"]
+
+[[permission]]
+identifier = "deny-install-public-key"
+description = "Denies the install_public_key command without any pre-configured scope."
+commands.deny = ["install_public_key"]

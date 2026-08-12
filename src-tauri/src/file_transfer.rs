@@ -23,7 +23,10 @@ use zeroize::Zeroizing;
 
 use crate::{
     CREDENTIAL_SERVICE, LEGACY_CREDENTIAL_SERVICE,
-    transfer_manager::{TransferManager, TransferResult, TransferSnapshot, TransferTask},
+    transfer_manager::{
+        RecoveryStoreStatus, TransferManager, TransferRequest, TransferResult, TransferSnapshot,
+        TransferTask,
+    },
 };
 
 const MAX_HOST_LENGTH: usize = 255;
@@ -254,13 +257,18 @@ pub(crate) async fn upload_remote(
     transfer_id: String,
 ) -> Result<TransferSnapshot, String> {
     validate_transfer_id(&transfer_id)?;
+    let request = TransferRequest::Upload {
+        local_paths: local_paths.clone(),
+        remote_directory: remote_directory.clone(),
+        package_transfer,
+    };
     let (accepted, task) = manager.accept(
         &app,
         transfer_id.clone(),
-        "upload",
         &connection.host,
         connection.port,
         &connection.username,
+        request,
     )?;
     let reporter = ProgressReporter {
         app,
@@ -296,13 +304,18 @@ pub(crate) async fn download_remote(
     transfer_id: String,
 ) -> Result<TransferSnapshot, String> {
     validate_transfer_id(&transfer_id)?;
+    let request = TransferRequest::Download {
+        remote_paths: remote_paths.clone(),
+        local_directory: local_directory.clone(),
+        package_transfer,
+    };
     let (accepted, task) = manager.accept(
         &app,
         transfer_id.clone(),
-        "download",
         &connection.host,
         connection.port,
         &connection.username,
+        request,
     )?;
     let reporter = ProgressReporter {
         app,
@@ -339,6 +352,79 @@ pub(crate) fn get_transfer_task(
 #[tauri::command]
 pub(crate) fn list_transfer_tasks(manager: State<'_, TransferManager>) -> Vec<TransferSnapshot> {
     manager.list()
+}
+
+#[tauri::command]
+pub(crate) fn get_transfer_recovery_status(
+    manager: State<'_, TransferManager>,
+) -> RecoveryStoreStatus {
+    manager.store_status()
+}
+
+#[tauri::command]
+pub(crate) async fn retry_transfer_task(
+    app: AppHandle,
+    manager: State<'_, TransferManager>,
+    connection: ConnectionSpec,
+    transfer_id: String,
+) -> Result<TransferSnapshot, String> {
+    validate_transfer_id(&transfer_id)?;
+    validate_connection(&connection)?;
+    if manager
+        .get(&transfer_id)
+        .is_some_and(|snapshot| snapshot.kind == "fileOperation")
+    {
+        return Err("远端文件任务必须重新生成并确认预览，不能从旧计划直接重试".to_string());
+    }
+    let (accepted, task, request) = manager.begin_retry(
+        &app,
+        &transfer_id,
+        &connection.host,
+        connection.port,
+        &connection.username,
+    )?;
+    let reporter = ProgressReporter {
+        app,
+        transfer_id: transfer_id.clone(),
+        task: task.clone(),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            task.start()?;
+            match request {
+                TransferRequest::Upload {
+                    local_paths,
+                    remote_directory,
+                    package_transfer,
+                } => upload_paths_blocking(
+                    connection,
+                    local_paths,
+                    remote_directory,
+                    package_transfer,
+                    transfer_id,
+                    reporter,
+                ),
+                TransferRequest::Download {
+                    remote_paths,
+                    local_directory,
+                    package_transfer,
+                } => download_paths_blocking(
+                    connection,
+                    remote_paths,
+                    local_directory,
+                    package_transfer,
+                    transfer_id,
+                    reporter,
+                ),
+                TransferRequest::FileOperation { .. } => {
+                    Err("远端文件任务必须通过新的安全预览恢复".to_string())
+                }
+            }
+        }))
+        .unwrap_or_else(|_| Err("SFTP 重试任务发生内部异常".to_string()));
+        task.finish(result);
+    });
+    Ok(accepted)
 }
 
 #[tauri::command]
@@ -478,6 +564,7 @@ fn upload_paths_blocking(
             "当前版本不支持断点续传；失败任务不会提交 .part 文件".to_string(),
             "打包模式仅原子提交到不存在的同名目标；已有目标请使用递归 SFTP".to_string(),
         ],
+        operation_result: None,
     })
 }
 
@@ -576,6 +663,7 @@ fn download_paths_blocking(
             "当前版本不支持断点续传；失败任务不会提交 .part 文件".to_string(),
             "打包模式仅原子提交到不存在的同名目标；已有目标请使用递归 SFTP".to_string(),
         ],
+        operation_result: None,
     })
 }
 
@@ -726,13 +814,20 @@ fn connect_for_transfer(
     connection: &ConnectionSpec,
     reporter: &ProgressReporter,
 ) -> Result<Session, String> {
-    reporter.checkpoint()?;
-    let session = open_session_for_transfer(&connection.host, connection.port, reporter)?;
-    reporter.checkpoint()?;
+    connect_for_task(connection, &reporter.task)
+}
+
+pub(crate) fn connect_for_task(
+    connection: &ConnectionSpec,
+    task: &TransferTask,
+) -> Result<Session, String> {
+    task.checkpoint()?;
+    let session = open_session_for_task(&connection.host, connection.port, task)?;
+    task.checkpoint()?;
     verify_known_host(&session, &connection.host, connection.port)?;
-    reporter.checkpoint()?;
+    task.checkpoint()?;
     authenticate(&session, connection)?;
-    reporter.checkpoint()?;
+    task.checkpoint()?;
     Ok(session)
 }
 
@@ -740,25 +835,21 @@ fn open_session(host: &str, port: u16) -> Result<Session, String> {
     open_session_internal(host, port, None)
 }
 
-fn open_session_for_transfer(
-    host: &str,
-    port: u16,
-    reporter: &ProgressReporter,
-) -> Result<Session, String> {
-    open_session_internal(host, port, Some(reporter))
+fn open_session_for_task(host: &str, port: u16, task: &TransferTask) -> Result<Session, String> {
+    open_session_internal(host, port, Some(task))
 }
 
 fn open_session_internal(
     host: &str,
     port: u16,
-    reporter: Option<&ProgressReporter>,
+    task: Option<&TransferTask>,
 ) -> Result<Session, String> {
-    if let Some(reporter) = reporter {
-        reporter.checkpoint()?;
+    if let Some(task) = task {
+        task.checkpoint()?;
     }
     let preferences = known_host_key_preferences(host, port, &known_hosts_files());
     for preference in preferences.iter().map(String::as_str).map(Some) {
-        match open_session_with_preference(host, port, preference, reporter) {
+        match open_session_with_preference(host, port, preference, task) {
             Ok(session) => return Ok(session),
             Err(error) if error == crate::transfer_manager::TRANSFER_CANCELLED => {
                 return Err(error);
@@ -766,7 +857,7 @@ fn open_session_internal(
             Err(_) => continue,
         }
     }
-    match open_session_with_preference(host, port, None, reporter) {
+    match open_session_with_preference(host, port, None, task) {
         Ok(session) => Ok(session),
         // The unforced attempt reflects the server's actual negotiation result. A failure from an
         // earlier compatibility preference must not replace it and masquerade as a credential issue.
@@ -778,10 +869,10 @@ fn open_session_with_preference(
     host: &str,
     port: u16,
     host_key_preference: Option<&str>,
-    reporter: Option<&ProgressReporter>,
+    task: Option<&TransferTask>,
 ) -> Result<Session, String> {
-    if let Some(reporter) = reporter {
-        reporter.checkpoint()?;
+    if let Some(task) = task {
+        task.checkpoint()?;
     }
     let mut last_error = None;
     let addresses = (host, port)
@@ -789,8 +880,8 @@ fn open_session_with_preference(
         .map_err(|_| "无法解析 SSH 主机地址".to_string())?;
     let mut tcp = None;
     for address in addresses.take(16) {
-        if let Some(reporter) = reporter {
-            reporter.checkpoint()?;
+        if let Some(task) = task {
+            task.checkpoint()?;
         }
         match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
             Ok(stream) => {
@@ -809,8 +900,8 @@ fn open_session_with_preference(
         .map_err(|error| format!("无法设置 SFTP 读取超时: {error}"))?;
     tcp.set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|error| format!("无法设置 SFTP 写入超时: {error}"))?;
-    if let Some(reporter) = reporter {
-        reporter.task.register_socket(
+    if let Some(task) = task {
+        task.register_socket(
             tcp.try_clone()
                 .map_err(|error| format!("无法注册可取消的 SFTP 连接: {error}"))?,
         )?;
@@ -824,8 +915,8 @@ fn open_session_with_preference(
     }
     session.set_tcp_stream(tcp);
     session.set_timeout(IO_TIMEOUT.as_millis() as u32);
-    if let Some(reporter) = reporter {
-        reporter.checkpoint()?;
+    if let Some(task) = task {
+        task.checkpoint()?;
     }
     session.handshake().map_err(|error| {
         let preference = host_key_preference
@@ -1877,6 +1968,7 @@ fn upload_local_entry(
                 stats.sha256_verified = false;
             }
             reporter.checkpoint()?;
+            reporter.task.mark_commit_boundary()?;
             sftp.rename(Path::new(&part_path), Path::new(remote_path), None)
                 .map_err(|error| format!("无法原子提交远程文件: {error}"))?;
             reporter.task.note_commit();
@@ -2028,6 +2120,7 @@ fn download_remote_entry(
                 stats.sha256_verified = false;
             }
             reporter.checkpoint()?;
+            reporter.task.mark_commit_boundary()?;
             fs::rename(&part_path, local_path)
                 .map_err(|error| format!("无法原子提交本机文件: {error}"))?;
             reporter.task.note_commit();

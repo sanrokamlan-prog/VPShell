@@ -1,12 +1,15 @@
 use std::{
+    collections::{HashMap, VecDeque},
     io::{Read, Write},
     path::Path,
     process::{Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex, MutexGuard},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::configure_process_ssh_askpass;
 
@@ -15,6 +18,14 @@ const STDOUT_LIMIT: usize = 192 * 1024;
 const STDERR_LIMIT: usize = 64 * 1024;
 const BEGIN_MARKER: &str = "__VPSHELL_METRICS_V1_BEGIN__";
 const END_MARKER: &str = "__VPSHELL_METRICS_V1_END__";
+const MONITOR_EVENT: &str = "remote-monitor-update";
+const MIN_INTERVAL_SECONDS: u64 = 5;
+const MAX_INTERVAL_SECONDS: u64 = 300;
+const MAX_MONITOR_SESSIONS: usize = 16;
+const MAX_MONITOR_WORKERS: usize = 16;
+const MAX_HISTORY_POINTS: usize = 120;
+const INITIAL_SAMPLE_DELAY: Duration = Duration::from_secs(5);
+const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 // This script is static: no host, username, path, or other local input is
 // interpolated into it. It intentionally targets Linux hosts with /proc.
@@ -99,7 +110,7 @@ fi
 printf '%s\n' '__VPSHELL_METRICS_V1_END__'
 "#;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorRequest {
     pub host: String,
@@ -110,7 +121,7 @@ pub struct MonitorRequest {
     pub identity_passphrase_ref: Option<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessMetric {
     pub pid: u32,
@@ -119,7 +130,7 @@ pub struct ProcessMetric {
     pub memory_percent: f64,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteMetrics {
     pub connection_host: String,
@@ -142,6 +153,65 @@ pub struct RemoteMetrics {
     pub top_processes: Vec<ProcessMetric>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartMonitorRequest {
+    pub session_id: String,
+    pub interval_seconds: u64,
+    pub connection: MonitorRequest,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorTrendPoint {
+    pub sampled_at_ms: u64,
+    pub cpu_percent: f64,
+    pub memory_percent: f64,
+    pub disk_percent: f64,
+    pub load_one: f64,
+    pub rx_bytes_per_second: u64,
+    pub tx_bytes_per_second: u64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorSnapshot {
+    pub session_id: String,
+    pub interval_seconds: u64,
+    pub paused: bool,
+    pub sampling: bool,
+    pub latest: Option<RemoteMetrics>,
+    pub history: Vec<MonitorTrendPoint>,
+    pub last_error: Option<String>,
+    pub total_samples: u64,
+    pub dropped_samples: u64,
+}
+
+struct MonitorRecord {
+    request: MonitorRequest,
+    generation: u64,
+    interval_seconds: u64,
+    paused: bool,
+    sampling: bool,
+    latest: Option<RemoteMetrics>,
+    history: VecDeque<MonitorTrendPoint>,
+    last_error: Option<String>,
+    total_samples: u64,
+    dropped_samples: u64,
+}
+
+#[derive(Default)]
+struct MonitorRegistry {
+    next_generation: u64,
+    workers: usize,
+    sessions: HashMap<String, MonitorRecord>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RemoteMonitorManager {
+    inner: Arc<Mutex<MonitorRegistry>>,
+}
+
 struct BoundedOutput {
     bytes: Vec<u8>,
     truncated: bool,
@@ -158,6 +228,229 @@ struct ParsedMetrics {
     uptime_seconds: Option<u64>,
     network: Option<(u64, u64, u64)>,
     top_processes: Vec<ProcessMetric>,
+}
+
+fn validate_session_id(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("监控会话标识格式无效".to_string());
+    }
+    Ok(())
+}
+
+fn validate_interval(interval_seconds: u64) -> Result<(), String> {
+    if !(MIN_INTERVAL_SECONDS..=MAX_INTERVAL_SECONDS).contains(&interval_seconds) {
+        return Err(format!(
+            "监控频率必须在 {MIN_INTERVAL_SECONDS} 到 {MAX_INTERVAL_SECONDS} 秒之间"
+        ));
+    }
+    Ok(())
+}
+
+fn sampled_at_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn trend_point(metrics: &RemoteMetrics, sampled_at_ms: u64) -> MonitorTrendPoint {
+    MonitorTrendPoint {
+        sampled_at_ms,
+        cpu_percent: metrics.cpu_percent,
+        memory_percent: metrics.memory_percent,
+        disk_percent: metrics.disk_percent,
+        load_one: metrics.load_one,
+        rx_bytes_per_second: metrics.rx_bytes_per_second,
+        tx_bytes_per_second: metrics.tx_bytes_per_second,
+    }
+}
+
+fn snapshot(session_id: &str, record: &MonitorRecord) -> MonitorSnapshot {
+    MonitorSnapshot {
+        session_id: session_id.to_string(),
+        interval_seconds: record.interval_seconds,
+        paused: record.paused,
+        sampling: record.sampling,
+        latest: record.latest.clone(),
+        history: record.history.iter().cloned().collect(),
+        last_error: record.last_error.clone(),
+        total_samples: record.total_samples,
+        dropped_samples: record.dropped_samples,
+    }
+}
+
+impl RemoteMonitorManager {
+    fn lock(&self) -> Result<MutexGuard<'_, MonitorRegistry>, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "主机监控状态已损坏".to_string())
+    }
+
+    fn start(&self, request: StartMonitorRequest) -> Result<(u64, MonitorSnapshot), String> {
+        validate_session_id(&request.session_id)?;
+        validate_interval(request.interval_seconds)?;
+        validate_request(&request.connection)?;
+
+        let mut registry = self.lock()?;
+        if !registry.sessions.contains_key(&request.session_id)
+            && registry.sessions.len() >= MAX_MONITOR_SESSIONS
+        {
+            return Err(format!("同时监控的会话不能超过 {MAX_MONITOR_SESSIONS} 个"));
+        }
+        if registry.workers >= MAX_MONITOR_WORKERS {
+            return Err(format!(
+                "监控工作线程已达到 {MAX_MONITOR_WORKERS} 个上限，请等待正在停止的采样结束"
+            ));
+        }
+
+        registry.next_generation = registry.next_generation.wrapping_add(1).max(1);
+        let generation = registry.next_generation;
+        registry.workers += 1;
+        let session_id = request.session_id;
+        let record = MonitorRecord {
+            request: request.connection,
+            generation,
+            interval_seconds: request.interval_seconds,
+            paused: false,
+            sampling: false,
+            latest: None,
+            history: VecDeque::with_capacity(MAX_HISTORY_POINTS),
+            last_error: None,
+            total_samples: 0,
+            dropped_samples: 0,
+        };
+        let result = snapshot(&session_id, &record);
+        registry.sessions.insert(session_id, record);
+        Ok((generation, result))
+    }
+
+    fn get(&self, session_id: &str) -> Result<MonitorSnapshot, String> {
+        validate_session_id(session_id)?;
+        let registry = self.lock()?;
+        registry
+            .sessions
+            .get(session_id)
+            .map(|record| snapshot(session_id, record))
+            .ok_or_else(|| "监控会话不存在或已停止".to_string())
+    }
+
+    fn stop(&self, session_id: &str) -> Result<(), String> {
+        validate_session_id(session_id)?;
+        self.lock()?.sessions.remove(session_id);
+        Ok(())
+    }
+
+    fn set_paused(&self, session_id: &str, paused: bool) -> Result<MonitorSnapshot, String> {
+        validate_session_id(session_id)?;
+        let mut registry = self.lock()?;
+        let record = registry
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "监控会话不存在或已停止".to_string())?;
+        record.paused = paused;
+        Ok(snapshot(session_id, record))
+    }
+
+    fn set_interval(
+        &self,
+        session_id: &str,
+        interval_seconds: u64,
+    ) -> Result<MonitorSnapshot, String> {
+        validate_session_id(session_id)?;
+        validate_interval(interval_seconds)?;
+        let mut registry = self.lock()?;
+        let record = registry
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "监控会话不存在或已停止".to_string())?;
+        record.interval_seconds = interval_seconds;
+        Ok(snapshot(session_id, record))
+    }
+
+    fn is_current(&self, session_id: &str, generation: u64) -> bool {
+        self.lock()
+            .ok()
+            .and_then(|registry| {
+                registry
+                    .sessions
+                    .get(session_id)
+                    .map(|record| record.generation == generation)
+            })
+            .unwrap_or(false)
+    }
+
+    fn paused_and_interval(&self, session_id: &str, generation: u64) -> Option<(bool, u64)> {
+        self.lock().ok().and_then(|registry| {
+            registry.sessions.get(session_id).and_then(|record| {
+                (record.generation == generation)
+                    .then_some((record.paused, record.interval_seconds))
+            })
+        })
+    }
+
+    fn begin_sample(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> Option<(MonitorRequest, MonitorSnapshot)> {
+        let mut registry = self.lock().ok()?;
+        let record = registry.sessions.get_mut(session_id)?;
+        if record.generation != generation || record.paused || record.sampling {
+            return None;
+        }
+        record.sampling = true;
+        Some((record.request.clone(), snapshot(session_id, record)))
+    }
+
+    fn complete_sample(
+        &self,
+        session_id: &str,
+        generation: u64,
+        result: Result<RemoteMetrics, String>,
+        timestamp_ms: u64,
+    ) -> Option<MonitorSnapshot> {
+        let mut registry = self.lock().ok()?;
+        let record = registry.sessions.get_mut(session_id)?;
+        if record.generation != generation || !record.sampling {
+            return None;
+        }
+        record.sampling = false;
+        if record.paused {
+            return Some(snapshot(session_id, record));
+        }
+
+        match result {
+            Ok(metrics) => {
+                if record.history.len() == MAX_HISTORY_POINTS {
+                    record.history.pop_front();
+                    record.dropped_samples = record.dropped_samples.saturating_add(1);
+                }
+                record
+                    .history
+                    .push_back(trend_point(&metrics, timestamp_ms));
+                record.latest = Some(metrics);
+                record.last_error = None;
+                record.total_samples = record.total_samples.saturating_add(1);
+            }
+            Err(error) => {
+                record.last_error = Some(error);
+            }
+        }
+        Some(snapshot(session_id, record))
+    }
+
+    fn worker_finished(&self) {
+        if let Ok(mut registry) = self.lock() {
+            registry.workers = registry.workers.saturating_sub(1);
+        }
+    }
 }
 
 fn validate_request(request: &MonitorRequest) -> Result<(), String> {
@@ -593,6 +886,128 @@ fn hide_console_window(command: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn hide_console_window(_command: &mut Command) {}
 
+fn emit_snapshot(app: &AppHandle, snapshot: &MonitorSnapshot) {
+    let _ = app.emit(MONITOR_EVENT, snapshot.clone());
+}
+
+fn wait_until_due(
+    manager: &RemoteMonitorManager,
+    session_id: &str,
+    generation: u64,
+    initial: bool,
+) -> bool {
+    let mut elapsed = Duration::ZERO;
+    loop {
+        let Some((paused, interval_seconds)) = manager.paused_and_interval(session_id, generation)
+        else {
+            return false;
+        };
+        if paused {
+            thread::sleep(WORKER_POLL_INTERVAL);
+            continue;
+        }
+        let target = if initial {
+            INITIAL_SAMPLE_DELAY
+        } else {
+            Duration::from_secs(interval_seconds)
+        };
+        if elapsed >= target {
+            return true;
+        }
+        let sleep_for = WORKER_POLL_INTERVAL.min(target.saturating_sub(elapsed));
+        thread::sleep(sleep_for);
+        elapsed = elapsed.saturating_add(sleep_for);
+    }
+}
+
+fn monitor_worker(
+    app: AppHandle,
+    manager: RemoteMonitorManager,
+    session_id: String,
+    generation: u64,
+) {
+    let mut initial = true;
+    while wait_until_due(&manager, &session_id, generation, initial) {
+        initial = false;
+        let Some((request, sampling_snapshot)) = manager.begin_sample(&session_id, generation)
+        else {
+            if !manager.is_current(&session_id, generation) {
+                break;
+            }
+            continue;
+        };
+        emit_snapshot(&app, &sampling_snapshot);
+        let result = fetch_remote_metrics_blocking(request);
+        let Some(completed_snapshot) =
+            manager.complete_sample(&session_id, generation, result, sampled_at_ms())
+        else {
+            break;
+        };
+        emit_snapshot(&app, &completed_snapshot);
+    }
+    manager.worker_finished();
+}
+
+#[tauri::command]
+pub fn start_remote_monitor(
+    app: AppHandle,
+    manager: State<'_, RemoteMonitorManager>,
+    request: StartMonitorRequest,
+) -> Result<MonitorSnapshot, String> {
+    let session_id = request.session_id.clone();
+    let (generation, initial_snapshot) = manager.start(request)?;
+    let worker_manager = manager.inner().clone();
+    thread::Builder::new()
+        .name(format!("vpshell-monitor-{generation}"))
+        .spawn(move || monitor_worker(app, worker_manager, session_id, generation))
+        .map_err(|error| {
+            let _ = manager.stop(&initial_snapshot.session_id);
+            manager.worker_finished();
+            format!("无法启动主机监控任务: {error}")
+        })?;
+    Ok(initial_snapshot)
+}
+
+#[tauri::command]
+pub fn get_remote_monitor_snapshot(
+    manager: State<'_, RemoteMonitorManager>,
+    session_id: String,
+) -> Result<MonitorSnapshot, String> {
+    manager.get(&session_id)
+}
+
+#[tauri::command]
+pub fn set_remote_monitor_paused(
+    app: AppHandle,
+    manager: State<'_, RemoteMonitorManager>,
+    session_id: String,
+    paused: bool,
+) -> Result<MonitorSnapshot, String> {
+    let result = manager.set_paused(&session_id, paused)?;
+    emit_snapshot(&app, &result);
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn set_remote_monitor_interval(
+    app: AppHandle,
+    manager: State<'_, RemoteMonitorManager>,
+    session_id: String,
+    interval_seconds: u64,
+) -> Result<MonitorSnapshot, String> {
+    let result = manager.set_interval(&session_id, interval_seconds)?;
+    emit_snapshot(&app, &result);
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn stop_remote_monitor(
+    manager: State<'_, RemoteMonitorManager>,
+    session_id: String,
+) -> Result<(), String> {
+    manager.stop(&session_id)
+}
+
 #[tauri::command]
 pub async fn fetch_remote_metrics(request: MonitorRequest) -> Result<RemoteMetrics, String> {
     tauri::async_runtime::spawn_blocking(move || fetch_remote_metrics_blocking(request))
@@ -612,6 +1027,37 @@ mod tests {
             identity_file: None,
             credential_ref: None,
             identity_passphrase_ref: None,
+        }
+    }
+
+    fn start_request(session_id: &str, interval_seconds: u64) -> StartMonitorRequest {
+        StartMonitorRequest {
+            session_id: session_id.to_string(),
+            interval_seconds,
+            connection: request(),
+        }
+    }
+
+    fn metrics(cpu_percent: f64) -> RemoteMetrics {
+        RemoteMetrics {
+            connection_host: "203.0.113.10".to_string(),
+            hostname: "test-host".to_string(),
+            primary_ip: Some("203.0.113.10".to_string()),
+            cpu_percent,
+            memory_percent: 40.0,
+            memory_used_bytes: 400,
+            memory_total_bytes: 1000,
+            disk_percent: 50.0,
+            disk_used_bytes: 500,
+            disk_total_bytes: 1000,
+            load_one: 0.5,
+            load_five: 0.4,
+            load_fifteen: 0.3,
+            uptime_seconds: 100,
+            rx_bytes_per_second: 1200,
+            tx_bytes_per_second: 600,
+            sample_window_ms: 1000,
+            top_processes: Vec::new(),
         }
     }
 
@@ -680,5 +1126,131 @@ mod tests {
         let output = read_bounded(&b"abcdefgh"[..], 4);
         assert_eq!(output.bytes, b"abcd");
         assert!(output.truncated);
+    }
+
+    #[test]
+    fn validates_monitor_identity_frequency_and_worker_limits() {
+        assert!(validate_session_id("session_01-a").is_ok());
+        assert!(validate_session_id("../session").is_err());
+        assert!(validate_session_id("").is_err());
+        assert!(validate_interval(MIN_INTERVAL_SECONDS).is_ok());
+        assert!(validate_interval(MAX_INTERVAL_SECONDS).is_ok());
+        assert!(validate_interval(MIN_INTERVAL_SECONDS - 1).is_err());
+        assert!(validate_interval(MAX_INTERVAL_SECONDS + 1).is_err());
+
+        let manager = RemoteMonitorManager::default();
+        for index in 0..MAX_MONITOR_WORKERS {
+            manager
+                .start(start_request(&format!("session-{index}"), 15))
+                .unwrap();
+        }
+        assert!(manager.start(start_request("one-too-many", 15)).is_err());
+    }
+
+    #[test]
+    fn history_is_bounded_and_reports_retention() {
+        let manager = RemoteMonitorManager::default();
+        let (generation, _) = manager.start(start_request("history", 15)).unwrap();
+
+        for index in 0..(MAX_HISTORY_POINTS + 5) {
+            assert!(manager.begin_sample("history", generation).is_some());
+            let snapshot = manager
+                .complete_sample(
+                    "history",
+                    generation,
+                    Ok(metrics(index as f64 % 100.0)),
+                    index as u64,
+                )
+                .unwrap();
+            assert_eq!(snapshot.total_samples, index as u64 + 1);
+        }
+
+        let snapshot = manager.get("history").unwrap();
+        assert_eq!(snapshot.history.len(), MAX_HISTORY_POINTS);
+        assert_eq!(snapshot.dropped_samples, 5);
+        assert_eq!(snapshot.history.first().unwrap().sampled_at_ms, 5);
+        assert_eq!(
+            snapshot.history.last().unwrap().sampled_at_ms,
+            (MAX_HISTORY_POINTS + 4) as u64
+        );
+    }
+
+    #[test]
+    fn pause_discards_in_flight_result_and_resume_is_explicit() {
+        let manager = RemoteMonitorManager::default();
+        let (generation, _) = manager.start(start_request("pause", 15)).unwrap();
+        assert!(manager.begin_sample("pause", generation).is_some());
+
+        let paused = manager.set_paused("pause", true).unwrap();
+        assert!(paused.paused);
+        assert!(paused.sampling);
+        let completed = manager
+            .complete_sample("pause", generation, Ok(metrics(20.0)), 1)
+            .unwrap();
+        assert!(completed.paused);
+        assert!(!completed.sampling);
+        assert!(completed.history.is_empty());
+        assert!(completed.latest.is_none());
+
+        let resumed = manager.set_paused("pause", false).unwrap();
+        assert!(!resumed.paused);
+        assert!(manager.begin_sample("pause", generation).is_some());
+        let completed = manager
+            .complete_sample("pause", generation, Ok(metrics(30.0)), 2)
+            .unwrap();
+        assert_eq!(completed.history.len(), 1);
+        assert_eq!(completed.latest.unwrap().cpu_percent, 30.0);
+    }
+
+    #[test]
+    fn stale_and_stopped_workers_cannot_finalize_samples() {
+        let manager = RemoteMonitorManager::default();
+        let (old_generation, _) = manager.start(start_request("replace", 15)).unwrap();
+        assert!(manager.begin_sample("replace", old_generation).is_some());
+
+        let (new_generation, _) = manager.start(start_request("replace", 30)).unwrap();
+        assert_ne!(old_generation, new_generation);
+        assert!(
+            manager
+                .complete_sample("replace", old_generation, Ok(metrics(10.0)), 1)
+                .is_none()
+        );
+        assert_eq!(manager.get("replace").unwrap().interval_seconds, 30);
+
+        assert!(manager.begin_sample("replace", new_generation).is_some());
+        manager.stop("replace").unwrap();
+        assert!(
+            manager
+                .complete_sample("replace", new_generation, Ok(metrics(20.0)), 2)
+                .is_none()
+        );
+        assert!(manager.get("replace").is_err());
+    }
+
+    #[test]
+    fn interval_and_failure_transitions_are_explainable() {
+        let manager = RemoteMonitorManager::default();
+        let (generation, _) = manager.start(start_request("states", 15)).unwrap();
+        assert_eq!(
+            manager.set_interval("states", 60).unwrap().interval_seconds,
+            60
+        );
+        assert!(manager.set_interval("states", 1).is_err());
+
+        assert!(manager.begin_sample("states", generation).is_some());
+        let failed = manager
+            .complete_sample(
+                "states",
+                generation,
+                Err("连接主机超时，请检查地址、端口或网络".to_string()),
+                1,
+            )
+            .unwrap();
+        assert_eq!(failed.total_samples, 0);
+        assert_eq!(
+            failed.last_error.as_deref(),
+            Some("连接主机超时，请检查地址、端口或网络")
+        );
+        assert!(failed.history.is_empty());
     }
 }
