@@ -54,4 +54,4 @@ android-native-keyring-store = "1.0.0"
 keyring-core = "1.0.0"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-ssh2 = "0.9.6"
+ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }

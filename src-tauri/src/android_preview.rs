@@ -75,6 +75,7 @@ impl Default for AndroidPreviewManifest {
             AndroidPreviewCapability::Terminal,
             AndroidPreviewCapability::Sftp,
             AndroidPreviewCapability::CredentialVault,
+            AndroidPreviewCapability::Sync,
             AndroidPreviewCapability::Broadcast,
             AndroidPreviewCapability::ExternalEditor,
             AndroidPreviewCapability::PersistentMonitoring,
@@ -120,7 +121,6 @@ impl AndroidPreviewManifest {
             AndroidPreviewCapability::Terminal,
             AndroidPreviewCapability::Sftp,
             AndroidPreviewCapability::CredentialVault,
-            AndroidPreviewCapability::Sync,
         ]
         .into_iter()
         .collect();
