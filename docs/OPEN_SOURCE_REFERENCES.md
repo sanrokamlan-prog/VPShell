@@ -28,6 +28,11 @@ Actual third-party code used or adapted by VPShell is listed separately in
 | [Termora](https://github.com/TermoraDev/termora) | AGPL-3.0 | Bounded concurrent transfers, server-to-server transfer workflow, visual chmod, safe remote editing and hierarchical hosts | Behavior reference only; no copied code |
 | [openFinalShell](https://github.com/kexue-aihao/openfinalshell) | No repository-level license detected on 2026-08-01 | FinalShell migration behavior and familiar desktop layout | Behavior reference only; no copied code; never treated as a credential-decoding authority |
 | [FinalShell password decoder](https://github.com/qurikuduo/finalshellPasswordDecoder) | Apache-2.0 | Legacy FinalShell DES import compatibility | Clean Rust port; see `THIRD_PARTY_NOTICES.md` |
+| [rusqlite](https://github.com/rusqlite/rusqlite) | MIT or Apache-2.0 | Local schema-v1 SQLite transaction/event store | Dependency used with `bundled`, no copied source; version/feature and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
+| [RustCrypto password-hashes/AEADs/KDFs](https://github.com/RustCrypto) | MIT or Apache-2.0 | Argon2id key wrapping, XChaCha20-Poly1305 envelopes and HKDF domain separation | Stable crates used through public APIs; no copied source; exact versions/features and replacement plan recorded in `THIRD_PARTY_NOTICES.md` and development docs |
+| [quick-xml](https://github.com/tafia/quick-xml) and [percent-encoding](https://github.com/servo/rust-url) | MIT | Bounded WebDAV XML parsing and href decoding | Existing locked packages promoted to direct dependencies; public APIs only, no copied source or provider implementation |
+| [ssh2-rs](https://github.com/alexcrichton/ssh2-rs), libssh2 and OpenSSL | MIT or Apache-2.0 / BSD-style / Apache-2.0 | Android-compatible SSH/SFTP transport without a system executable | Existing dependency used through public APIs; vendored OpenSSL only enables NDK cross-compilation; no copied source |
+| [android-native-keyring-store](https://github.com/open-source-cooperative/android-native-keyring-store) and keyring-core | MIT or Apache-2.0 | Android Keystore-backed opaque credential references | Dependencies used through public APIs; no copied source; platform scope and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
 
 ## Adopted decisions
 
@@ -41,6 +46,12 @@ Cancellation is a state transition, not a cosmetic button. It must distinguish c
 cancellation, final commit that is already too late to cancel, partially committed recursive
 transfers, and temporary-resource cleanup failures.
 
+The v0.2 recovery tranche adds a Rust-owned, schema-versioned snapshot store rather than copying
+frontend state. Snapshots are immutable atomic files with bounded retention; restart converts
+active work to an explicit interrupted decision. Only requests that have not crossed a commit
+boundary can be retried, and retry attempts are capped at three. This behavior was independently
+implemented from the reviewed projects; no third-party transfer or persistence code was copied.
+
 ### Session and credential boundaries
 
 Terminal, SFTP, monitoring, sync and external editing remain separate capabilities sharing a
@@ -52,8 +63,19 @@ usable secrets on another device.
 
 Remote editing uses a local working copy, explicit conflict detection and an atomic remote commit.
 Directory actions must validate paths in Rust and avoid accepting shell fragments from the webview.
+The v0.2 file-operation tranche implements this independently with structured SFTP calls, expiring
+single-use preview tokens, no-overwrite rename, non-following symlink rules, bounded recursive
+inventory and per-item partial results. No reviewed project's file-manager code was copied.
 
 ## Review log
 
 - 2026-08-01: Rechecked transfer/session/file-manager patterns and license boundaries before the
   VPShell v0.2 transfer task work.
+- 2026-08-09: Recorded the independent cross-restart recovery, bounded retry and commit-boundary
+  decisions; no new third-party code or dependency was added.
+- 2026-08-09: Rechecked remote file-operation and visual chmod behavior before the independent
+  preview-token/batch implementation; no new third-party code or dependency was added.
+- 2026-08-10: Enabled the existing ssh2/libssh2 vendored OpenSSL build path for Android NDK
+  cross-compilation and recorded its dependency boundary; no upstream implementation was copied.
+- 2026-08-10: Added the maintained Android-native keyring store through its public Rust API and
+  recorded its Keystore/SharedPreferences, license and removal boundaries; no upstream source was copied.

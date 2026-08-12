@@ -23,19 +23,20 @@ v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 | 桌面框架 | Tauri 2、React 19、TypeScript、Vite；Windows/macOS/Linux CI；首个原生 runner Alpha Release 已发布 | 安装与升级仍需扩大实机覆盖；Windows 无 Authenticode，macOS Alpha 使用 ad-hoc 签名且未公证 |
 | 终端 | xterm.js，多标签会话，输入输出、窗口大小调整、断开连接，单终端 250,000 行 scrollback | scrollback 不是持久化的“无限历史” |
 | SSH | Rust 后端通过 `portable-pty` 启动系统 `ssh`；支持端口、`-i` 私钥路径、keepalive 及直连 AskPass | 当前只支持直连；依赖系统 `ssh` 在 PATH 中；主机密钥提示由 OpenSSH 处理；没有原生端口转发和结构化认证状态 |
-| 主机与会话 | 主机分组、环境标签、最近连接、会话切换；OpenSSH 采集 Linux `/proc` 概况 | 手动嵌套 `ssh` 后不会自动识别新主机；监控仅支持 Linux |
-| 多终端输入 | 命令栏可选择多个会话并并发发送同一条命令 | 不是完整的原始按键同步；尚无密码提示隔离、生产确认、就绪状态校验和危险命令保护 |
-| 历史 | 命令、SFTP 路径和连接尝试历史写入浏览器 `localStorage`；界面可搜索和快速切换 | SSH 进程启动不代表认证成功；未使用 SQLite；终端内 `cd` 不会由 Shell 自动上报；数据未加密 |
+| 主机与会话 | 主机分组、环境标签、最近连接、会话切换；OpenSSH 采集 Linux `/proc` 概况；v0.2 工作树可显式启用 bash/zsh 自报上下文栈 | Integration 不支持 fish/PowerShell，也不把远端自报 hostname 当作已验证身份；监控仅支持 Linux |
+| 多终端输入 | v0.2 Compose 广播由 Rust 冻结目标/命令/上下文，所有目标均需预览，生产持续标记，认证和已知危险命令阻止 | 不是完整的原始按键同步；成功只表示 PTY 写入，不能结构化证明远端命令成功 |
+| 历史 | 命令、SFTP 路径和连接尝试历史由 Rust SQLite schema v1 快照/事件元数据管理；首次启动一次性迁移旧 WebView 状态 | SSH 进程启动不代表认证成功；SQLite 本地快照尚未作为同步包，终端内 `cd` 只由显式 Shell Integration 上报 |
 | 命令库 | 22 项本地命令/工具；中文意图匹配、参数表单、POSIX 参数引用、风险与执行前预览 | 不是自然语言模型；自建命令编辑、命令版本和 secret 参数仍未实现 |
 | 脚本中心 | 内置脚本资料、风险标签、来源链接、复制/加入命令栏；可添加自建脚本 | 没有哈希锁定、签名、版本更新或安全执行沙箱 |
 | 凭据与密钥 | FinalShell 密码只写入 OS keyring；直连终端、采样和 SFTP 可使用凭据引用；生成 Ed25519/RSA4096 OpenSSH 密钥；可安装所选公钥；删除主机进入 30 天回收站，永久删除或到期时清理未共享凭据 | 凭据尚不能同步或单独编辑；跳板逐跳凭据尚未实现 |
 | 网络诊断 | 本机 traceroute、有限额 HTTP 下载测速、iperf3 UDP 正反向测速 | iperf3 需用户自行安装并启动服务端；没有后台定时采样或路线自动选择 |
-| 终端背景 | 支持本机 PNG/JPEG/WebP 和 URL，可调可见度 | 本机图以 Data URL 存入 `localStorage`；URL 由 WebView 直接加载，尚未实现安全下载、重编码和缓存 |
-| 文件面板 | 真实 SFTP 列表、递归上传下载、拖放、进度、暂存校验与原子提交；`tar + zstd` 打包及缺少远端工具时的 SFTP 回退；后端任务快照、运行时恢复和安全取消 | 打包或传输过程失败不会自动重试 SFTP；暂无断点续传和跨应用重启的持久队列；SFTP 不支持 ProxyJump |
-| 外部编辑 | SFTP 下载受管临时副本，自动探测 Notepad++/系统编辑器，检测保存并比较远端哈希后回传 | 仅普通文件且不超过 64 MiB；ProxyJump 和应用重启恢复尚未实现 |
+| 终端背景 | Rust 资产管理器校验 PNG/JPEG/WebP 魔数、8 MiB 上限、符号链接和原子缓存；HTTPS 壁纸无凭据/query/fragment且不跟随重定向；WebView 只渲染受管 data URL | 不做通用图片重编码；远程地址必须用户主动应用，真实 CDN 兼容性仍需平台验收 |
+| 文件面板 | 真实 SFTP 列表、递归上传下载、拖放、进度、暂存校验与原子提交；`tar + zstd` 回退；后端任务恢复/取消；v0.2 工作区的目录、重命名、跨目录移动、递归权限和批量删除操作 | 已发布 Alpha 尚无文件变更操作；暂无字节级断点续传；移动覆盖策略不适用于普通上传；SFTP 不支持 ProxyJump |
+| 外部编辑 | SFTP 下载受管临时副本，Rust 适配 Notepad++、VS Code/VSCodium、自定义/系统编辑器，检测保存并比较远端哈希后回传；v0.2 工作树提供重启恢复与冲突中心 | 仅普通文件且不超过 64 MiB；ProxyJump 尚未实现，Windows/macOS 编辑器仍需实机验收 |
+| 配置迁移 | FinalShell 可选密码进入 OS keyring；v0.2 工作树提供 OpenSSH、PuTTY、Xshell、SecureCRT、MobaXterm、Tabby、Termius 非敏感字段预览/导入 | 厂商版本差异需真实客户端导出验收；不导入其他应用 vault、Token、私钥内容或隐式主机信任 |
 | 同步 | Local/WebDAV/SFTP/S3/Gateway 的配置草稿界面和二级密码/TOTP 开关 | 只保存本地草稿；没有网络访问、端到端加密、自动同步或冲突合并 |
 
-当前 `tauri.conf.json` 的 CSP 仍为 `null`，本地业务状态也仍保存在 WebView 的 `localStorage`。二者都是原型阶段的安全债务，不能把 v0.1.0 当作生产凭据管理器。
+当前工作树已将 CSP 设为显式指令集，`object/frame/form` 禁止，脚本只允许 bundled self；capability 只绑定 `main` 窗口和实际使用的自定义命令/插件动作。SQLite 快照、资产缓存和事件元数据由 Rust 管理，但本地数据库未加密，不能把 v0.1.0 当作生产密码管理器。
 
 ## 3. 目标分层
 
@@ -93,6 +94,10 @@ xterm.js <-> Tauri IPC <-> portable PTY <-> system ssh <-> target
 
 当前终端、SFTP 和 Linux 概况仍是三条独立 SSH 连接。alpha.4 将它们按终端、SFTP、概况的顺序错峰启动，减少低配主机的预认证突发；长期方案是原生会话引擎在一次认证后的主连接上复用 Shell、SFTP 和监控通道。
 
+v0.2 工作树把概况调度从 WebView 定时器收归 `remote_monitor.rs`。每个活动终端会话对应一个 Rust 监控记录，启动请求逐字段验证会话标识、连接资料和 5 至 300 秒间隔；全局最多保留 16 个记录和 16 个工作线程。采样仍使用固定、无用户插值的 Linux `/proc` 脚本和 12 秒进程超时。前端收到的快照只包含指标、运行状态、诊断和最近 120 个趋势点，不包含密码、私钥或 credential ref。
+
+暂停不会发起新连接；若暂停发生在一个 OpenSSH 子进程已经启动之后，该进程受原有超时约束完成，但结果不进入历史。停止、活动标签切换或同一会话重新启动会移除/替换代际，迟到结果无法重新写入。历史淘汰数随快照报告，失败保留最后一条可理解诊断但不用零值制造成功样本。当前历史是有界运行时观测数据，不跨应用重启持久化。
+
 ### 4.2 russh native engine
 
 原生引擎是 roadmap，不在 v0.1.0 中。目标技术栈是锁定版本的 `russh + Tokio`，SFTP 使用 `russh-sftp`。它用于获得结构化的主机密钥确认、SFTP、逐跳连接、端口转发、取消和进度控制。
@@ -124,6 +129,10 @@ open_forward(session_id, policy) -> lease
 
 v0.1.0 可把用户选择迁移的 FinalShell 密码和可选私钥口令保存到 OS keyring。React 侧只持久化随机 `credential_ref`；直连 OpenSSH AskPass、采样和 SFTP 在 Rust 边界内按当前主机读取，密码明文不作为 IPC 返回值。私钥正文只写入用户选择的 OpenSSH 文件，不进入 `localStorage`。
 
+v0.2 的其他客户端迁移使用 `MigrationPreviewRequest` 和 `MigrationApplyRequest` 两阶段 IPC。Rust 显式选择解析器，只读扫描用户选择的普通文件/目录，严格解码 UTF-8/UTF-16，并冻结最多五分钟、单次使用的净化资料。前端只能展示逐项/逐字段报告并提交令牌，不能回传自行拼装的 profile 作为已确认结果。源路径、单文件、总字节、文件数、目录/JSON 深度、资料数和报告数均有硬上限；符号链接不跟随。密码、Token、私钥路径/正文、厂商 vault 和 known_hosts 信任不进入预览。
+
+本地业务状态 IPC 只接受 `InitializeAppStoreRequest`/`SaveAppStateRequest` 具名结构体。SQLite 使用 `user_version=1`、`app_state` 单例快照和不含值的 `app_events` 变更域；每次保存以 expected revision 防止覆盖，事务提交后再保留最多 10,000 条/90 天事件。超过 64 MiB 或 quick_check 失败时，Rust 按时间戳隔离原库并最多保留两个备份。状态校验拒绝未知顶层字段、过深/过大 JSON、控制字符、私钥正文和密码/Token/secret 等值字段；`credentialRef` 仅作为本地引用，不进入事件域或同步包。
+
 ## 5. 主机身份链与 Shell Integration
 
 “当前在哪台机器”必须是终端第一等状态，而不是依赖标题或用户记忆。
@@ -137,14 +146,16 @@ v0.1.0 可把用户选择迁移的 FinalShell 密码和可选私钥口令保存�
 | 配置推断 | 当前 profile 的别名、IP、环境 | 标记“配置”，不能冒充实时状态 |
 | 屏幕文本猜测 | 解析 prompt 或 `ssh` 命令 | 只作辅助提示，绝不作为安全判断 |
 
-系统 OpenSSH 的 `-J` 链由应用配置得知，但用户进入远端后手动执行 `ssh other-host` 时，客户端只看到终端字节流，无法可靠判断嵌套目标。目标方案是在 bash/zsh/fish/PowerShell 中安装可审计的轻量 Shell Integration，通过受限的终端控制序列上报：
+系统 OpenSSH 的 `-J` 链由应用配置得知，但用户进入远端后手动执行 `ssh other-host` 时，客户端只看到终端字节流，无法可靠判断嵌套目标。v0.2 工作树提供显式启用的 bash/zsh 轻量 Shell Integration；fish/PowerShell 仍未实现。当前受限终端控制序列上报：
 
 - 随机会话标识和握手 nonce；
-- `hostname`、用户、当前目录、shell 类型；
-- prompt ready、命令开始、命令结束和退出码；
-- 进入或退出嵌套 shell 时的新旧上下文。
+- `hostname`、用户和当前目录；
+- 每次 prompt 前的当前上下文；
+- 在每层 shell 显式启用后，进入或退出嵌套 SSH 时的新旧上下文。
 
-控制序列必须做长度、字段和频率限制，远端输出始终视为不可信。应用根据新的 prompt 上报维护上下文栈；上报缺失或顺序不完整时显示“上下文未知”，不能伪造一条看似确定的跳板链。
+每个终端由 Rust 生成 128-bit 随机令牌。解析器跨 PTY 分块识别 `OSC 777`，逐字段 base64 解码并限制 hostname 255 字节、user 128 字节、cwd 4096 字节、整帧 8 KiB 和上下文 8 层；令牌不匹配或格式错误的序列作为普通终端输出保留。应用按 hostname/user 的已知祖先维护 push/pop 栈，不能从屏幕文本猜测上下文。
+
+令牌用于区分普通输出和当前注入函数，不是远端信任证明。同一远端账户下的进程可以读取 shell 函数并伪造上报，所以界面明确称“Shell 上报”，host-key、凭据绑定、生产授权和广播环境仍以配置与 SSH 信任链为准。用户应在确认已经进入 shell 后点击“识别当前 Shell”；应用不会在认证提示阶段自动注入。
 
 ### 5.2 持续可见的界面
 
@@ -155,7 +166,7 @@ v0.1.0 可把用户选择迁移的 FinalShell 密码和可选私钥口令保存�
 当前上报: root@prod-sg-02:/opt/services    环境: 生产
 ```
 
-生产环境使用持续边框和文字标签，不能只依赖颜色。身份来源、真实配置地址和上报 hostname 分开显示。v0.1.0 目前只有配置级路线与环境标签，尚未实现 Shell Integration。
+生产环境使用持续边框和文字标签，不能只依赖颜色。身份来源、真实配置地址和上报 hostname 分开显示。v0.1.0 发布物只有配置级路线与环境标签；上述 Shell Integration 存在于未发布 v0.2 工作树。
 
 ## 6. 多终端广播的安全模型
 
@@ -175,7 +186,9 @@ v0.1.0 已有“选中会话后发送一条命令”的基础实现。产品化�
 - Alt Screen、文件编辑器或交互程序中的 Raw input 默认不参与新目标；
 - 支持一键退出广播，退出后清空目标集合，避免下次误发送。
 
-当前原型尚未实现上述保护，因此不能把 v0.1.0 广播用于无人工核对的生产批量操作。
+v0.2 工作树只开放 Compose 安全广播，不开放 Raw input。Rust 后端验证命令不含控制字符且不超过 4096 字节，目标为 1–32 个当前连接会话；预览冻结命令、会话和 Shell 上下文代际，使用两分钟单次令牌。所有广播都必须再次确认，生产目标额外高亮。确认后目标断开或上下文变化会逐项跳过，写入成功只表示命令进入该 PTY 输入流，不冒充远端执行成功或事务提交。
+
+`sudo`、`su`、`passwd`、`ssh`/`sftp`/`scp` 等可能触发认证交互的命令禁止广播，键盘输入仍只进入当前单个终端。递归强制删除、格式化、关机、清空防火墙和下载管道到 shell 等已知破坏性形式直接阻止；规则是额外防护而不是 shell 语义证明，未知危险命令仍要求人工审查。退出广播或发送后清空目标集合。v0.1.0 已发布产物仍只有基础广播，不能据此宣称具备这些保护。
 
 ## 7. 文件与打包传输
 
@@ -201,13 +214,43 @@ v0.1.0 已有“选中会话后发送一条命令”的基础实现。产品化�
 - 解压拒绝绝对路径、`..`、盘符路径、越界符号链接和硬链接；
 - 可选 SHA256/BLAKE3 校验，失败时保留诊断但不覆盖目标；
 - 取消后清理临时文件，清理失败要显式报告；
-- 后续再增加断点续传、差量传输和队列持久化。
+- 后续再增加断点续传、差量传输和通用覆盖策略。
 
 传输不再由文件面板局部状态代表。Rust `TransferManager` 最多并发运行 6 个任务，保存带单调序号的可查询快照；WebView 丢失事件、关闭文件面板或切换主机后，可以通过任务 ID 和连接身份恢复显示。终态记录有界保留，用户可以显式清除。
 
 取消会先进入 `cancelling`，再关闭当前传输 TCP 克隆以打断 libssh2 阻塞 I/O。目录扫描、复制、哈希、压缩和安全解压都有协作检查点。递归模式已经原子提交的文件不会被反向删除，而是报告 `partialCommit`；打包模式进入最后一次重命名提交后拒绝取消。远端临时路径全部由 Rust 生成，原会话清理失败时只允许一次有界重连重试，最终清理警告进入任务快照。
 
-当前任务快照只在进程内恢复；应用重启后的持久队列、断点续传及带独立逐跳凭据的传输仍属于后续工作。
+### 7.2 跨应用重启恢复（v0.2 工作区，待发布）
+
+`TransferManager` 在 Rust 后端应用数据目录下维护 `transfer-recovery` 存储。每次快照使用带 `schemaVersion` 的 JSON 信封，写入随机临时文件、同步文件后以唯一文件名原子重命名；目录只保留最近两个有效快照，单个状态文件不超过 1 MiB、记录最多 200 条，记录超过 30 天在启动时清理。损坏、截断或不支持的版本不会阻止启动：系统回退到最近有效快照并在恢复状态中显示清理警告。
+
+持久化只包含恢复所需的最小元数据：任务 ID、方向、主机/端口/用户名、源/目标路径、打包开关、阶段、重试次数和是否跨过提交边界。不会写入密码、私钥、credential ref、私钥路径、原始连接秘密或文件内容；任务完成、取消或确认不可重试后会移除请求路径元数据。活动任务在启动后统一显示 `interrupted`，不会自动继续。
+
+用户必须明确选择重试或丢弃。未跨提交边界且仍有请求元数据的任务最多允许 3 次应用级重试，重试要求当前连接身份匹配、可取消且每次转为队列前先持久化状态。递归文件提交和打包最终重命名前会先持久化不可重放边界；边界后的任务即使进程异常退出也只显示核对/丢弃，防止重复覆盖或重放已提交工作。该机制不提供断点续传，也不替代外层 supervisor 的连接重试。
+
+### 7.3 文件坞变更与批量安全（v0.2 工作区，待发布）
+
+远端变更由独立 Rust `remote_file_ops` 模块执行。WebView 只能发送带 `operation` 标签的结构化请求；新建目录拆分为父路径与名称，重命名拆分为源路径与新名称，移动拆分为源路径数组、目标目录与枚举冲突策略，权限和删除使用有界路径数组。模块直接调用 SFTP 文件 API，不接受或拼接任意 shell 命令。
+
+每次操作先连接并生成不可变预览，保存路径类型、权限和修改签名；预览令牌绑定主机/端口/用户，两分钟过期、最多保留 32 个且只能消费一次。前端在目录或选择变化后废弃预览，并要求两次明确确认；执行前 Rust 再逐项读取签名，目标已出现、源已变化或目录清单变化时只跳过该项，不沿用旧确认覆盖新状态。
+
+变更路径必须是规范绝对路径，根目录本身、`.`、`..`、重复分隔符、控制字符、反斜杠、超长组件和超过 64 层的路径被拒绝；批量最多 128 个互不重叠的根，递归源/目标合计最多 10,000 个条目。重命名限同目录且不覆盖已有目标；SFTP rename 显式移除库默认的 `OVERWRITE` 标志。移动提供 `fail`、`rename` 和明确 `overwrite`，禁止移动到自身子目录、复制符号链接/特殊条目，单文件最多 64 GiB、单批最多 256 GiB。跨目录移动始终在目标目录建立随机暂存树，逐文件再次读取源并进行大小/SHA-256 核验；提交前重新核对源、目标与父目录，覆盖时先原子备份旧目标，提交失败尝试回滚，提交后才清理源和备份。
+
+权限只允许 `000..777`，不设置 setuid/setgid/sticky；递归权限先冻结有界清单，符号链接保持不变。递归删除符号链接时只删除链接自身；按预览清单由深到浅执行。所有批量操作逐项报告成功、失败、跳过、取消和部分完成。文件操作复用 `TransferManager` 的原子恢复记录与取消检查点：复制暂存阶段可取消，单项原子提交期间暂时拒绝取消，提交后可取消剩余项；应用重启后只允许重新连接并生成新预览或丢弃，任何已提交/最终化任务都不会重放。
+
+### 7.4 外部编辑恢复与冲突（v0.2 工作区，待发布）
+
+`ExternalEditorManager` 在应用数据目录维护 schema v1 的 `external-edit-recovery` 快照。写入使用随机临时文件、文件同步和原子重命名，只保留最近两个有效版本；最多 16 条、单快照 128 KiB、14 天后清理。损坏、截断或未知 schema 回退到最近有效快照并向冲突中心报告。持久字段仅包括会话 ID、主机/端口/用户名、远端路径、受管缓存文件名、远端基线指纹、时间和冲突标志，不包含 credential ref、私钥/私钥路径、编辑器路径或文件内容。
+
+恢复不会自动联网或回传。用户连接到相同主机、端口和用户名后才可把当前运行时凭据重新绑定到记录；本地缓存必须仍是受管目录中的非符号链接普通文件。冲突中心提供校验后无覆盖另存、重新下载、明确强制覆盖和丢弃。远端保存继续使用随机 `.part`、上传哈希核对、提交前二次远端版本检查、原子覆盖和提交后回读；应用重启不会重放任何保存或最终提交。
+
+编辑器命令行由 Rust 适配器生成：Notepad++ 使用固定无会话参数，VS Code/Code Insiders/VSCodium 使用固定复用窗口参数，自定义程序只接收一个受管文件路径。WebView 不能提供附加参数或 shell 字符串。
+
+### 7.5 Android Preview 共享契约（Phase C，第一项）
+
+`android_preview.rs` 在 Rust 信任边界建立平台无关的 schema-v1 manifest、结构化主机请求和生命周期运行时。manifest 固定 `NativeRustSshSftp` 引擎，最多 8 个会话；当前只启用主机连接、终端、SFTP 与凭据 vault，同步在协调器接线前与广播、外部编辑、常驻监控和后台长连接一样显式 disabled。主机请求只传 UUID、受限 host/user/port、固定 host-key 与 `ssh-<UUID>` 或 `key-<UUID>` 不透明引用，不传秘密值。
+
+运行时只有前台且解锁时允许建立会话或调用支持的操作；任何非前台状态都会增加 generation、清空原生连接并拒绝迟到的连接结果。`android_native_transport.rs` 直接使用 Rust `ssh2`/libssh2 API，握手后先校验固定 SHA-256 host-key，再执行清零密码/内存私钥认证，并提供有界 PTY I/O 与不跟随链接的 SFTP 列表。`android_mobile.rs` 是单独的 Tauri IPC/会话 owner，Android capability 不包含桌面 OpenSSH PTY、广播、编辑器、监控、updater/process/dialog。移动密码和私钥只写入 Android Keystore-backed store；manifest 禁止 backup/cleartext/FileProvider，Activity 设置 `FLAG_SECURE`。Linux 已构建 debug APK/AAB，但同步、生物识别、真机 Keystore/生命周期和真实 SSH/SFTP 仍未验收。
 
 ## 8. 历史与本地数据模型
 
@@ -266,7 +309,21 @@ attachments / changelog
 
 ## 10. 同步子系统
 
-同步后端按不可变对象抽象，不上传 SQLite 整库。目标 provider 包括 Local Folder、WebDAV、SFTP、S3 兼容存储和自建 Gateway；网盘可通过本地同步目录或后续 rclone 适配。事件段先 zstd 压缩，再以 XChaCha20-Poly1305 加密；二级密码用 Argon2id 包裹随机 Vault Master Key。
+同步后端按不可变对象抽象，不上传 SQLite 整库。当前未发布工作树的 `sync_crypto` 已实现 schema v1 keyslot/对象信封、Argon2id v19 参数边界、XChaCha20-Poly1305 认证加密、HKDF-SHA256 的 event/blob/index/checkpoint/device-registry 域分离、OS 随机 salt/nonce、秘密清零和有界严格解析；固定输入只用于稳定测试向量。对象 AAD 绑定 vault、对象类型/ID、设备/序号、算法与长度，keyslot AAD 绑定全部 KDF 参数。
+
+`sync_provider` 已定义 Rust-only、有界、可取消的不可变 `list/get/put` 接口。Local Folder 逐级隔离符号链接，以同目录暂存、`fsync`、原子无覆盖 hard-link 和回读保持提交语义；WebDAV 强制 HTTPS/无重定向/有界显式 CA 和总超时，使用结构化 XML、条件 PUT 与提交后回读。对象最多 24 MiB，key/深度/分页/扫描/XML 均有硬限制，错误码区分取消、输入、路径、缺失、冲突、资源、服务和协议。两模块尚未连接同步 UI、outbox、设备 head 或协调器，不能单独提供同步或重放保护。
+
+`sync_outbox` 在独立的 schema-v1 `vpshell-sync.sqlite3` 中原子写入加密 operation、outbox 和同事务业务回调。两分钟 claim 租约、最多六次 2 秒起/5 分钟封顶退避、显式暂停/恢复、不可逆发布态和过期租约恢复都由 SQLite 状态机拥有；前端不能提交或改写状态。远端对象在 Rust 内完成信封解析/AEAD 后，业务合并、receipt 和每设备连续序号 head 同事务提交；key/hash/对象身份唯一性阻止无序号对象换 key 重放。journal 的 10,000 未发布项/256 MiB、50,000 总对象/384 MiB、512 MiB 文件、30/90 天保留和两份损坏隔离备份均为硬边界。损坏恢复默认 `reconcile-required`，不会静默恢复上传。协调 worker、provider 接线、哈希链和设备签名仍未实现。
+
+`sync_merge` 已实现 version 1 operation/state、HLC/device/operation 确定性字段 register、history event 并集、因果 tombstone 和冲突中心。host/script/setting/background 只有逐字段类型/范围白名单；host trust pin、credential ref、本机背景路径、密码/Token/私钥和敏感参数 history 不属于格式。删除保存 observed-field stamps，使并发编辑/删除在任意到达顺序生成同一冲突；风险降低、连接身份和脚本正文变化也会持续显示。冲突解决自身使用 LWW stamp，支持保持删除或明确恢复。`sync_merge_state` 的 revision、apply 和写回可嵌入 outbox/remote receipt 的同一 SQLite transaction；它尚未连接产品状态或前端冲突界面。
+
+`sync_recovery` 已实现独立的 256-bit 可打印恢复密钥与 recovery keyslot，以及最多 32 台设备的 schema-v1 加密 registry。设备公钥身份不可替换，expected revision、撤销优先合并、最后活动设备保护和已撤销发布者拒绝防止本地静默复活。加密导出只封装 keyslot、认证密文和 manifest，限制为 10,000 对象/256 MiB 密文/384 MiB 文件；Rust 使用私有同目录暂存、文件与目录同步、hard-link 无覆盖提交，读取拒绝符号链接。恢复演练解包 VMK 后逐对象认证，严格解析 event 与 device registry。该模块不持久化恢复密钥、密码、私钥、provider 凭据或明文；设备 operation 签名、远端 registry 回滚防护、VMK 轮换、恢复写入、协调器与 UI 仍未实现。
+
+`sync_credential_vault` 是与业务 VMK 分离的 Rust-only 可选层。策略默认关闭，expected revision 与 business device registry 共同控制最多 32 个活动/撤销授权，撤销单调且要求 CVK 轮换。独立随机 CVK 不可序列化/调试并清零，以 `credentials` 密码 keyslot 包裹；SSH 密码、私钥口令、OpenSSH 私钥和 access token 分别进入独立 HKDF/AAD 域的严格认证信封。本机 credential reference 只用于一次性 Rust 读取且不写入信封/object key/诊断。静态回归禁止该模块出现 Tauri command、事件或日志宏；系统钥匙串写回、provider/outbox、CVK 恢复/轮换、协调器与 UI 仍未实现。
+
+后续 provider 包括 SFTP、S3 兼容存储和自建 Gateway；网盘可通过已实现的 Local Folder 基础层或后续 rclone 适配。事件段先 zstd 压缩，再进入已实现的认证加密信封；二级密码用 Argon2id 包裹随机 Vault Master Key。
+
+`sync_provider_ext` 已把 SFTP、S3-compatible 与 Gateway 作为三个专用 Rust transport trait 接入 `SyncObjectProvider`。公共适配层重新验证最多 10,000 项的 list 响应、key/游标/前缀/ETag/24 MiB 大小，拒绝 SFTP 符号链接/特殊对象，执行取消、条件无覆盖创建和提交后无取消回读。SFTP 无秘密配置要求绝对非根路径与固定 host-key SHA-256；S3/Gateway 要求无 URL 凭据/query/fragment 的 HTTPS endpoint。Gateway 登录 secret 使用清零容器，只在 authentication call 中借用，session 不保存 TOTP且底层错误净化。当前 transport 使用内存协议夹具验证契约；真实 ssh2 SFTP 会话、SigV4 HTTP 和 Gateway HTTP 客户端尚未接入，因此不能宣称外部服务兼容。
 
 同步的对象、密钥层级、冲突规则、TOTP 边界和恢复流程见 [SYNC.md](./SYNC.md)。v0.1.0 的同步页面只是配置原型，没有实现这些机制。
 

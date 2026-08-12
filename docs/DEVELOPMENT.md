@@ -14,7 +14,7 @@
 | 设计完成 | “设计/协议已确定” | 设计文档已评审；不得暗示后端已经存在 |
 | 路线图 | “计划”“评估中” | 没有交付日期承诺，不用于功能徽章、截图或发布标题 |
 
-每次发布前必须从安装包重新验证 README 的功能表。静态示例、模拟负载、未连接的按钮和仅保存在 `localStorage` 的设置要明确标注为原型。未完成取消、错误处理、资源上限或安全检查的传输/同步能力不能标记为已发布。
+每次发布前必须从安装包重新验证 README 的功能表。静态示例、模拟负载、未连接的按钮和仅存在于 legacy `localStorage` 的设置要明确标注为原型。未完成取消、错误处理、资源上限或安全检查的传输/同步能力不能标记为已发布。
 
 ## 2. 模块边界
 
@@ -27,7 +27,8 @@ WebView 负责展示和用户操作；网络、进程、文件系统、凭据、
 | Credential/key management | OS keyring 引用、密钥生成、敏感内存清零 | 向前端返回密码、私钥正文或同步主密码 |
 | Migration adapters | 只读解析用户选择的数据源，产出统一 profile | 修改源客户端配置、绕过主密码或系统钥匙串 |
 | Transfer core | SFTP list/stat/upload/download、任务队列、进度、取消和原子提交 | 借终端 PTY 猜测传输状态、用 UI 提供的任意命令执行文件操作 |
-| Transfer manager (`src-tauri/src/transfer_manager.rs`) | 任务身份、单调快照、并发上限、取消状态、socket 中断和有界终态记录 | SFTP 路径操作、持久化凭据、由前端生命周期决定任务是否存在 |
+| Transfer manager (`src-tauri/src/transfer_manager.rs`) | 任务身份、单调快照、并发上限、取消状态、socket 中断、有界终态记录、版本化恢复存储和重试状态机 | SFTP 路径操作、持久化凭据、由前端生命周期决定任务是否存在 |
+| Remote file operations (`src-tauri/src/remote_file_ops.rs`) | 结构化变更请求、短时单次预览令牌、目标暂存复制/核验/提交、路径/权限/符号链接限制、逐项批量结果 | 接受 shell 片段、跟随符号链接递归、静默覆盖、把部分成功报告为全成功 |
 | Archive transport | `tar + zstd` 能力探测、流式归档、安全解包和 SFTP 回退 | 信任归档内路径、设备节点、链接或声明大小 |
 | Remote file dock | 当前路径、目录列表、拖放意图、覆盖确认、任务视图 | 把静态示例显示成真实远端数据 |
 | Host monitor | 有界采样 CPU、内存、磁盘、负载、网络和进程摘要 | 无提示安装 agent、持续执行高开销命令、把采样值当精确计费数据 |
@@ -52,6 +53,8 @@ Tauri command/event 是安全边界，不是内部函数的直接导出。新增
 7. 凭据只通过不可猜测的 `credentialRef` 引用。读取和使用发生在 Rust 内，IPC 返回值和 WebView event 中都不得出现明文。
 8. 文件 API 接受结构化路径和操作参数。只有确需远端能力探测时才启动受控命令，参数逐项编码，不能拼接未经验证的 shell 字符串。
 9. IPC 结构变更要么向后兼容，要么同时更新前端、测试和迁移逻辑；持久化结构需要显式 schema 版本。
+10. 外部客户端迁移必须显式选择来源和路径，先由 Rust 生成有时限、单次预览，再提交令牌；不允许前端把任意 JSON profile 当成已确认迁移结果。
+11. 解析厂商配置时只支持有夹具的窄格式，未知版本逐项失败而不是猜测。文本编码、文件/总字节、目录与结构深度、条目和报告数均需硬上限，符号链接不得被扫描。
 
 推荐的传输任务模型：
 
@@ -68,8 +71,10 @@ transfer-finished       -> { taskId, outcome, warnings, cleanupStatus }
 - 私钥默认保留在用户选择的 OpenSSH 文件中；生成时默认加密，口令不写日志、`localStorage`、命令历史或错误报告。
 - Rust 读取秘密后使用可清零内存，并尽量缩短生命周期；不得克隆到长期任务状态或通过终端输出事件回显。
 - 当前直连 OpenSSH 会话可通过受限 AskPass 助手读取当前主机的钥匙串凭据；未知提示、主机密钥确认和广播层永远不能取得密码。多跳路线恢复前必须为每一跳建立独立凭据绑定，禁止把目标凭据猜测性地发送给跳板提示。
-- 凭据同步默认关闭。未来凭据 vault 使用独立密钥和逐设备授权；同步 provider 凭据不能依赖同一个尚未解锁的远端仓库自举。
+- 凭据同步默认关闭。当前内部凭据 vault 原语使用独立密钥和逐设备授权，但尚无 UI/协调器；同步 provider 凭据不能依赖同一个尚未解锁的远端仓库自举。
 - 测试使用公开固定样例或临时生成的凭据，禁止把真实 IP、用户名、密码、私钥、Token 和生产日志提交到仓库、fixture 或截图。
+- 迁移测试中的 `password`、`token` 和私钥字段只能使用明显的固定占位符，并断言其状态为 skipped；不得验证、破解或记录其他客户端的真实秘密。
+- SQLite 状态测试必须覆盖 schema 迁移、revision 冲突、损坏隔离、过期/数量保留、未知字段和秘密正文拒绝；资产测试必须覆盖魔数、大小、符号链接、原子轮换和 URL 凭据/query/重定向边界。
 
 ## 5. 本机与远端路径安全
 
@@ -96,7 +101,9 @@ transfer-finished       -> { taskId, outcome, warnings, cleanupStatus }
 
 ### 7.1 左侧负载区
 
-本次 Alpha 的监控只做用户可见、可停止的轻量采样。必须显示采样时间、来源和失败状态；断开连接立即停止。默认间隔不得小于 2 秒，同一主机只能有一个采样 worker，窗口隐藏或面板关闭时降频/暂停。命令缺失、权限不足或系统类型未知时显示“不支持”，不能用零值冒充正常。
+本次 Alpha 的监控只做用户可见、可停止的轻量采样。v0.2 的 `RemoteMonitorManager` 拥有调度、暂停、频率、历史和代际状态；React 只能启动/停止具名会话、发送结构化控制并展示无秘密快照。后端频率硬限制为 5 至 300 秒，全局最多 16 个会话/worker，每会话只保留最近 120 点。必须显示采样时间、来源和失败状态；断开或切换活动会话立即停止旧记录。命令缺失、权限不足或系统类型未知时显示“不支持”，不能用零值冒充正常。
+
+暂停发生时不得开始下一次网络采样。已经运行的系统 OpenSSH 进程最多执行到 12 秒超时；完成回调必须再次核对暂停状态和会话代际，暂停、停止或替换后的迟到结果不能写入最新值或历史。新增采样字段时要同时更新 Rust 快照、前端只读类型、历史大小评估和边界测试，不能把凭据引用加入事件。
 
 ### 7.2 底部文件坞
 
@@ -104,9 +111,11 @@ transfer-finished       -> { taskId, outcome, warnings, cleanupStatus }
 
 ### 7.3 Notepad++ 与其他编辑器
 
-Windows 可自动探测或由用户配置 Notepad++ 路径；找不到时使用系统默认编辑器或提示配置。macOS/Linux 使用用户配置的编辑器命令，不把 Notepad++ 作为跨平台前提。
+Windows 可自动探测或由用户配置 Notepad++ 路径；VS Code、Code Insiders 和 VSCodium 按可执行文件名选择固定适配器，自定义程序只接收受管文件路径。找不到配置程序时使用系统默认编辑器或明确报错。macOS/Linux 不把 Notepad++ 作为跨平台前提。WebView 不得传任意参数模板或拼接 shell 命令。
 
 编辑流程固定为：SFTP 下载临时副本 -> 记录远端大小、修改时间和可用哈希 -> 启动编辑器 -> 检测本地保存 -> 上传前比较远端版本 -> 用户确认 -> 原子替换 -> 清理临时文件。远端已被其他人修改时必须阻止静默覆盖并提供“重新下载/另存/强制覆盖”选择。应用退出、会话断开和编辑器长时间不关闭时仍要有可恢复的临时任务记录。
+
+恢复索引必须 schema 版本化、原子、有界并保留最近有效回退；当前上限为 16 条、128 KiB 和 14 天。只允许持久化公开主机身份、远端路径、受管缓存文件名、基线哈希/元数据和冲突状态。恢复时重新注入的连接凭据只在 Rust 内存中存在；credential ref、私钥路径、编辑器路径和文件内容不得写入索引。恢复、另存、重新下载、强制覆盖和丢弃都必须是显式用户操作。
 
 ## 8. 测试标准
 
@@ -122,15 +131,27 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 
 Rust 新模块必须有输入边界和错误路径单元测试。前端新交互至少覆盖状态转换、取消和错误展示；关键工作流增加端到端测试。修复缺陷时先增加能复现问题的测试，除非测试成本与改动明显不成比例，并在 PR 中说明。
 
-### 8.2 传输专项
+### 8.2 Shell Integration 与安全广播
+
+- Shell Integration 控制帧必须在 Rust PTY 输出边界解析；WebView 只接收已验证长度/编码的上下文快照。令牌不匹配、帧截断、超长字段和深度溢出必须测试。
+- 注入只能由连接后的显式用户动作触发。固定 bash/zsh 代码可包含 Rust 生成的随机令牌，不得包含凭据、主机参数或 WebView 传入的 shell 片段。
+- Shell 上报永远标为自报，不能改变 `known_hosts`、凭据绑定或配置环境。fish/PowerShell 和退出码未实现时必须显示为限制。
+- 广播预览必须在 Rust 冻结命令、目标和上下文代际，最多 32 个目标、4096 字节命令、两分钟单次令牌。所有发送均需确认；生产目标持续显示，选择/上下文变化不得沿用旧确认。
+- 认证交互和已知破坏性命令默认阻止广播。逐项结果区分写入成功、失败和因断线/上下文变化跳过；PTY 写入成功不得描述成远端命令成功。
+
+### 8.3 传输专项
 
 - 临时 OpenSSH/SFTP 服务的上传、下载、空文件、深目录、大量小文件、大文件和 Unicode 文件名；
 - 连接中断、取消、磁盘满、权限拒绝、目标已存在、远端同时修改和应用重启恢复；
+- 应用重启后活动任务显示为 `interrupted`；只允许用户明确重试或丢弃，已跨提交边界的任务不得重放；重试最多 3 次且每次可取消；
+- 文件坞变更覆盖根目录、`.`/`..`、控制字符、重复/父子重叠路径、128 项上限、64 层深度、10,000 条递归清单、64 GiB 单文件/256 GiB 单批移动、符号链接、权限特殊位和目标已存在；
+- 移动必须覆盖同/跨文件系统语义、`fail`/`rename`/明确 `overwrite`、复制与二次 SHA-256 核验、提交前状态变化、覆盖回滚、源/备份清理失败和目标原子提交边界；
+- 操作预览令牌必须绑定连接身份、过期且单次消费；预览后状态变化逐项跳过，递归权限隔离符号链接，批量取消/重启恢复必须保留逐项成功、失败、跳过与部分完成，恢复必须重新预览且不得重放已提交工作；
 - 恶意 tar：路径穿越、绝对路径、链接逃逸、设备节点、重复文件名、超大声明、压缩炸弹和损坏流；
 - `tar`/`zstd` 缺失及能力探测失效时可靠回退递归 SFTP；
 - Windows 路径包含空格、中文、单引号和超长路径；不得依赖 shell 字符串恰好可用。
 
-### 8.3 UI 与人工验收
+### 8.4 UI 与人工验收
 
 - 至少检查 1440x900、最小窗口 920x620 和窄窗口，不允许终端、负载区、文件坞、对话框或长路径互相遮挡；
 - 真实连接时验证标签切换、广播目标持续保留、主机身份颜色、文件拖放、取消和错误恢复；
@@ -168,11 +189,82 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 
 提交必须保留 `package-lock.json` 和 `Cargo.lock`。CI 使用 `npm ci` 与 Cargo `--locked`；不能在 release workflow 中临时下载未校验的可执行文件或运行远端 `curl | shell`。
 
+### 10.1 SQLite 依赖决定（v0.2 工作树）
+
+- `rusqlite = =0.40.2`，MIT OR Apache-2.0；上游在 2026-08 仍维护，精确版本写入 manifest/lock。
+- `default-features = false`，只启用 `bundled`；不启用 SQLCipher、extension loading、hooks、trace、网络或遥测能力。
+- `bundled` 通过 `libsqlite3-sys 0.38.2` 编译 SQLite C amalgamation，增加冷构建时间和二进制体积，但避免 Windows/macOS/Linux 系统 SQLite 版本与 feature 漂移。
+- 权限面只限应用数据目录中的 `vpshell-state.sqlite3`、WAL/SHM 和有界损坏备份；SQL 语句均固定，状态值参数绑定，不开放任意 SQL IPC。
+- 删除方案：先通过 schema-v1 读取接口导出最新净化状态，再替换 `app_store.rs`，删除依赖与数据库；SQLite 文件不作为同步对象上传或跨设备合并。
+
+### 10.2 同步密码学依赖决定（v0.3 工作树）
+
+- 精确锁定 RustCrypto `argon2 = 0.5.3`、`chacha20poly1305 = 0.10.1`、`hkdf = 0.12.4` 和 `getrandom = 0.3.4`；均为 MIT OR Apache-2.0。选择 Argon2 0.5 稳定线而非 0.6 RC；ChaCha 0.10 与现有 digest/aead 依赖兼容，避免为单模块引入第二套当前生态。
+- 四项均关闭默认 feature。Argon2 只启用 `alloc`/`zeroize`，带来纯 Rust `blake2`/`password-hash`；ChaCha 只启用 `alloc`，不启用 reduced-round/stream/std/getrandom；HKDF 与 getrandom 不启用可选 feature。随机字节通过直接锁定、依赖树已存在的 getrandom 0.3.4 从桌面 OS CSPRNG 获取。
+- 这些库没有网络、遥测、文件系统、Tauri capability 或外部可执行文件权限；运行面仅为 CPU、受 19–256 MiB 硬限制的 Argon2 内存和 OS 随机源。算法失败返回稳定无秘密诊断，密钥类型不可 Serialize/Debug，临时 KEK、域密钥和解包 VMK 使用清零容器。
+- 删除/替换不能静默改变 v1 密文：必须保留固定测试向量，用替代实现读取全部 v1 keyslot/对象并重加密到新格式，经恢复演练后才能删除依赖。旧算法解析器需按明确格式版本保留只读迁移期，不能就地降级参数或 nonce 长度。
+
+### 10.3 同步 provider 解析依赖决定（v0.3 工作树）
+
+- `quick-xml = =0.41.0` 与 `percent-encoding = =2.3.2` 均为 MIT 许可证、关闭默认 feature，并已作为 Tauri/reqwest 依赖树的锁定传递版本存在；把它们提升为直接依赖不会增加锁文件中的新 package 或原生构建脚本。
+- 标准库没有命名空间感知且默认不展开实体的流式 XML 解析器，也没有可靠的 URL percent-decoding API。WebDAV `multistatus` 必须通过有界结构化事件解析，不能用字符串切割；href 必须在解码后重新执行对象 key 验证。
+- 两项依赖没有网络、文件、遥测或 Tauri capability。网络仍由既有 `reqwest 0.13.4` blocking/rustls 客户端拥有；XML 限 4 MiB/32 层/10,000 对象，percent decoding 限单个 endpoint/href。删除方案是以等价的有界 XML/URL 标准解析器替代并保持恶意 DTD、逃逸 href、分页和重复对象夹具全部通过。
+
+### 10.4 同步 journal 事务规则（v0.3 工作树）
+
+- `sync_outbox` 复用已审计的精确锁定 `rusqlite 0.40.2` bundled 配置，不新增依赖、网络或 Tauri capability。它使用独立数据库，避免把 24 MiB 加密对象挤入 UI 状态快照库。
+- `enqueue_local`/`apply_remote` 的业务闭包只允许执行传入 SQLite transaction 上可回滚的 SQL；禁止在闭包内访问 provider、写文件、启动进程或发送事件。错误必须回滚业务数据、operation、outbox/receipt 和 head 的全部变化。
+- 测试使用注入的毫秒时间，不依赖 sleep；必须覆盖租约过期、每次退避、六次上限、暂停/恢复、发布终态、事务回滚、损坏/未来 schema、保留不删除未发布工作、序号缺口/回退以及无序号对象换 key/身份重放。
+
+### 10.5 确定性 merge 规则（v0.3 工作树）
+
+- merge operation 只能使用 `sync_merge.rs` 的具名 serde 类型与逐字段白名单，不能把整个前端 JSON、SQLite 快照或任意 setting map 加密后同步。新增字段必须定义类型、大小、clear/delete、冲突原因和敏感性测试。
+- 排序固定为 HLC physical/logical、canonical device UUID、operation UUID；不能使用本机接收顺序或 provider list 顺序。删除必须携带 observed-field stamps，冲突 ID 必须从排序后的双方生成，解决 operation 也必须在不同到达顺序收敛。
+- `apply_persisted_operation` 只在调用者提供的 journal transaction 中使用 expected revision；本地加密/enqueue 或远端认证/receipt 任一步失败都必须让 merge state 一起回滚。冲突值已通过非敏感字段校验，但仍不得写日志、分析事件或 WebView，直到最小只读 IPC 与显示脱敏另行验收。
+
+### 10.6 恢复、设备与加密导出规则（v0.3 工作树）
+
+- 恢复密钥只能由 Rust OS CSPRNG 生成并以不可 Serialize/Debug、释放清零的类型短暂持有。可打印格式从最后一个 `-` 分离校验码，因为 base64url 正文自身允许 `-`；校验码只用于录入错误，keyslot AEAD 才提供认证。
+- device registry 只保存公开签名键与有界非敏感标签；UUID/base64url/时间/数量逐字段验证。设备公钥身份不可原地替换，撤销不可逆，禁止撤销最后活动设备，已撤销设备不能修改或发布 registry。撤销不等于擦除远端设备已有 VMK，疑似泄露必须新 VMK 全量重加密。
+- 加密导出不能包含恢复密钥、密码、私钥、credential ref、Token、provider 凭据、解密内容或 SQLite 文件。对象、keyslot、manifest、数量和字节上限在创建、编码、读取和恢复演练各边界重复验证；写盘必须同目录私有暂存、同步、无覆盖提交，读取拒绝符号链接。
+- 恢复演练必须实际解包 VMK、认证解密每个对象并解析所有已有具名核心格式。错误恢复密钥、篡改、截断、重复 key/hash、跨 vault、撤销 registry 发布者和不受支持版本均失败；在 restore-to-journal、协调器和用户确认接线前，只能称为离线演练，不能称为一键恢复。
+
+### 10.7 凭据 vault 规则（v0.3 工作树）
+
+- 凭据同步策略必须默认关闭；启用、授权、撤销和停用均使用 expected revision，并同时验证 business device registry。撤销身份永久留在策略中，不能重新授权；任何已复制 CVK 的设备撤销后都必须显示轮换要求。
+- CVK 必须由 OS CSPRNG 独立生成，不能从业务 VMK 派生，也不能复用 business/recovery keyslot AAD。CVK 和 secret 类型不得实现 Serialize/Debug；所有密码、口令、Token、私钥和解密缓冲尽早进入清零容器。
+- 本机 credential reference 是 Rust 内存中的系统钥匙串查找参数，不是同步 ID。远端对象使用新随机 item UUID；reference、secret 或 provider 原始错误不得进入 object key、信封头、稳定错误、日志、Tauri event 或前端。
+- 当前凭据模块故意没有 IPC、日志或 provider 接线。新增协调器时必须保持 secret 在 Rust trust boundary，仅返回 value-free 状态；写回系统钥匙串需生成新的本机 reference，不能把其他设备的本地 reference 当作可用身份。
+
+### 10.8 扩展 provider transport 规则（v0.3 工作树）
+
+- SFTP/S3/Gateway transport 实现必须满足 `ObjectTransport` 的严格契约：list 只返回作用域内对象，get 有界，create 为服务端原子/条件无覆盖；`AlreadyExists` 不能自行视为成功，公共 adapter 会回读逐字节核对。
+- SFTP transport 建立会话前必须验证配置的 SHA-256 host key，逐级 lstat 根与对象路径并拒绝 symlink/special；不能复用未经独立凭据绑定和 host-key 验证的业务 shell 会话。
+- S3 transport 必须使用 SigV4、HTTPS/no redirect、有界超时、ListObjectsV2 continuation token 和 `If-None-Match: *` 或等价条件创建；不能假设 list 立即一致，提交以条件 put 和 get 回读为边界。
+- Gateway transport 必须实现版本化登录/session/object 协议、TLS、限流与重放保护。密码/TOTP 只借给 login，session 类型不得保存 TOTP；TOTP 只验证 Gateway 账户，不能解锁或派生 VMK/CVK。所有底层认证错误映射为无秘密稳定诊断。
+- 当前内存 transport 只验证 adapter 契约。真实 SFTP/S3/Gateway transport、服务端参考实现和故障/兼容矩阵没有完成前，不得将对应 provider 标为用户可用。
+
+### 10.10 Android Preview 共享契约（Phase C）
+
+- `src-tauri/src/android_preview.rs` 是桌面与移动端共用的 Rust 策略模型；`android_mobile.rs` 是唯一移动 IPC/会话 owner，不能调用系统 `ssh` 或复用桌面进程命令。新增 Android command 必须进入 command manifest、仅加入 `capabilities/android.json`，并由安全回归证明没有落入桌面 capability。
+- 当前只打开主机连接、终端、SFTP 和凭据 vault；同步必须等 Rust coordinator 接线后才能启用，广播、外部编辑、常驻监控和后台长连接保持关闭。每个 structured host request 逐字段验证 UUID、主机/用户名/端口、host-key 和不透明 credential reference；不得序列化或记录秘密值。
+- 生命周期仅允许前台解锁操作；任何非前台状态清理会话并递增 generation，连接完成时必须再次验证预留状态。平台实现仍需把生物识别、Activity/休眠、软键盘、剪贴板和网络切换作为独立测试面。
+- Linux CI/VPS 可构建 aarch64 debug APK/AAB、验证签名结构和运行 Rust/Gradle unit gate，但这些结果不证明 Keystore 运行时、真实设备或模拟器行为。debug 自签名包不得描述为发布签名。
+- `android_native_transport.rs` 只允许 `ssh2`/libssh2 Rust API；握手后的 host-key pin 比对必须先于认证，秘密只以 `Zeroizing` 短生命周期进入调用。SFTP list 的路径、数量和条目类型必须在 Rust 再验证，symlink/special 不得被跟随。该模块的 fake/边界夹具不能替代真实服务器和 Android 链接测试。
+- Android aarch64 首次构建要求 NDK 27；`ssh2` 仅在 `target_os = "android"` 时启用 `vendored-openssl`，使 libssh2/OpenSSL 用目标 NDK 编译而不是错误链接主机 OpenSSL，桌面目标继续使用原有系统链接。该 feature 增加 Android 原生冷构建时间与包体积，但不增加运行时权限；许可证和删除方案记录在 `THIRD_PARTY_NOTICES.md`。
+- Android 凭据使用 `android-native-keyring-store`/`keyring-core` 明确注册 Keystore-backed store。凭据写入请求只允许反序列化且不得派生 `Debug`/`Serialize`；业务状态只保存 `ssh-<UUID>`/`key-<UUID>` 引用。私钥正文最多 1 MiB，密码/口令最多 16 KiB，错误不能包含底层秘密。生物识别尚未实现时必须保持文档与 manifest 真实。
+
+### 10.9 B8 协议回归矩阵（v0.3 工作树）
+
+- `sync_protocol_regression` 在跨模块边界验证：未知 v1 envelope、AEAD 错误密钥/篡改、对象身份搬移、journal 同 key/同身份 replay、已发布终态、merge 两种到达顺序和截断状态、Local Folder 截断字节与取消。每个失败都返回稳定错误码，不能把部分提交标为成功。
+- 已完成的本机/fake transport 结果只证明 Rust 适配器契约。B8 外部矩阵仍需真实 OpenSSH SFTP（host-key 变化、权限、symlink、断线）、MinIO/其他 S3-compatible（SigV4、path-style、迟延列举、412/重试、时钟偏差）、Gateway HTTPS（版本协商、TOTP、限流、重放、断网）和两台以上真实设备的恢复/轮换演练。
+- 真实 provider 测试不得使用生产 endpoint 或真实密码/Token/私钥；fixture secret 必须是合成值，日志与报告只保留稳定错误码、时间和计数。
+
 ## 11. PR 与发布清单
 
 - [ ] 模块边界清楚，入口文件没有继续承载新的业务子系统
 - [ ] IPC 有结构化类型、输入上限、取消、错误码和无秘密日志
-- [ ] 新文件/网络/进程权限已缩到最小 Tauri capability
+- [x] 新文件/网络/进程权限已缩到最小 Tauri capability；自定义 commands、事件、窗口动作、dialog、opener、updater 和 restart 由静态回归测试对齐
 - [ ] 正常、失败、取消和恢复路径均有测试
 - [ ] README、CHANGELOG 和截图只描述真实状态
 - [ ] 未实现能力标为“正在实现”或“路线图”

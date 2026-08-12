@@ -1,6 +1,14 @@
 # VPShell 加密同步设计
 
-> 文档状态：目标协议设计。v0.1.0 只有同步设置界面，尚未实现 provider、SQLite outbox、端到端加密、自动同步、冲突合并、TOTP 或恢复流程。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。自动同步协调器与 UI、真实扩展 transport/Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把内部原语描述成可用同步产品。
+
+### 当前 v1 密码学边界
+
+`sync_crypto.rs` 只在 Rust 内存中持有 32-byte VMK，类型不可序列化且在释放时清零。密码 keyslot 使用 Argon2id v19，默认 64 MiB/3 次/1 lane，读取时只接受 19–256 MiB、2–10 次、1–4 lanes 和固定 32-byte 输出；密码为 8–1024 bytes。keyslot 使用 16-byte salt、24-byte nonce 和 XChaCha20-Poly1305 包裹 VMK，格式版本、vault/slot ID、业务密钥域、算法、全部 KDF 参数和密文长度进入长度前缀 AAD。
+
+业务对象按 event/blob/index/checkpoint/device-registry 五个 HKDF-SHA256 label 派生不同密钥；vault ID 参与 extract salt，对象类型、对象 ID、设备/序号、算法和密文长度进入 AAD。对象明文最多 16 MiB，JSON 信封最多 24 MiB，keyslot 最多 16 KiB；UUID、base64url、类型与序号组合逐字段验证，未知字段和未知版本拒绝。每次生产加密都从 OS CSPRNG 取得随机 nonce；固定 nonce/salt 入口只在单元测试中用于稳定向量。
+
+该格式能认证对象身份并阻止把密文搬到另一域/vault/设备/序号后解密，但相同完整对象的重放需要后续 outbox/head/sequence 状态机检测。当前没有任何 IPC 返回 VMK、KEK、密码或解密明文；provider 也尚未由产品同步流程调用。
 
 ## 1. 目标
 
@@ -42,10 +50,10 @@ TLS 仍然必须启用，但 TLS 只保护传输链路，不能替代客户端�
 
 | 能力 | v0.1.0 | 目标 |
 | --- | --- | --- |
-| 本地业务存储 | WebView `localStorage` 明文 JSON | Rust 管理的 SQLite + 加密敏感字段 |
-| Provider | 只有 Local/WebDAV/SFTP/S3/Gateway 选择界面 | 可插拔不可变对象存储接口 |
-| 二级密码 | 只检查输入非空，不保存也不派生密钥 | Argon2id 派生 KEK，包裹随机 Vault Master Key |
-| 同步动作 | 只写本地设置和“最后同步”时间 | 事务 outbox、自动 push/pull、重试和状态机 |
+| 本地业务存储 | WebView `localStorage` 明文 JSON（legacy） | Rust 管理的 SQLite schema v1 快照 + 有界事件域；同步前再做 E2EE 对象化 |
+| Provider | 设置页仍是草稿；Rust 已实现未接线的 Local Folder/WebDAV 不可变对象接口 | 可插拔不可变对象存储接口和同步协调器 |
+| 二级密码 | 设置 UI 仍只是本地草稿；Rust v1 密码学层已能用 Argon2id 派生 KEK 并包裹随机 VMK，但尚未接入 UI/provider | Argon2id 派生 KEK，包裹随机 Vault Master Key |
+| 同步动作 | UI 仍只写本地设置；Rust schema-v1 journal 已实现未接线的事务 outbox/重试/receipt/head 状态机 | 自动 push/pull 协调器连接 provider、密码学和合并层 |
 | 冲突 | 无 | 事件并集、字段级 LWW、tombstone、冲突中心 |
 | TOTP | 只有 Gateway 条件开关 | 只用于自建 Gateway 账户登录 |
 | 凭据同步 | 只有开关 | 默认关闭的独立凭据密钥域 |
@@ -76,6 +84,12 @@ COMMIT;
 
 如果事务失败，三者全部失败；如果应用在提交后崩溃，outbox 仍会在下次启动继续上传。远端拉回的 operation 以 origin 标记，写入本地 operation log 和业务视图，但不会再次作为本机 operation 重复发布。
 
+当前 `sync_outbox.rs` 使用独立 `vpshell-sync.sqlite3` schema v1 落实这条原子边界。调用者只能通过 Rust 内部闭包修改同一个 SQLite transaction；闭包不得执行网络、文件写入或其他不可回滚副作用。`sync_operations` 只保存已通过 v1 严格解析的加密信封，`sync_outbox` 保存状态/次数/租约/稳定错误码，业务明文、密码、私钥、credential ref、Token 和 provider 凭据不进入 journal。未发布最多 10,000 对象/256 MiB，整个 journal 最多 50,000 对象/384 MiB，数据库文件启动硬限制 512 MiB；已发布本地对象保留 30 天，远端 receipt 保留 90 天，但每设备持久高水位不会清理。
+
+worker claim 使用两分钟租约；进程中断后的过期租约不会立即重放，而是进入 `retry_wait`。网络、超时、限流和远端暂不可用按 2/4/8/16/32 秒退避，最多六次且单次最长五分钟；协议、认证、不可变冲突和完整性错误直接进入 `permanent_failure`。取消进入 `paused`，只能显式恢复且不重置尝试次数；`published` 是不可逆终态。损坏、截断或超过 512 MiB 的 journal 最多保留两个隔离备份，新库写入 `reconcile-required` 安全阻止，必须由后续协调器完成远端核对后显式解除，不能自动继续上传。
+
+远端对象先做严格信封解析与 AEAD 认证，再在同一事务执行合并回调、写 operation/receipt 并推进设备连续序号。重复 key+hash 幂等忽略；序号回退、缺口、相同密文换 key、或相同 `(vault, kind, object_id)` 出现不同密文均在业务回调前拒绝。90 天后 receipt 可清理以控制容量，此后旧序号仍由设备高水位拒绝，不会重新应用。哈希链、设备签名和见证 head 属于后续协议层，当前水位不能独立证明远端完整历史。
+
 每台设备维护：
 
 - 随机 `device_id`；
@@ -85,6 +99,8 @@ COMMIT;
 - 设备签名密钥，私钥保存在系统凭据库或本机加密 vault。
 
 HLC 不是权限或真实性来源，只解决时间漂移下的合并排序。签名、AEAD 和已信任设备记录负责完整性验证。
+
+当前内部 `sync_recovery` device registry 为严格 schema v1，最多 32 台，只保存 canonical device UUID、1–128 byte 非控制字符标签、公开 32-byte 签名键、时间与 active/revoked 状态。更新使用 expected revision；相同设备的公钥和加入身份不可替换，撤销单调且禁止撤销最后活动设备，合并时撤销优先并拒绝身份冲突。registry 作为 `device-registry` 域对象加密，恢复演练要求发布者在该 registry 中仍为 active。当前尚未签名 event/segment，也没有协调器验证远端 registry 的签名/历史链，因此这些规则只构成内部状态和本地发布边界，不能独立抵抗远端回滚到旧 registry。
 
 ## 6. Provider 抽象
 
@@ -98,13 +114,17 @@ put(key, byte stream) -> idempotent result
 
 业务层只创建内容寻址或带唯一序列的不可变 key，不依赖远端 rename、事务、锁或就地更新。`put` 同名对象时只能接受完全相同的内容；内容不同时视为远端冲突/篡改。删除和条件写可作为 provider 优化能力，但不能成为基础协议正确性的前提。
 
+当前 `sync_provider.rs` 实现上述最小接口但不暴露 Tauri IPC。key 最多 512 bytes/16 层，只接受 ASCII 字母数字、点、下划线和连字符分段，禁止绝对路径、空段、`.`/`..`、反斜杠、控制字符和保留暂存名；对象为 1 byte 至 24 MiB，列表页最多 1,000 项且一次扫描/响应最多 10,000 个对象。所有长读取按 64 KiB 检查取消。
+
+Local Folder 要求现有非符号链接目录，逐级拒绝符号链接/特殊文件，写入同目录随机暂存文件并 `fsync`，再用原子 hard-link 无覆盖提交及回读校验；不支持该原语的文件系统会明确失败，而不会退化为可能覆盖的 rename。崩溃暂存名不进入对象列表。WebDAV endpoint 必须是无 URL 凭据、query、fragment 的 HTTPS URL，禁止重定向，可显式增加最多 64 KiB 的 PEM CA；连接/总请求受 5–60 秒配置上限约束。它使用 MKCOL/PROPFIND/GET/带 `If-None-Match: *` 的 PUT，XML 响应最多 4 MiB，以 `quick-xml` 解析并拒绝 DTD、越界 href 和跨 origin/base 路径；成功或 412 后都回读逐字节核对。上传体与响应流可取消，但阻塞在 TLS/响应头期间最多等待配置超时。对象一旦原子链接或 PUT 成功，迟到取消不能把已提交工作误报成未提交。
+
 | Provider | 首次范围 | 说明 |
 | --- | --- | --- |
 | Local Folder | MVP | 写入用户选择的目录，可由 OneDrive、Dropbox、坚果云等桌面客户端继续同步 |
 | WebDAV | MVP | 使用 PROPFIND/GET/PUT；要求 HTTPS，允许用户显式信任自签 CA |
-| SFTP | Roadmap | 独立于业务 SSH 会话配置；严格验证同步服务器 host key |
-| S3 compatible | Roadmap | ListObjectsV2/GetObject/PutObject；不能假设强一致列举 |
-| VPShell Gateway | Roadmap | 提供账户、设备管理、限流、可选 TOTP 和单调 head 辅助，但仍只保存密文 |
+| SFTP | Internal adapter | 专用 transport trait；配置固定 SHA-256 host key，实际会话必须逐级 lstat、无跟随读取和 exclusive create |
+| S3 compatible | Internal adapter | 专用 transport trait；HTTPS endpoint、region/bucket/prefix 严格验证，实际 transport 负责 SigV4、ListObjectsV2/GetObject/条件 PutObject |
+| VPShell Gateway | Internal adapter | 专用认证/session trait；密码和可选 TOTP 只交给登录，session 只处理密文对象；实际 HTTP 协议客户端仍待接线 |
 | rclone | Roadmap | 优先通过 Local Folder/mount 兼容；若增加命令适配器，必须显式配置可执行文件和参数，不能接受任意远端下发命令 |
 
 Provider 账户密码、access key 和 SFTP 私钥属于“接入远端的凭据”，不能依赖该远端自举同步。新设备必须先单独配置 endpoint 和 provider 凭据，才有能力下载加密 vault。
@@ -156,20 +176,21 @@ K_event / K_blob / K_index / K_checkpoint / K_device_registry
 
 ### 8.2 恢复密钥
 
-创建 vault 时生成高熵恢复密钥，并增加独立 recovery keyslot。恢复密钥必须以可打印/可导出的离线材料交给用户，不能只保存在同一个同步 endpoint。TOTP、邮箱或 provider 密码都不能替代恢复密钥。
+创建 vault 时生成高熵恢复密钥，并增加独立 recovery keyslot。当前内部实现从 OS CSPRNG 生成 256-bit 密钥，输出 `VPS1-<base64url>-<8 hex checksum>`；解析从末尾分隔校验码，避免把 base64url 合法的 `-` 当作字段边界。恢复 KEK 使用 vault/slot 绑定的 HKDF-SHA256 独立域，再以 XChaCha20-Poly1305 包裹业务 VMK；恢复密钥类型不可序列化/调试并在释放时清零。
+
+恢复密钥必须由用户离线保存，不能写入导出包或只保存在同一个同步 endpoint。TOTP、邮箱或 provider 密码都不能替代恢复密钥。校验码只发现录入错误，不提供认证；真正的密钥正确性和 keyslot 完整性由 AEAD 验证。
 
 修改二级密码通常只新增一个包裹同一 VMK 的 keyslot，无需重加密全部数据。需要使旧密码真正失效时，必须创建新 vault/新 VMK 并重加密迁移；在不可变 blob 存储中，旧 keyslot 可能仍被攻击者取回，单纯标记“停用”不构成密码撤销。
 
 ### 8.3 凭据 vault
 
-密码、私钥口令和私钥正文默认不同步。用户明确开启后：
+密码、私钥口令和私钥正文默认不同步。当前内部 `sync_credential_vault` 落实以下边界：
 
-- 生成独立随机 Credential Vault Key（CVK）；
-- CVK 使用独立 domain 和 keyslot 包裹；
-- UI 再次要求二级密码并展示同步范围；
-- 普通业务 vault 解锁不自动向 WebView 暴露 CVK；
-- 可进一步允许为凭据 vault 设置独立密码；
-- 主机配置只同步 `credential_ref`，解密后由 Rust CredentialProvider 按需取值。
+- schema-v1 策略默认 `enabled=false`，使用 expected revision；只有业务 device registry 中的活动设备可显式启用，最多 32 个活动/撤销授权身份，撤销不可重新授权且不能撤销最后授权设备；
+- 从 OS CSPRNG 生成独立 256-bit CVK，类型不可 Serialize/Debug 且释放清零；CVK 以独立密码和 `credentials` keyslot/AAD 域包裹，不复用业务 VMK 或 recovery keyslot；
+- SSH 密码/私钥口令各限 1024 bytes，access token 限 4 KiB，OpenSSH 私钥限 1 MiB；每类再使用独立 HKDF label 和随机 24-byte nonce，vault/item/type/算法/长度进入 AAD；
+- secret 类型不可 Debug/Serialize，临时明文缓冲清零；认证信封只含随机 item UUID、类型、nonce 和密文。本机 `credentialRef` 只作为 Rust 内存中的一次性系统钥匙串查找参数，不写入信封、provider object key、错误、日志或事件；
+- 当前模块不暴露 Tauri command/event，尚未接入设置 UI、系统钥匙串写回、provider/outbox、CVK 恢复或轮换，因此应用仍不会同步凭据。
 
 设备撤销无法抹除已经复制到该设备的 VMK/CVK。若被撤销设备可能泄露密钥，必须执行密钥轮换和全量重加密。
 
@@ -260,6 +281,10 @@ LWW 只保证收敛，不保证业务选择正确。以下变化即使能自动�
 
 主机 trust pin 是本地安全状态。其他设备同步来的指纹只能作为待核对建议，不能静默替换本机已信任指纹。
 
+当前 `sync_merge.rs` 把 host/script/setting/background 字段列为协议白名单，operation/state 分别限制为 1 MiB/64 MiB，单 patch 64 字段，最多 10,000 实体、50,000 history、1,000 conflict 和 50,000 已应用 operation。字段 register 按 `(HLC physical, logical, device_id, operation_id)` 排序；相同 operation ID 不同内容拒绝为 replay。命令/参数/远端路径 history 以 event ID 取并集并按 stamp 稳定展示；参数名必须明确非敏感，值要标为 public，明显密码/Token/Authorization/私钥和 credential ref 模式拒绝。
+
+删除 operation 保存它观察到的每字段 stamp。这样已观察编辑随后删除不会误报，未观察的离线编辑无论先到还是后到都会生成相同 conflict ID；默认 register/tombstone 仍确定性收敛。冲突 ID由实体/字段和排序后的双方内容计算，connection identity、脚本正文/来源、风险降低、并发删除和删除后编辑有独立原因。解决 operation 必须晚于双方；多个设备并发解决时仍按 stamp 选择同一结果，并支持保持删除或显式恢复。`sync_merge_state` 通过 expected revision 在调用者的 journal transaction 内读取、apply、写回，因此可与本地 outbox 或远端 receipt 原子提交。当前没有 Tauri IPC/后台 worker 展示该中心。
+
 ### 11.3 删除
 
 删除生成带 HLC 的 tombstone，不立即从远端删除旧对象。所有设备合并时，tombstone 与更新按实体规则比较，避免离线设备把旧记录重新带回。
@@ -333,6 +358,8 @@ secondary sync password or recovery key
 
 Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计，但审计日志不得包含对象明文、密码或 TOTP seed。
 
+当前 Gateway adapter 的 `GatewayLoginSecrets` 只在 Rust 内存保存用户名、清零密码和可选六位数字 TOTP；认证 trait 返回的对象 session 不含这些字段，底层认证错误也被替换为稳定无秘密诊断。SFTP/S3 adapter 同样只接受无秘密结构化配置，连接/签名凭据由具体 transport 在 Rust trust boundary 持有，不能序列化进 provider 配置。
+
 ## 15. 冲突中心与用户操作
 
 自动合并后仍需用户处理的项目进入冲突中心，至少展示：
@@ -347,10 +374,11 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 ## 16. 备份、导出与灾难恢复
 
-- 提供加密的完整导出包，包含协议版本、keyslot、segments、blobs、已信任 heads 和校验清单；
-- 导出后执行离线恢复演练，而不是只验证文件存在；
+- 当前内部 schema v1 加密导出包包含 vault/export 身份、recovery/password keyslot、不可变加密对象和 SHA-256 manifest；不包含恢复密钥、密码、私钥、provider 凭据、Token、解密业务内容或 SQLite 整库；
+- 包限制为最多 8 个密码 keyslot、10,000 个对象、单对象 24 MiB、密文总量 256 MiB、文件 384 MiB，并且必须且只能有一个 device registry；key、密文哈希、base64url 和所有 envelope 身份重新验证；
+- Rust 以同目录私有暂存文件、`fsync`、hard-link 无覆盖提交并拒绝符号链接读取；Linux 暂存与结果权限为 `0600`。离线恢复演练使用 recovery keyslot 解包 VMK，认证并解密每个对象，严格解析全部 event 与 device registry，而不是只验证文件存在；
 - 支持只导出非凭据业务 vault，凭据 vault 需要独立确认；
-- 远端全部丢失时，可从最近导出重建新 vault；
+- 当前演练只证明包可解密和核心对象可解析；写入新的 journal/provider、VMK 轮换与用户确认 UI 尚未接线，不能宣称已完成一键灾难恢复；
 - 发现分叉或回滚时先冻结自动上传，保留两侧对象和诊断报告，避免覆盖取证；
 - 数据格式升级采用 append-only migration operation，旧客户端遇到未知必要版本时只读并提示升级。
 
@@ -358,11 +386,12 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：Local Folder 和 WebDAV，完整断网/重试/重复对象测试。
-4. **合并层**：历史并集、字段级 LWW、tombstone、冲突中心、路径作用域。
-5. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。
-6. **Provider 扩展**：SFTP、S3、Gateway，再评估 rclone 适配。
-7. **凭据 vault**：默认关闭、独立 CVK、逐设备授权、轮换和恢复演练。
-8. **Gateway TOTP**：只在 Gateway 的账户/设备认证完成后增加，不与 E2EE 解锁混在一起。
+3. **MVP provider**：内部 Local Folder 和 WebDAV 不可变对象层已完成；仍需协调器、outbox、真实外部服务器兼容矩阵及断网退避测试。
+4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心和远端路径作用域已实现；仍需协调器/UI 接线和多进程/真实设备演练。
+5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
+6. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。
+7. **Provider 扩展**：SFTP、S3-compatible、Gateway 的结构化不可变适配层已完成；仍需真实 transport、协调器、协议兼容与故障矩阵，再评估 rclone 适配。
+8. **凭据 vault**：默认关闭、独立 CVK/keyslot/对象域和逐设备授权原语已完成；仍需系统钥匙串接线、轮换、恢复演练、协调器/UI 与真实设备验证。
+9. **Gateway TOTP**：只在 Gateway 的账户/设备认证完成后增加，不与 E2EE 解锁混在一起。
 
-上线前必须覆盖：两设备同时离线编辑、三设备删除复活、HLC 时钟倒退、上传中断、重复 list、S3 延迟可见、WebDAV 非原子行为、错误密码、旧 keyslot、恶意压缩载荷、对象篡改、segment 缺失、链分叉、远端整体回滚和恢复密钥导入。
+当前源码回归夹具已覆盖未知格式/AEAD 篡改/对象身份搬移、journal replay/发布终态、merge 到达顺序/截断、Local Folder 取消与截断字节，以及三个扩展 adapter 的条件创建/回读/边界。上线前仍必须覆盖：两设备同时离线编辑、三设备删除复活、HLC 时钟倒退、上传中断、重复 list、S3 延迟可见、WebDAV 非原子行为、错误密码、旧 keyslot、恶意压缩载荷、对象篡改、segment 缺失、链分叉、远端整体回滚、恢复密钥导入、真实 SFTP/S3/Gateway 服务和多设备 CVK 轮换。
