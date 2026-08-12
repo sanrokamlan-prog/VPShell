@@ -847,9 +847,8 @@ mod tests {
             Value::String(format!("key-{}", Uuid::new_v4()));
         android_refs["hosts"][0]["androidKeyPassphraseRef"] =
             Value::String(format!("key-{}", Uuid::new_v4()));
-        android_refs["hosts"][0]["hostKeySha256"] = Value::String(
-            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
-        );
+        android_refs["hosts"][0]["hostKeySha256"] =
+            Value::String("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string());
         assert!(validate_state_json(&android_refs.to_string()).is_ok());
 
         let mut secret: Value = serde_json::from_str(&fixture()).expect("fixture JSON");
