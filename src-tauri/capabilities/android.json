@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "android",
+  "description": "Android Preview only exposes the native Rust SSH/SFTP command surface",
+  "local": true,
+  "windows": ["main"],
+  "platforms": ["android"],
+  "permissions": [
+    "allow-android-preview-status",
+    "allow-android-inspect-host-key",
+    "allow-android-set-lifecycle",
+    "allow-android-connect-host",
+    "allow-android-disconnect-host",
+    "allow-android-list-remote-files",
+    "allow-android-open-terminal",
+    "allow-android-write-terminal",
+    "allow-android-read-terminal",
+    "allow-android-resize-terminal",
+    "allow-android-close-terminal",
+    "allow-android-store-credential",
+    "allow-android-delete-credential"
+  ]
+}
