@@ -4,7 +4,7 @@ All notable changes to VPShell are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/). Pre-release versions may change local data structures before the first stable release.
 
-## [0.1.0-alpha.8] - 2026-08-12
+## [0.1.0-alpha.9] - 2026-08-12
 
 ### Added
 

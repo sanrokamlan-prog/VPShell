@@ -18,7 +18,7 @@
 ![VPShell 工作台](docs/assets/workspace.png)
 
 > [!IMPORTANT]
-> `v0.1.0-alpha.8` 是 Windows-first 技术预览版。本版包含跨重启传输恢复、远程文件操作、Linux 监控、Shell Integration、配置迁移和同步协议核心预览；Android 仅为独立预览工程。端到端同步、跳板机、中继加速和 Android 真机验收仍未完成。当前版本不应作为生产密码或私钥管理器。
+> `v0.1.0-alpha.9` 是 Windows-first 技术预览版。本版包含跨重启传输恢复、远程文件操作、Linux 监控、Shell Integration、配置迁移和同步协议核心预览；Android 仅为独立预览工程。端到端同步、跳板机、中继加速和 Android 真机验收仍未完成。当前版本不应作为生产密码或私钥管理器。
 
 ## 参与 Alpha 测试
 

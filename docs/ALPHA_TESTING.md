@@ -1,11 +1,11 @@
 # VPShell Alpha 测试指南
 
-本指南适用于 `v0.1.0-alpha.8`。这是技术预览版，目标是尽快发现安装、兼容性、连接、传输和数据持久化问题，不是让测试者在生产环境替代现有 SSH 工具。
+本指南适用于 `v0.1.0-alpha.9`。这是技术预览版，目标是尽快发现安装、兼容性、连接、传输和数据持久化问题，不是让测试者在生产环境替代现有 SSH 工具。
 
 ## 1. 下载与测试边界
 
-- 只从 [VPShell GitHub Release](https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.8) 下载安装包。
-- Windows 10/11 x64 优先使用 `VPShell_0.1.0-alpha.8_x64-setup.exe`；MSI 用于需要 MSI 部署验证的场景。
+- 只从 [VPShell GitHub Release](https://github.com/sanrokamlan-prog/VPShell/releases/tag/v0.1.0-alpha.9) 下载安装包。
+- Windows 10/11 x64 优先使用 `VPShell_0.1.0-alpha.9_x64-setup.exe`；MSI 用于需要 MSI 部署验证的场景。
 - Linux x64 可测试 AppImage 或 DEB；macOS 可按 Intel/Apple Silicon 选择 DMG。
 - Windows 安装包尚无 Authenticode 签名；macOS 包尚未公证，系统可能显示未知发布者警告。
 - 请使用测试 VPS、临时目录和可丢弃文件。不要用生产主机做首次广播、脚本、密钥安装或批量传输测试。
