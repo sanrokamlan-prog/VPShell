@@ -2,14 +2,21 @@ use std::{
     collections::HashMap,
     env,
     io::{Read, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
 };
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use std::time::Duration;
 
 use base64::prelude::*;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use tokio::sync::mpsc;
 
 mod android_mobile;
 #[allow(dead_code)] // The Android shell consumes the Rust-owned SSH/SFTP transport boundary.
@@ -56,6 +63,12 @@ pub(crate) const LEGACY_CREDENTIAL_SERVICE: &str = "com.sanro.opsshell.credentia
 const ASKPASS_MODE_ENV: &str = "VPSHELL_SSH_ASKPASS";
 const ASKPASS_PASSWORD_REF_ENV: &str = "VPSHELL_SSH_CREDENTIAL_REF";
 const ASKPASS_KEY_REF_ENV: &str = "VPSHELL_SSH_KEY_PASSPHRASE_REF";
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+const NATIVE_TERMINAL_ACK_QUEUE: usize = 8;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+const NATIVE_TERMINAL_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+const NATIVE_TERMINAL_REDELIVERY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[cfg(target_os = "android")]
 fn initialize_android_keyring() -> Result<(), String> {
@@ -66,15 +79,29 @@ fn initialize_android_keyring() -> Result<(), String> {
 }
 
 struct TerminalHandle {
-    writer: Box<dyn Write + Send>,
-    master: Box<dyn MasterPty + Send>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    transport: TerminalTransport,
     integration: Arc<Mutex<shell_integration::ShellIntegrationParser>>,
+    generation: u64,
+}
+
+enum TerminalTransport {
+    OpenSsh {
+        writer: Box<dyn Write + Send>,
+        master: Box<dyn MasterPty + Send>,
+        killer: Box<dyn ChildKiller + Send + Sync>,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    Native {
+        handle: native_engine::NativeTerminalHandle,
+        acknowledgements: mpsc::Sender<u32>,
+        pending_delivery: Arc<AtomicU64>,
+    },
 }
 
 #[derive(Default)]
 struct TerminalManager {
     sessions: Arc<Mutex<HashMap<String, TerminalHandle>>>,
+    next_generation: AtomicU64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +129,8 @@ struct StartSshResponse {
 struct TerminalOutputEvent {
     session_id: String,
     data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_id: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -118,6 +147,16 @@ fn lock_sessions(
         .sessions
         .lock()
         .map_err(|_| "终端会话状态已损坏".to_string())
+}
+
+fn next_terminal_generation(manager: &TerminalManager) -> Result<u64, String> {
+    manager
+        .next_generation
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_add(1)
+        })
+        .map(|previous| previous + 1)
+        .map_err(|_| "终端会话代际已耗尽".to_string())
 }
 
 fn select_askpass_reference<'a>(
@@ -262,6 +301,256 @@ fn cancel_native_engine_operation(_operation_id: String) -> Result<(), String> {
     Err("原生桌面引擎检查在移动端预览中不可用".to_string())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+async fn start_native_terminal(
+    app: tauri::AppHandle,
+    terminals: State<'_, TerminalManager>,
+    native: State<'_, native_engine::NativeEngineManager>,
+    request: native_engine::NativeTerminalStartRequest,
+) -> Result<native_engine::NativeTerminalStartResult, native_engine::NativeEngineError> {
+    let launch = native.start_terminal(request).await?;
+    let session_id = launch.result.session_id.clone();
+    let generation = match next_terminal_generation(&terminals) {
+        Ok(generation) => generation,
+        Err(_) => {
+            launch.handle.stop();
+            return Err(native_engine::NativeEngineError::new(
+                "native-terminal-generation-exhausted",
+                "终端会话代际已耗尽",
+                false,
+            ));
+        }
+    };
+    let integration = Arc::new(Mutex::new(shell_integration::ShellIntegrationParser::new()));
+    let (acknowledgements, mut acknowledgement_receiver) =
+        mpsc::channel(NATIVE_TERMINAL_ACK_QUEUE);
+    let pending_delivery = Arc::new(AtomicU64::new(0));
+    let bridge_handle = launch.handle.clone();
+    {
+        let mut sessions = match lock_sessions(&terminals) {
+            Ok(sessions) => sessions,
+            Err(_) => {
+                launch.handle.stop();
+                return Err(native_engine::NativeEngineError::new(
+                    "native-terminal-state-corrupt",
+                    "终端会话状态已损坏",
+                    false,
+                ));
+            }
+        };
+        if sessions.contains_key(&session_id) {
+            launch.handle.stop();
+            return Err(native_engine::NativeEngineError::new(
+                "native-terminal-session-conflict",
+                "终端会话标识已经在使用",
+                false,
+            ));
+        }
+        sessions.insert(
+            session_id.clone(),
+            TerminalHandle {
+                transport: TerminalTransport::Native {
+                    handle: launch.handle,
+                    acknowledgements,
+                    pending_delivery: Arc::clone(&pending_delivery),
+                },
+                integration: Arc::clone(&integration),
+                generation,
+            },
+        );
+    }
+
+    let sessions = Arc::clone(&terminals.sessions);
+    let result = launch.result;
+    let mut events = launch.events;
+    tauri::async_runtime::spawn(async move {
+        let mut received_exit = false;
+        let mut bridge_error = "原生终端事件流异常结束";
+        let mut next_delivery_id = 0_u32;
+        'event_stream: while let Some(event) = events.recv().await {
+            match event {
+                native_engine::NativeTerminalEvent::Data(data) => {
+                    let generation_is_current = sessions
+                        .lock()
+                        .map(|sessions| {
+                            sessions
+                                .get(&session_id)
+                                .is_some_and(|session| session.generation == generation)
+                        })
+                        .unwrap_or(false);
+                    if !generation_is_current {
+                        bridge_handle.stop();
+                        break;
+                    }
+                    let (visible, updates) = integration
+                        .lock()
+                        .map(|mut parser| parser.feed(&data))
+                        .unwrap_or_else(|_| (data, Vec::new()));
+                    for (stack, warning) in updates {
+                        let _ = app.emit(
+                            "terminal-context",
+                            shell_integration::TerminalContextEvent {
+                                session_id: session_id.clone(),
+                                stack,
+                                warning,
+                            },
+                        );
+                    }
+                    if !visible.is_empty() {
+                        let delivery_id = next_delivery_id
+                            .checked_add(1)
+                            .filter(|delivery_id| *delivery_id > 0);
+                        let Some(delivery_id) = delivery_id else {
+                            bridge_error = "原生终端输出序号已耗尽";
+                            bridge_handle.stop();
+                            break;
+                        };
+                        next_delivery_id = delivery_id;
+                        pending_delivery.store(u64::from(delivery_id), Ordering::SeqCst);
+                        let output = TerminalOutputEvent {
+                            session_id: session_id.clone(),
+                            data: BASE64_STANDARD.encode(visible),
+                            delivery_id: Some(delivery_id),
+                        };
+                        if app.emit("terminal-output", output.clone()).is_err() {
+                            pending_delivery.store(0, Ordering::SeqCst);
+                            bridge_error = "原生终端输出无法发送到界面";
+                            bridge_handle.stop();
+                            break;
+                        }
+                        let acknowledged = tokio::time::timeout(
+                            NATIVE_TERMINAL_ACK_TIMEOUT,
+                            async {
+                                loop {
+                                    tokio::select! {
+                                        acknowledgement = acknowledgement_receiver.recv() => {
+                                            match acknowledgement {
+                                                Some(received) if received == delivery_id => return true,
+                                                Some(_) => continue,
+                                                None => return false,
+                                            }
+                                        }
+                                        _ = tokio::time::sleep(NATIVE_TERMINAL_REDELIVERY_INTERVAL) => {
+                                            if app.emit("terminal-output", output.clone()).is_err() {
+                                                return false;
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                        .await
+                        .unwrap_or(false);
+                        pending_delivery.store(0, Ordering::SeqCst);
+                        if !acknowledged {
+                            bridge_error = "原生终端界面未及时确认输出";
+                            bridge_handle.stop();
+                            break 'event_stream;
+                        }
+                    }
+                }
+                native_engine::NativeTerminalEvent::Exit { message } => {
+                    received_exit = true;
+                    let removed_current = sessions
+                        .lock()
+                        .map(|mut sessions| {
+                            if sessions
+                                .get(&session_id)
+                                .is_some_and(|session| session.generation == generation)
+                            {
+                                sessions.remove(&session_id);
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if removed_current {
+                        let _ = app.emit(
+                            "terminal-exit",
+                            TerminalExitEvent {
+                                session_id: session_id.clone(),
+                                message: message.map(str::to_string),
+                            },
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+        if !received_exit {
+            let removed_current = sessions
+                .lock()
+                .map(|mut sessions| {
+                    if sessions
+                        .get(&session_id)
+                        .is_some_and(|session| session.generation == generation)
+                    {
+                        sessions.remove(&session_id);
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if removed_current {
+                let _ = app.emit(
+                    "terminal-exit",
+                    TerminalExitEvent {
+                        session_id,
+                        message: Some(bridge_error.to_string()),
+                    },
+                );
+            }
+        }
+    });
+    Ok(result)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn start_native_terminal(_request: serde_json::Value) -> Result<serde_json::Value, String> {
+    Err("原生桌面终端在移动端预览中不可用".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+fn ack_native_terminal_output(
+    terminals: State<'_, TerminalManager>,
+    session_id: String,
+    delivery_id: u32,
+) -> Result<(), String> {
+    if delivery_id == 0 {
+        return Err("原生终端输出确认序号无效".to_string());
+    }
+    let sessions = lock_sessions(&terminals)?;
+    let session = sessions
+        .get(&session_id)
+        .ok_or_else(|| "终端会话不存在或已关闭".to_string())?;
+    let TerminalTransport::Native {
+        acknowledgements,
+        pending_delivery,
+        ..
+    } = &session.transport
+    else {
+        return Err("该终端不使用原生输出确认协议".to_string());
+    };
+    if pending_delivery.load(Ordering::SeqCst) != u64::from(delivery_id) {
+        return Err("原生终端输出确认序号已过期或尚未发送".to_string());
+    }
+    acknowledgements.try_send(delivery_id).map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => "原生终端输出确认队列已满".to_string(),
+        mpsc::error::TrySendError::Closed(_) => "原生终端输出确认通道已关闭".to_string(),
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn ack_native_terminal_output(_session_id: String, _delivery_id: u32) -> Result<(), String> {
+    Err("原生桌面终端输出确认在移动端预览中不可用".to_string())
+}
+
 #[tauri::command]
 fn start_ssh_session(
     app: tauri::AppHandle,
@@ -291,6 +580,7 @@ fn start_ssh_session(
     if lock_sessions(&manager)?.contains_key(&session_id) {
         return Err("该终端会话已经连接".to_string());
     }
+    let generation = next_terminal_generation(&manager)?;
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -375,21 +665,36 @@ fn start_ssh_session(
     lock_sessions(&manager)?.insert(
         session_id.clone(),
         TerminalHandle {
-            writer,
-            master: pair.master,
-            killer,
+            transport: TerminalTransport::OpenSsh {
+                writer,
+                master: pair.master,
+                killer,
+            },
             integration: Arc::clone(&integration),
+            generation,
         },
     );
 
     let output_app = app.clone();
     let output_session_id = session_id.clone();
+    let output_sessions = Arc::clone(&manager.sessions);
     thread::spawn(move || {
         let mut buffer = [0_u8; 16 * 1024];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(length) => {
+                    let generation_is_current = output_sessions
+                        .lock()
+                        .map(|sessions| {
+                            sessions
+                                .get(&output_session_id)
+                                .is_some_and(|session| session.generation == generation)
+                        })
+                        .unwrap_or(false);
+                    if !generation_is_current {
+                        break;
+                    }
                     let (visible, updates) = integration
                         .lock()
                         .map(|mut parser| parser.feed(&buffer[..length]))
@@ -410,6 +715,7 @@ fn start_ssh_session(
                             TerminalOutputEvent {
                                 session_id: output_session_id.clone(),
                                 data: BASE64_STANDARD.encode(visible),
+                                delivery_id: None,
                             },
                         );
                     }
@@ -424,16 +730,29 @@ fn start_ssh_session(
     let wait_sessions = Arc::clone(&manager.sessions);
     thread::spawn(move || {
         let exit_message = child.wait().err().map(|error| error.to_string());
-        if let Ok(mut sessions) = wait_sessions.lock() {
-            sessions.remove(&wait_session_id);
+        let removed_current = wait_sessions
+            .lock()
+            .map(|mut sessions| {
+                if sessions
+                    .get(&wait_session_id)
+                    .is_some_and(|session| session.generation == generation)
+                {
+                    sessions.remove(&wait_session_id);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if removed_current {
+            let _ = wait_app.emit(
+                "terminal-exit",
+                TerminalExitEvent {
+                    session_id: wait_session_id,
+                    message: exit_message,
+                },
+            );
         }
-        let _ = wait_app.emit(
-            "terminal-exit",
-            TerminalExitEvent {
-                session_id: wait_session_id,
-                message: exit_message,
-            },
-        );
     });
 
     Ok(StartSshResponse { session_id })
@@ -453,14 +772,20 @@ fn enable_shell_integration(
         .lock()
         .map_err(|_| "Shell Integration 状态已损坏".to_string())?
         .activation_command();
-    session
-        .writer
-        .write_all(command.as_bytes())
-        .map_err(|error| format!("写入 Shell Integration 启用命令失败: {error}"))?;
-    session
-        .writer
-        .flush()
-        .map_err(|error| format!("刷新 Shell Integration 启用命令失败: {error}"))
+    match &mut session.transport {
+        TerminalTransport::OpenSsh { writer, .. } => {
+            writer
+                .write_all(command.as_bytes())
+                .map_err(|error| format!("写入 Shell Integration 启用命令失败: {error}"))?;
+            writer
+                .flush()
+                .map_err(|error| format!("刷新 Shell Integration 启用命令失败: {error}"))
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        TerminalTransport::Native { handle, .. } => handle
+            .write(command.as_bytes())
+            .map_err(|error| error.user_message().to_string()),
+    }
 }
 
 #[tauri::command]
@@ -564,14 +889,7 @@ fn write_terminal(
     let session = sessions
         .get_mut(&session_id)
         .ok_or_else(|| "终端会话不存在或已关闭".to_string())?;
-    session
-        .writer
-        .write_all(data.as_bytes())
-        .map_err(|error| format!("终端写入失败: {error}"))?;
-    session
-        .writer
-        .flush()
-        .map_err(|error| format!("终端刷新失败: {error}"))
+    write_terminal_handle(session, data.as_bytes())
 }
 
 fn write_to_session(
@@ -583,14 +901,24 @@ fn write_to_session(
     let session = sessions
         .get_mut(session_id)
         .ok_or_else(|| "终端会话不存在或已关闭".to_string())?;
-    session
-        .writer
-        .write_all(data)
-        .map_err(|error| format!("终端写入失败: {error}"))?;
-    session
-        .writer
-        .flush()
-        .map_err(|error| format!("终端刷新失败: {error}"))
+    write_terminal_handle(session, data)
+}
+
+fn write_terminal_handle(session: &mut TerminalHandle, data: &[u8]) -> Result<(), String> {
+    match &mut session.transport {
+        TerminalTransport::OpenSsh { writer, .. } => {
+            writer
+                .write_all(data)
+                .map_err(|error| format!("终端写入失败: {error}"))?;
+            writer
+                .flush()
+                .map_err(|error| format!("终端刷新失败: {error}"))
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        TerminalTransport::Native { handle, .. } => handle
+            .write(data)
+            .map_err(|error| error.user_message().to_string()),
+    }
 }
 
 #[tauri::command]
@@ -726,15 +1054,20 @@ fn resize_terminal(
     let session = sessions
         .get(&session_id)
         .ok_or_else(|| "终端会话不存在或已关闭".to_string())?;
-    session
-        .master
-        .resize(PtySize {
-            rows: rows.max(2),
-            cols: cols.max(2),
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| format!("调整终端尺寸失败: {error}"))
+    match &session.transport {
+        TerminalTransport::OpenSsh { master, .. } => master
+            .resize(PtySize {
+                rows: rows.max(2),
+                cols: cols.max(2),
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| format!("调整终端尺寸失败: {error}")),
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        TerminalTransport::Native { handle, .. } => handle
+            .resize(cols, rows)
+            .map_err(|error| error.user_message().to_string()),
+    }
 }
 
 #[tauri::command]
@@ -743,10 +1076,16 @@ fn stop_terminal(manager: State<'_, TerminalManager>, session_id: String) -> Res
     let mut session = sessions
         .remove(&session_id)
         .ok_or_else(|| "终端会话不存在或已关闭".to_string())?;
-    session
-        .killer
-        .kill()
-        .map_err(|error| format!("关闭终端失败: {error}"))
+    match &mut session.transport {
+        TerminalTransport::OpenSsh { killer, .. } => killer
+            .kill()
+            .map_err(|error| format!("关闭终端失败: {error}")),
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        TerminalTransport::Native { handle, .. } => {
+            handle.stop();
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command]
@@ -825,6 +1164,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             native_engine_probe,
             cancel_native_engine_operation,
+            start_native_terminal,
+            ack_native_terminal_output,
             start_ssh_session,
             write_terminal,
             enable_shell_integration,
@@ -900,7 +1241,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::select_askpass_reference;
+    use super::{TerminalOutputEvent, select_askpass_reference};
 
     #[test]
     fn askpass_only_selects_secrets_for_authentication_prompts() {
@@ -928,5 +1269,24 @@ mod tests {
             select_askpass_reference("Enter passphrase for key", Some("ssh-a"), None),
             None
         );
+    }
+
+    #[test]
+    fn terminal_output_only_serializes_native_delivery_ids() {
+        let compatible = serde_json::to_value(TerminalOutputEvent {
+            session_id: "session-a".to_string(),
+            data: "b3V0cHV0".to_string(),
+            delivery_id: None,
+        })
+        .unwrap();
+        assert!(compatible.get("deliveryId").is_none());
+
+        let native = serde_json::to_value(TerminalOutputEvent {
+            session_id: "session-b".to_string(),
+            data: "b3V0cHV0".to_string(),
+            delivery_id: Some(7),
+        })
+        .unwrap();
+        assert_eq!(native["deliveryId"], 7);
     }
 }

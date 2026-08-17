@@ -124,7 +124,7 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 
 | 状态 | 验收项 |
 | --- | --- |
-| 进行中 | D1 已接通桌面 `russh`/`russh-sftp` 真实就绪检查、认证前固定 host-key、Rust-only 凭据解析、有界超时/并发、取消/代际保护和回环 OpenSSH/SFTP CI；长期终端/文件会话、每跳独立凭据/host-key、跳板和端口转发仍待实现 |
+| 进行中 | D1 已接通桌面 `russh`/`russh-sftp` 真实就绪检查和用户显式选择的长期 PTY/Shell 终端、认证前固定 host-key、Rust-only 凭据解析、xterm 输出回执、有界背压/超时/并发、取消/代际保护及回环 OpenSSH/SFTP/终端 CI；原生文件会话、每跳独立凭据/host-key、跳板和端口转发仍待实现 |
 | 待实现 | 系统 OpenSSH 兼容回退及跨引擎行为/安全测试 |
 | 待实现 | 用户自建 Relay 参考实现、认证协议、限流、审计和安全测试 |
 | 待实现 | 持续测速、可解释选路与可选 Mosh；没有真实数据不使用“加速”表述 |
@@ -158,8 +158,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-17 | C4 Android 可选系统验证与泄漏防护 | Rust 通过 `tauri-plugin-biometric` 2.3.2 直接发起系统生物识别并允许设备凭据回退，启用/关闭均需认证且开关存入 Keystore-backed 固定条目；插件 Android 实现为 `BIOMETRIC_WEAK`，不宣称强生物识别。runtime 默认 Locked，Tauri 原生窗口失焦与前端后台通知均清会话，只有 Rust unlock/设置 command 可 foreground；host-key 预检和凭据增删补齐授权/代际保护。Activity 先隐藏 WebView并使用 `FLAG_SECURE`，限定主 frame/origin 的 32-byte WebMessage 只控制 `show`/`hide`/`failed`，禁通用 JS interface、长按选择、autofill/content capture、file/content access；新增 Rust lifecycle/静态安全回归及 CI aarch64 debug APK/Gradle gate。本机 `git diff --check`、JSON/清单静态检查通过，无 Cargo/rustfmt/node_modules；真机 prompt/任务切换/截图/剪贴板/Keystore 仍外部验收 |
 | 2026-08-17 | C4 Actions 修复与完整验证 | PR #1 首轮 run `32060654557` 的 frontend 成功；四个平台因 `security_regression.rs` 一处长断言未按 rustfmt 换行而失败，Android job 因 NDK r27 缺少 `aarch64-linux-android-ranlib` 别名失败。提交 `0d62d06` 修复格式，并在 CI runner 内增加 LLVM `ar/ranlib/nm` 别名及 Cargo/cc 交叉编译变量；run `32061260435` 全绿，账本提交 `fdb1491` 后的最新 run `32062121148` 再次确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm Rust fmt-check-test、aarch64 debug APK 与 Gradle unit gate 全部 `COMPLETED/SUCCESS`。 |
 | 2026-08-17 | D1 原生 SSH/SFTP 就绪路径（首轮 Actions） | 提交 `a38aebc` 新增精确锁定 `russh` 0.62.7/`russh-sftp` 2.4.0 的桌面真实 SSH/SFTP probe；具名 IPC 严格限制主机/用户/路径/超时与最多 8 个操作，Rust 从本机引用解析秘密，认证前强制匹配已验证的 SHA256 host-key，支持取消和代际清理，结果不含值。前端仅对已信任主机显式触发；Android capability 明确排除该命令。Linux Actions 使用回环 OpenSSH、临时无口令 Ed25519 用户密钥并实际启动 SFTP。PR #1 run `32065782573` 中 frontend 成功，四个平台 `cargo check`/`cargo test`（含 Linux 真实 fixture）全部成功，Android aarch64 debug APK 与 Gradle unit gate 成功；Rust jobs 仅因 formatter 差异失败，五个原生 jobs 均按预期被 runner 锁差异门禁置为失败。 |
-| 2026-08-17 | D1 锁文件与格式修复（待 Actions） | 从 Ubuntu job `95497436409` 的正式日志机械应用一致的 `Cargo.lock` 差异（`1b4d9f8` -> `cd05ea6`），核对 `russh`/`russh-sftp` 版本与 crates.io checksum；严格应用 runner 给出的 `rustfmt` 差异。移除一次性 unlocked metadata bootstrap 与差异门禁，四个平台恢复 `cargo fmt --check`、`cargo check --locked`、`cargo test --locked`，Android 在构建前增加 `cargo metadata --locked`。VPS 未下载或运行 Cargo 工具链；本轮只做静态轻量检查，须等待后续 run 全绿。 |
+| 2026-08-17 | D1 锁文件与格式修复（Actions 完成） | 提交 `ad9251a` 从 Ubuntu job `95497436409` 的正式日志机械应用一致的 `Cargo.lock` 差异（`1b4d9f8` -> `cd05ea6`），核对 `russh`/`russh-sftp` 版本与 crates.io checksum；严格应用 runner 给出的 `rustfmt` 差异。移除一次性 unlocked metadata bootstrap 与差异门禁，四个平台恢复 locked fmt/check/test，Android 在构建前校验 committed lock。PR #1 run `32066910846` 的 frontend、Ubuntu/Windows/macOS Intel/macOS arm Rust、Linux 真实 OpenSSH/SFTP、Android aarch64 debug APK 与 Gradle unit gate 全部 `COMPLETED/SUCCESS`。 |
+| 2026-08-17 | D1 长期原生终端（待 Actions） | 新增用户显式、逐标签选择的 `russh` 长期 PTY/Shell 会话，系统 OpenSSH 保持默认。连接复用 probe 的认证前 SHA256 host-key pin 与 Rust-only 凭据解析；最多 16 会话、64 项输入/输出队列、64 KiB 单次输入、2–1000 行列、5–60 秒启动超时，PTY/Shell 确认后才返回成功。读写任务分离；原生输出带单调 delivery ID，xterm 解析后回执，Rust 在回执前不抽取下一批事件并重投同一编号，前端去重且所有标签保留消费者，30 秒未确认即关闭，使有界队列和 SSH window 形成端到端背压。连接中取消、resize、输出/退出和双层代际清理已接线，连接中的标签不能被移除为孤儿会话。原生 handle 复用现有终端输入、Composer、安全广播、Shell Integration、密钥安装、resize/stop 和 output/exit/context 事件；Android capability 排除 start/ack commands。单测覆盖输入/输出队列上限和序列化边界，Linux 回环测试实际打开终端、调整尺寸、收发标记字节并取消；本机 `git diff --check`、JSON、72-command 清单/handler/capability 分离检查通过，根分区 44%，无 Cargo/rustfmt/node_modules，等待 Actions 验证。 |
 
 ## 下一个动作
 
-等待 D1 锁文件/格式修复提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则先定位并修复。全绿后才继续把原生引擎扩展为长期终端/SFTP 会话，再分项接通每跳独立凭据/host-key、跳板与端口转发。C4 真机泄漏矩阵保持外部验收；Android Sync capability 继续 disabled。
+等待 D1 长期原生终端提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则先定位并修复。全绿后继续接通同一原生连接拥有的长期 SFTP 文件会话，再分项实现每跳独立凭据/host-key、跳板与端口转发。C4 真机泄漏矩阵保持外部验收；Android Sync capability 继续 disabled。

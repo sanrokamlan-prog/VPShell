@@ -181,6 +181,12 @@ interface NativeEngineProbeResult {
   sftpReady: boolean;
 }
 
+interface NativeTerminalStartResult {
+  schemaVersion: number;
+  engine: "russh";
+  sessionId: string;
+}
+
 interface NativeEngineErrorPayload {
   code?: string;
   message?: string;
@@ -271,6 +277,7 @@ function makeSession(host: HostProfile): TerminalSession {
     hostId: host.id,
     title: host.name,
     state: "idle",
+    engine: "openssh",
     currentPath: host.lastPath ?? "~",
     contextSource: "profile",
     contextStack: [],
@@ -400,6 +407,7 @@ function App() {
   const [androidSecurityStatus, setAndroidSecurityStatus] = useState<AndroidSecurityStatus | null>(null);
   const [nativeProbeInspecting, setNativeProbeInspecting] = useState(false);
   const [nativeProbeOperationId, setNativeProbeOperationId] = useState<string | null>(null);
+  const [nativeTerminalStartingIds, setNativeTerminalStartingIds] = useState<string[]>([]);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
@@ -755,6 +763,16 @@ function App() {
 
   function closeSession(sessionId: string) {
     const closing = sessions.find((session) => session.id === sessionId);
+    if (closing?.state === "connecting") {
+      if (closing.engine === "russh" && nativeTerminalStartingIds.includes(sessionId)) {
+        void invoke("cancel_native_engine_operation", { operationId: sessionId })
+          .then(() => showToast("正在取消原生终端连接"))
+          .catch((error) => showToast(invokeErrorMessage(error)));
+      } else {
+        showToast("连接准备完成前不能关闭标签");
+      }
+      return;
+    }
     if (closing?.state === "connected" && isAndroidRuntime()) {
       void invoke("android_disconnect_host", { sessionId }).catch(() => undefined);
       setAndroidTerminalIds((current) => {
@@ -774,7 +792,7 @@ function App() {
     setBroadcastTargets((current) => current.filter((id) => id !== sessionId));
   }
 
-  async function startSshSession(session: TerminalSession, host: HostProfile) {
+  async function startSshSession(session: TerminalSession, host: HostProfile, hostKeySha256?: string) {
     if (isAndroidRuntime()) {
       const credentialRef = host.androidKeyRef ?? host.credentialRef;
       if (!credentialRef || !host.hostKeySha256) {
@@ -822,19 +840,51 @@ function App() {
       (key) => key.privateKeyPath === host.identityFile,
     )?.passphraseRef;
     updateSession(session.id, { state: "connecting" });
-    await invoke("start_ssh_session", {
-      request: {
-        sessionId: session.id,
-        host: host.host,
-        port: host.port,
-        username: host.username,
-        identityFile: host.identityFile,
-        credentialRef: host.credentialRef,
-        identityPassphraseRef,
-        cols: 120,
-        rows: 32,
-      },
-    });
+    if (session.engine === "russh") {
+      if (!hostKeySha256) throw new Error("原生终端需要已验证的 SHA256 主机指纹");
+      if (!host.identityFile && !host.credentialRef) {
+        throw new Error("原生终端目前需要已保存的密码或显式私钥；可切回 OpenSSH 使用 agent 等兼容认证");
+      }
+      setNativeTerminalStartingIds((current) => current.includes(session.id) ? current : [...current, session.id]);
+      let result: NativeTerminalStartResult;
+      try {
+        result = await invoke<NativeTerminalStartResult>("start_native_terminal", {
+          request: {
+            sessionId: session.id,
+            host: host.host,
+            port: host.port,
+            username: host.username,
+            hostKeySha256,
+            timeoutSeconds: 15,
+            credentialRef: host.identityFile ? undefined : host.credentialRef,
+            identityFile: host.identityFile,
+            identityPassphraseRef,
+            cols: 120,
+            rows: 32,
+          },
+        });
+      } finally {
+        setNativeTerminalStartingIds((current) => current.filter((sessionId) => sessionId !== session.id));
+      }
+      if (result.schemaVersion !== 1 || result.engine !== "russh" || result.sessionId !== session.id) {
+        await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+        throw new Error("原生终端返回了不受支持的会话结果");
+      }
+    } else {
+      await invoke("start_ssh_session", {
+        request: {
+          sessionId: session.id,
+          host: host.host,
+          port: host.port,
+          username: host.username,
+          identityFile: host.identityFile,
+          credentialRef: host.credentialRef,
+          identityPassphraseRef,
+          cols: 120,
+          rows: 32,
+        },
+      });
+    }
     updateSession(session.id, { state: "connected" });
     setAppState((current) => ({
       ...current,
@@ -845,7 +895,7 @@ function App() {
         path: session.currentPath,
       }, ...(current.connectionHistory ?? [])],
     }));
-    showToast(`已连接 ${host.name}`);
+    showToast(`已通过 ${session.engine === "russh" ? "原生 russh" : "OpenSSH"} 连接 ${host.name}`);
   }
 
   async function connectActiveSession() {
@@ -886,10 +936,10 @@ function App() {
       if (inspection.status !== "verified") {
         throw new Error("无法验证 SSH 主机指纹，已拒绝连接");
       }
-      await startSshSession(activeSession, activeHost);
+      await startSshSession(activeSession, activeHost, inspection.fingerprint);
     } catch (error) {
       updateSession(activeSession.id, { state: "error" });
-      showToast(String(error));
+      showToast(invokeErrorMessage(error));
     }
   }
 
@@ -905,6 +955,16 @@ function App() {
       await invoke("stop_terminal", { sessionId: activeSession.id }).catch((error) => showToast(String(error)));
     }
     updateSession(activeSession.id, { state: "closed" });
+  }
+
+  async function cancelNativeTerminalStart() {
+    if (!nativeTerminalStartingIds.includes(activeSession.id)) return;
+    try {
+      await invoke("cancel_native_engine_operation", { operationId: activeSession.id });
+      showToast("正在取消原生终端连接");
+    } catch (error) {
+      showToast(invokeErrorMessage(error));
+    }
   }
 
   async function probeNativeEngine() {
@@ -997,10 +1057,11 @@ function App() {
       await startSshSession(
         session,
         isAndroidRuntime() ? { ...host, hostKeySha256: pending.fingerprint } : host,
+        pending.fingerprint,
       );
     } catch (error) {
       updateSession(pending.sessionId, { state: "error" });
-      showToast(String(error));
+      showToast(invokeErrorMessage(error));
     } finally {
       setTrustingHostKey(false);
     }
@@ -1770,12 +1831,44 @@ function App() {
                 <Braces size={13} /> 识别当前 Shell
               </button>
             ) : null}
+            {hasActiveHost && isDesktopRuntime() && activeSession.state !== "connected" ? (
+              <div className="engine-selector" role="group" aria-label="SSH 引擎">
+                <button
+                  className={activeSession.engine === "openssh" ? "active" : ""}
+                  type="button"
+                  title="系统 OpenSSH 兼容引擎"
+                  disabled={activeSession.state === "connecting"}
+                  onClick={() => updateSession(activeSession.id, { engine: "openssh" })}
+                >
+                  <SquareTerminal size={12} /> OpenSSH
+                </button>
+                <button
+                  className={activeSession.engine === "russh" ? "active" : ""}
+                  type="button"
+                  title="原生 russh 引擎"
+                  disabled={activeSession.state === "connecting"}
+                  onClick={() => updateSession(activeSession.id, { engine: "russh" })}
+                >
+                  <ShieldCheck size={12} /> 原生
+                </button>
+              </div>
+            ) : null}
             {hasActiveHost ? <span>{activeHost.latency ? `${activeHost.latency} ms` : "未测速"}</span> : null}
             {activeSession.state === "connected" ? (
               <button className="disconnect-button" type="button" onClick={disconnectActiveSession}><WifiOff size={14} /> 断开</button>
             ) : (
-              <button className="connect-button" type="button" disabled={activeSession.state === "connecting"} onClick={connectActiveSession}>
-                {activeSession.state === "connecting" ? <RefreshCw className="spin" size={14} /> : <Play size={14} />} {activeSession.state === "connecting" ? "连接中" : "连接"}
+              <button
+                className="connect-button"
+                type="button"
+                disabled={activeSession.state === "connecting" && !nativeTerminalStartingIds.includes(activeSession.id)}
+                onClick={() => activeSession.state === "connecting" && nativeTerminalStartingIds.includes(activeSession.id)
+                  ? void cancelNativeTerminalStart()
+                  : void connectActiveSession()}
+              >
+                {activeSession.state === "connecting"
+                  ? nativeTerminalStartingIds.includes(activeSession.id) ? <X size={14} /> : <RefreshCw className="spin" size={14} />
+                  : <Play size={14} />}
+                {activeSession.state === "connecting" ? nativeTerminalStartingIds.includes(activeSession.id) ? "取消连接" : "连接中" : "连接"}
               </button>
             )}
           </div>
@@ -1844,16 +1937,29 @@ function App() {
 
         <div className="content-split">
           <section className="terminal-pane">
-            <TerminalView
-              session={activeSession}
-              host={activeHost}
-              wallpaper={{ ...appState.wallpaper, value: renderedWallpaper }}
-              appearance={appState.terminalAppearance}
-              appearanceRevision={fontRevision}
-              androidTerminalId={androidTerminalIds[activeSession.id]}
-              onDisconnected={handleDisconnected}
-              onContextChanged={handleContextChanged}
-            />
+            <div className="terminal-stack">
+              {sessions.map((session) => {
+                const host = appState.hosts.find((candidate) => candidate.id === session.hostId) ?? emptyHost;
+                return (
+                  <div
+                    className={`terminal-session-view ${session.id === activeSession.id ? "active" : ""}`}
+                    aria-hidden={session.id !== activeSession.id}
+                    key={session.id}
+                  >
+                    <TerminalView
+                      session={session}
+                      host={host}
+                      wallpaper={{ ...appState.wallpaper, value: renderedWallpaper }}
+                      appearance={appState.terminalAppearance}
+                      appearanceRevision={fontRevision}
+                      androidTerminalId={androidTerminalIds[session.id]}
+                      onDisconnected={handleDisconnected}
+                      onContextChanged={handleContextChanged}
+                    />
+                  </div>
+                );
+              })}
+            </div>
             <div className="path-history-bar">
               <Clock3 size={14} />
               <span>路径</span>
@@ -1920,7 +2026,7 @@ function App() {
         </div>
 
         <footer className="statusbar">
-          <span><SquareTerminal size={13} /> {isAndroidRuntime() ? "Rust libssh2 移动引擎" : "OpenSSH 兼容引擎"}</span>
+          <span><SquareTerminal size={13} /> {isAndroidRuntime() ? "Rust libssh2 移动引擎" : activeSession.engine === "russh" ? "Rust russh 原生引擎" : "OpenSSH 兼容引擎"}</span>
           <span><Database size={13} /> SQLite {appStoreStatus.saving ? "保存中" : appStoreStatus.ready ? "已同步" : "初始化失败"}</span>
           <span className="status-spacer" />
           <span>UTF-8</span><span>xterm-256color</span><span>{activeSession.currentPath}</span>

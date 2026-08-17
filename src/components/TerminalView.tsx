@@ -24,6 +24,7 @@ interface TerminalViewProps {
 interface TerminalOutputEvent {
   sessionId: string;
   data: string;
+  deliveryId?: number;
 }
 
 interface TerminalExitEvent {
@@ -66,7 +67,7 @@ function welcomeText(host: HostProfile) {
     `Profile: ${host.name}  ${host.username}@${host.host}:${host.port}`,
     `Route: local > ${host.host}`,
     "",
-    "This preview is offline. Choose Connect to start the system OpenSSH session.",
+    "This preview is offline. Connect to start the selected SSH engine.",
     "",
     `\x1b[38;2;121;208;149m${host.username}@${host.name.toLowerCase().split(" ").join("-")}\x1b[0m:\x1b[38;2;100;165;230m${host.lastPath ?? "~"}\x1b[0m$ `,
   ].join("\r\n");
@@ -77,9 +78,14 @@ export function TerminalView({ session, host, wallpaper, appearance, appearanceR
   const connectionStateRef = useRef(session.state);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const nativeDeliveryRef = useRef({ last: 0, pending: new Set<number>() });
 
   useEffect(() => {
     connectionStateRef.current = session.state;
+    if (session.state === "connecting") {
+      nativeDeliveryRef.current.last = 0;
+      nativeDeliveryRef.current.pending.clear();
+    }
   }, [session.state]);
 
   useEffect(() => {
@@ -211,22 +217,65 @@ export function TerminalView({ session, host, wallpaper, appearance, appearanceR
     } else if ("__TAURI_INTERNALS__" in window) {
       void import("@tauri-apps/api/event").then(async ({ listen }) => {
         if (disposed) return;
-        stopOutputListener = await listen<TerminalOutputEvent>("terminal-output", (event) => {
+        const outputListener = await listen<TerminalOutputEvent>("terminal-output", (event) => {
           if (event.payload.sessionId === session.id) {
-            terminal.write(decodeBase64(event.payload.data));
+            const deliveryId = event.payload.deliveryId;
+            if (deliveryId !== undefined) {
+              if (deliveryId <= nativeDeliveryRef.current.last) {
+                void invoke("ack_native_terminal_output", {
+                  sessionId: session.id,
+                  deliveryId,
+                }).catch(() => undefined);
+                return;
+              }
+              if (nativeDeliveryRef.current.pending.has(deliveryId)) return;
+              nativeDeliveryRef.current.pending.add(deliveryId);
+            }
+            terminal.write(decodeBase64(event.payload.data), () => {
+              if (deliveryId === undefined) return;
+              nativeDeliveryRef.current.pending.delete(deliveryId);
+              nativeDeliveryRef.current.last = Math.max(nativeDeliveryRef.current.last, deliveryId);
+              void invoke("ack_native_terminal_output", {
+                sessionId: session.id,
+                deliveryId,
+              }).catch(() => undefined);
+            });
           }
         });
-        stopExitListener = await listen<TerminalExitEvent>("terminal-exit", (event) => {
+        if (disposed) {
+          outputListener();
+          return;
+        }
+        stopOutputListener = outputListener;
+        const exitListener = await listen<TerminalExitEvent>("terminal-exit", (event) => {
           if (event.payload.sessionId === session.id) {
             terminal.write("\r\n\x1b[38;2;239;125;120m[连接已关闭]\x1b[0m\r\n");
             onDisconnected(session.id, event.payload.message);
           }
         });
-        stopContextListener = await listen<TerminalContextEvent>("terminal-context", (event) => {
+        if (disposed) {
+          exitListener();
+          stopOutputListener?.();
+          stopOutputListener = undefined;
+          return;
+        }
+        stopExitListener = exitListener;
+        const contextListener = await listen<TerminalContextEvent>("terminal-context", (event) => {
           if (event.payload.sessionId === session.id) {
             onContextChanged(session.id, event.payload.stack, event.payload.warning);
           }
         });
+        if (disposed) {
+          contextListener();
+          stopOutputListener?.();
+          stopExitListener?.();
+          stopOutputListener = undefined;
+          stopExitListener = undefined;
+          return;
+        }
+        stopContextListener = contextListener;
+      }).catch((error) => {
+        if (!disposed) onDisconnected(session.id, String(error));
       });
     }
 

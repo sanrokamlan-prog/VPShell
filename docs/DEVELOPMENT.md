@@ -254,13 +254,14 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - Android aarch64 首次构建要求 NDK 27；`ssh2` 仅在 `target_os = "android"` 时启用 `vendored-openssl`，使 libssh2/OpenSSL 用目标 NDK 编译而不是错误链接主机 OpenSSL，桌面目标继续使用原有系统链接。该 feature 增加 Android 原生冷构建时间与包体积，但不增加运行时权限；许可证和删除方案记录在 `THIRD_PARTY_NOTICES.md`。
 - Android 凭据使用 `android-native-keyring-store`/`keyring-core` 明确注册 Keystore-backed store，访问门开关使用独立固定条目。凭据写入请求只允许反序列化且不得派生 `Debug`/`Serialize`；业务状态只保存 `ssh-<UUID>`/`key-<UUID>` 引用。私钥正文最多 1 MiB，密码/口令最多 16 KiB，错误不能包含底层秘密。`tauri-plugin-biometric` 2.3.2/其 AndroidX 传递依赖只是应用访问门，不得描述为强生物识别保证、逐凭据硬件认证或替代真机 Keystore 验收。
 
-### 10.11 russh 原生就绪路径（Phase D）
+### 10.11 russh 原生终端路径（Phase D）
 
 - 桌面目标精确锁定 `russh = 0.62.7`（上游 tag commit `a3766cca2223f851df786e88f823ea08dabfbdea`，crates.io SHA-256 `9decb68e4e44e1079700e54f17c8f23806ec53d7e0db73ab1c71d9dabc666812`）和 `russh-sftp = 2.4.0`（上游 2.4 版本线 commit `e145c1f7ece99f41f558949ef59731f2cd1a9dfe`，crates.io SHA-256 `9de67aace74530a29086db0671fa200c470a58eb380081f28ad512ffb0c5356b`）；两者均为 Apache-2.0。只使用公开 API，没有复制上游源码。
 - `russh` 关闭默认 feature，只启用 `ring` 加密后端和 RSA 密钥支持；不引入默认 `aws-lc-rs` 或压缩面。client config 从默认 host-key 列表删除 `ssh-rsa`，RSA 用户认证也只有服务器明确报告 RSA SHA-2 时才继续，禁止构造器退回 SHA-1。选择 0.62.7 是为了包含 0.62.4 起的全零 Curve25519 共享秘密修复、0.60.3 起的恶意数据包分配修复和 0.62.7 的解压边界修复。Tokio/tokio-util 精确对齐现有锁图的 1.53.1/0.7.19，新增能力只在 Linux/macOS/Windows 编译。
 - 运行权限只有目标 SSH 网络、本机只读私钥和既有系统凭据引用；没有遥测、shell 子进程、任意命令或新增 Android capability。具名请求不可序列化/调试，私钥/密码使用可清零容器，错误和结果不携带底层库文本、credential reference 或秘密值。
-- Linux CI 启动仅监听回环的临时 OpenSSH，禁用密码、交互认证和 root，使用一次性 Ed25519 用户密钥，实际完成 host-key pin、公钥认证和 SFTP `canonicalize`。其他平台负责编译/单测；真实多版本服务器、长期 PTY、网络故障和性能仍是后续兼容矩阵。
-- 当前入口只是可取消的就绪检查，不能替代默认系统 OpenSSH 会话。删除方案是移除桌面 capability、`native_engine.rs` 和两项依赖；升级或扩大用途前必须先通过锁文件、四平台编译、真实 OpenSSH/SFTP 和安全回归，并保留系统 OpenSSH 回退。
+- 长期终端最多 16 个，PTY 行列限制 2–1000，单次输入最多 64 KiB；读写任务分离，各使用 64 项有界队列。每批原生输出必须携带非零单调 `deliveryId`，xterm 解析回调再调用 `ack_native_terminal_output`；Rust 在回执前暂停事件桥，并以同一编号重投直到确认或 30 秒 fail closed。前端必须去重，同一连接重启时清空编号状态；各标签的终端实例在后台保持挂载，只用 `visibility` 隐藏，不能因切换标签卸载消费者。这样队列和 SSH window 才能对慢消费者形成背压而不丢弃终端字节。该确认 command 只在桌面 capability 中，不能携带输出或秘密。连接中可按 session UUID 取消，PTY/Shell 明确确认后才登记成功；输出、退出、取消和异常事件只按匹配代际处理，复用标签不会被迟到任务移除或误报退出。
+- Linux CI 启动仅监听回环的临时 OpenSSH，禁用密码、交互认证和 root，使用一次性 Ed25519 用户密钥，实际完成 host-key pin、公钥认证、SFTP `canonicalize`，并打开 PTY、调整尺寸、验证双向终端字节和取消。其他平台负责编译/单测；真实多版本服务器、长时间流控、网络故障和性能仍是后续兼容矩阵。
+- 系统 OpenSSH 仍为默认，只有用户对未连接标签显式选择 `russh` 才启用长期原生终端；FIDO/U2F、agent、PKCS#11、GSSAPI、Pageant 等未覆盖认证继续使用兼容引擎。文件面板尚未复用该连接。删除方案是移除两个桌面原生终端 capability、`native_engine.rs` 和两项依赖；升级或扩大用途前必须通过锁文件、四平台编译、真实 OpenSSH/SFTP/PTY 和安全回归，并保留系统 OpenSSH 回退。
 
 ### 10.9 B8 协议回归矩阵（v0.3 工作树）
 

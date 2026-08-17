@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            70,
+            72,
             "command manifest contains duplicates or changed count"
         );
 
@@ -160,6 +160,8 @@ mod tests {
             "allow-sync-acknowledge-reconciliation",
             "allow-native-engine-probe",
             "allow-cancel-native-engine-operation",
+            "allow-start-native-terminal",
+            "allow-ack-native-terminal-output",
         ] {
             assert!(!android_permissions.contains(forbidden));
         }
@@ -173,6 +175,12 @@ mod tests {
                 .iter()
                 .any(|permission| permission.starts_with("biometric:"))
         );
+
+        let terminal = include_str!("../../src/components/TerminalView.tsx");
+        assert!(terminal.contains("ack_native_terminal_output"));
+        assert!(terminal.contains("deliveryId <= nativeDeliveryRef.current.last"));
+        assert!(terminal.contains("nativeDeliveryRef.current.pending.has(deliveryId)"));
+        assert!(include_str!("../../src/App.tsx").contains("sessions.map((session)"));
     }
 
     #[test]

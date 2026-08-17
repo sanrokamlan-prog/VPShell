@@ -27,6 +27,7 @@ export interface TerminalSession {
   hostId: string;
   title: string;
   state: ConnectionState;
+  engine: "openssh" | "russh";
   currentPath: string;
   reportedHostname?: string;
   contextSource: "profile" | "shell-integration";

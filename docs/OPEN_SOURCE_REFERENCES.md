@@ -34,7 +34,7 @@ Actual third-party code used or adapted by VPShell is listed separately in
 | [ssh2-rs](https://github.com/alexcrichton/ssh2-rs), libssh2 and OpenSSL | MIT or Apache-2.0 / BSD-style / Apache-2.0 | Android-compatible SSH/SFTP transport without a system executable | Existing dependency used through public APIs; vendored OpenSSL only enables NDK cross-compilation; no copied source |
 | [android-native-keyring-store](https://github.com/open-source-cooperative/android-native-keyring-store) and keyring-core | MIT or Apache-2.0 | Android Keystore-backed opaque credential references | Dependencies used through public APIs; no copied source; platform scope and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
 | [Tauri Biometric plugin](https://github.com/tauri-apps/plugins-workspace/tree/db9c5998feff9384f9cbbefcbe0d45937c00a1fc/plugins/biometric) and AndroidX Biometric | MIT or Apache-2.0 / Apache-2.0 | Rust-owned system biometric/device-credential prompt and capability checks | Plugin 2.3.2 used through its public Rust API; AndroidX is transitive; no source copied; access-gate and removal boundaries recorded in `THIRD_PARTY_NOTICES.md` |
-| [russh](https://github.com/Eugeny/russh/tree/a3766cca2223f851df786e88f823ea08dabfbdea) and [russh-sftp](https://github.com/AspectUnk/russh-sftp/tree/e145c1f7ece99f41f558949ef59731f2cd1a9dfe) | Apache-2.0 / Apache-2.0 | Pure Rust desktop SSH handshake/authentication, mandatory host-key callback and SFTP subsystem over the SSH channel | Exact 0.62.7/2.4.0 dependencies used through public APIs; no source copied; initial scope is an explicit bounded readiness probe, not the default terminal engine |
+| [russh](https://github.com/Eugeny/russh/tree/a3766cca2223f851df786e88f823ea08dabfbdea) and [russh-sftp](https://github.com/AspectUnk/russh-sftp/tree/e145c1f7ece99f41f558949ef59731f2cd1a9dfe) | Apache-2.0 / Apache-2.0 | Pure Rust desktop SSH handshake/authentication, mandatory host-key callback, PTY/Shell channels and SFTP subsystem | Exact 0.62.7/2.4.0 dependencies used through public APIs; no source copied; scope is an explicit bounded probe plus opt-in terminal, while system OpenSSH remains the default |
 | [MaidKit](https://github.com/Solsynth/MaidKit/tree/eaf4922072960158f04021ed866323e6c17209cd) | AGPL-3.0 | SSH-only non-intrusive management, dual-pane SFTP, services/containers/databases, jump/forwarding, audit, scripts and explicit agent action approval | Behavior and product decomposition reference only; no source, assets, text or implementation copied/adapted into Apache-2.0 VPShell |
 
 ## Adopted decisions
@@ -92,4 +92,6 @@ inventory and per-item partial results. No reviewed project's file-manager code 
 - 2026-08-17: Reviewed russh 0.62.7 at tag commit
   `a3766cca2223f851df786e88f823ea08dabfbdea` and russh-sftp 2.4.0 at commit
   `e145c1f7ece99f41f558949ef59731f2cd1a9dfe`; the Apache-2.0 crates are used only through public
-  APIs for the independently implemented bounded desktop readiness path, with no copied source.
+  APIs for the independently implemented bounded desktop readiness and terminal paths. For the terminal
+  expansion, only russh's public interactive-client example and channel/client API signatures at that
+  exact commit were rechecked; no implementation, text, test fixture or asset was copied.
