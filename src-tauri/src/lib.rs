@@ -29,6 +29,8 @@ mod remote_monitor;
 mod safe_broadcast;
 mod security_regression;
 mod shell_integration;
+#[allow(dead_code)] // Product setup currently exposes only the Android value-free status view.
+mod sync_coordinator;
 #[allow(dead_code)] // The coordinator/UI phases consume this opt-in credential vault API.
 mod sync_credential_vault;
 #[allow(dead_code)] // The coordinator/provider phases consume this bounded crypto API.
@@ -765,6 +767,9 @@ pub fn run() {
             app.manage(local_assets::LocalAssetManager::load(
                 app_data_directory.clone(),
             )?);
+            app.manage(sync_coordinator::SyncCoordinatorManager::open(
+                app_data_directory.clone(),
+            )?);
             app.manage(transfer_manager::TransferManager::load(app_data_directory));
             Ok(())
         })
@@ -825,6 +830,7 @@ pub fn run() {
             remote_monitor::set_remote_monitor_interval,
             remote_monitor::stop_remote_monitor,
             android_mobile::android_preview_status,
+            android_mobile::android_sync_status,
             android_mobile::android_inspect_host_key,
             android_mobile::android_set_lifecycle,
             android_mobile::android_connect_host,

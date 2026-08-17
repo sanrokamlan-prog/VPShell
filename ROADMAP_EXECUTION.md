@@ -1,6 +1,6 @@
 # VPShell 路线图执行账本
 
-更新时间：2026-08-10（UTC）
+更新时间：2026-08-17（UTC）
 
 本文件记录 `/root/projects/vpshell/VPShell` 未提交工作树中路线图实现的真实状态。它不是发布说明，也不能替代代码、测试、平台验收或安全审计。
 
@@ -106,7 +106,7 @@
 | 完成 | SFTP、S3-compatible、自建 Gateway 结构化 provider；TOTP 仅保护 Gateway 登录 |
 | 完成 | 篡改、重放、冲突、断网、截断、升级、恢复失败和真实 provider 测试报告 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归已完成，但真实外部 provider、多设备、协调器和用户界面仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归已完成，Rust 协调器内核也已接通 outbox/provider/merge；但产品配置与自动触发、真实外部 provider、多设备和完整用户界面仍未完成。
 
 ## Phase C：Android Preview
 
@@ -114,7 +114,7 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | --- | --- |
 | 完成 | 基于共享桌面模型/同步协议建立 Rust `android_preview` 模块、Tauri Android 壳与明确移动能力边界；设备仍需外部验收 |
 | 完成 | 使用 Rust `ssh2`/libssh2 兼容 transport、固定 host-key 与有界 SFTP，不依赖系统 `ssh`；真实 Android/arm64/服务器兼容仍外部验收 |
-| 进行中 | 主机连接、终端、只读 SFTP 浏览与密码/私钥已接线；同步协调器尚未接线，因此 manifest 明确禁用 Sync |
+| 进行中 | 主机连接、终端、只读 SFTP 浏览与密码/私钥已接线；Rust-owned 同步协调器已接通 provider/outbox/merge，Android 只读展示恢复/冲突/队列状态且 manifest 继续禁用 Sync；代码与测试已完成，等待本提交 GitHub Actions 验证 |
 | 完成 | Android capability 排除广播、外部编辑、常驻监控、后台长连接和桌面 process/updater/dialog；非前台清理连接 |
 | 进行中 | Android Keystore store、私钥导入、禁备份/明文网络/FileProvider 与 `FLAG_SECURE` 已实现；可选生物识别和真机泄漏测试待实现/外部验收 |
 | 完成 | Linux VPS 生成并哈希校验 aarch64 debug APK/AAB；Rust/security tests 与 Gradle unit gate 按可用范围执行，emulator/instrumentation 留作外部验收 |
@@ -154,7 +154,8 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-10 | B8 跨模块协议回归与测试报告 | `sync_protocol_regression::tests` 3/3，覆盖未知 envelope 版本、错误密钥/AEAD、对象身份搬移、journal 同 key/同身份 replay、published finality、merge 双到达顺序/截断状态、Local Folder 截断字节/取消；叠加三类 adapter/crypto/recovery/outbox/merge 全套夹具；`npm ci`（0 vulnerabilities）、生产前端构建、Rust fmt check、`cargo check --locked`、完整 Rust tests 151/151、`git diff --check`、基线 HEAD 与空 remote 全部通过；真实 OpenSSH SFTP、MinIO/S3、Gateway HTTP、两台以上设备和 Windows/macOS/Android 外部验收仍待外部环境 |
 | 2026-08-10 | C1 Android Preview 共享契约 | `android_preview::tests` 4/4；schema-v1 能力清单与 NativeRustSshSftp 固定、最多 8 会话、结构化 host/user/port 与不透明 credential reference 验证、后台/锁定/断开代际门禁和明确禁用能力通过；后续 Android 壳现已生成，设备生命周期仍待外部环境 |
 | 2026-08-10 | C2 Android Rust SSH/SFTP transport 边界 | `android_native_transport::tests` 4/4；`ssh2`/libssh2 直接 Rust 会话、5–60 秒超时、固定 SHA-256 host-key 先验、Zeroizing 密码/内存私钥类型、有界绝对 SFTP 路径与无系统 `ssh` 静态边界通过；未新增依赖；真实 SSH 算法/权限、Android arm64 链接、断网与设备测试仍待外部环境 |
+| 2026-08-17 | C3 同步协调器与 Android 只读状态（待 Actions） | 新增 `sync_coordinator` 与 7 个聚焦测试，接通 vault-scoped outbox claim、不可变 provider push/pull、AEAD 后 merge、冲突计数、恢复阻止、取消和代际状态；Tauri setup 持有协调器，Android capability 只增加 value-free `android_sync_status`，无 attach/run/ack 写权限且 Sync manifest 保持 disabled；本机 `git diff --check` 通过，VPS 无 cargo/rustfmt/node_modules，完整 fmt/check/test/frontend build 等待 GitHub Actions |
 
 ## 下一个动作
 
-继续 Phase C 第三项中唯一未完成的同步部分：先接通 Rust-owned 同步协调器及恢复/冲突状态，再由 Android 仅展示状态；在此之前保持 Android manifest 的 Sync capability 为 disabled。
+等待 C3 提交的 GitHub Actions 全绿；通过后把该项改为完成，并进入 Phase C 的可选生物识别与泄漏防护。自动同步配置、密钥解锁与真实 provider 尚未形成安全完整能力，Android manifest 的 Sync capability 继续保持 disabled。

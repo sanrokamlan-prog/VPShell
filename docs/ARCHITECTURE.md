@@ -248,7 +248,7 @@ v0.2 工作树只开放 Compose 安全广播，不开放 Raw input。Rust 后端
 
 ### 7.5 Android Preview 共享契约（Phase C，第一项）
 
-`android_preview.rs` 在 Rust 信任边界建立平台无关的 schema-v1 manifest、结构化主机请求和生命周期运行时。manifest 固定 `NativeRustSshSftp` 引擎，最多 8 个会话；当前只启用主机连接、终端、SFTP 与凭据 vault，同步在协调器接线前与广播、外部编辑、常驻监控和后台长连接一样显式 disabled。主机请求只传 UUID、受限 host/user/port、固定 host-key 与 `ssh-<UUID>` 或 `key-<UUID>` 不透明引用，不传秘密值。
+`android_preview.rs` 在 Rust 信任边界建立平台无关的 schema-v1 manifest、结构化主机请求和生命周期运行时。manifest 固定 `NativeRustSshSftp` 引擎，最多 8 个会话；当前只启用主机连接、终端、SFTP 与凭据 vault。Android 可读取协调器的 value-free 队列、恢复和冲突计数，但同步仍与广播、外部编辑、常驻监控和后台长连接一样显式 disabled。主机请求只传 UUID、受限 host/user/port、固定 host-key 与 `ssh-<UUID>` 或 `key-<UUID>` 不透明引用，不传秘密值。
 
 运行时只有前台且解锁时允许建立会话或调用支持的操作；任何非前台状态都会增加 generation、清空原生连接并拒绝迟到的连接结果。`android_native_transport.rs` 直接使用 Rust `ssh2`/libssh2 API，握手后先校验固定 SHA-256 host-key，再执行清零密码/内存私钥认证，并提供有界 PTY I/O 与不跟随链接的 SFTP 列表。`android_mobile.rs` 是单独的 Tauri IPC/会话 owner，Android capability 不包含桌面 OpenSSH PTY、广播、编辑器、监控、updater/process/dialog。移动密码和私钥只写入 Android Keystore-backed store；manifest 禁止 backup/cleartext/FileProvider，Activity 设置 `FLAG_SECURE`。Linux 已构建 debug APK/AAB，但同步、生物识别、真机 Keystore/生命周期和真实 SSH/SFTP 仍未验收。
 
@@ -311,11 +311,11 @@ attachments / changelog
 
 同步后端按不可变对象抽象，不上传 SQLite 整库。当前未发布工作树的 `sync_crypto` 已实现 schema v1 keyslot/对象信封、Argon2id v19 参数边界、XChaCha20-Poly1305 认证加密、HKDF-SHA256 的 event/blob/index/checkpoint/device-registry 域分离、OS 随机 salt/nonce、秘密清零和有界严格解析；固定输入只用于稳定测试向量。对象 AAD 绑定 vault、对象类型/ID、设备/序号、算法与长度，keyslot AAD 绑定全部 KDF 参数。
 
-`sync_provider` 已定义 Rust-only、有界、可取消的不可变 `list/get/put` 接口。Local Folder 逐级隔离符号链接，以同目录暂存、`fsync`、原子无覆盖 hard-link 和回读保持提交语义；WebDAV 强制 HTTPS/无重定向/有界显式 CA 和总超时，使用结构化 XML、条件 PUT 与提交后回读。对象最多 24 MiB，key/深度/分页/扫描/XML 均有硬限制，错误码区分取消、输入、路径、缺失、冲突、资源、服务和协议。两模块尚未连接同步 UI、outbox、设备 head 或协调器，不能单独提供同步或重放保护。
+`sync_provider` 已定义 Rust-only、有界、可取消的不可变 `list/get/put` 接口。Local Folder 逐级隔离符号链接，以同目录暂存、`fsync`、原子无覆盖 hard-link 和回读保持提交语义；WebDAV 强制 HTTPS/无重定向/有界显式 CA 和总超时，使用结构化 XML、条件 PUT 与提交后回读。对象最多 24 MiB，key/深度/分页/扫描/XML 均有硬限制，错误码区分取消、输入、路径、缺失、冲突、资源、服务和协议。`sync_coordinator` 已按 vault 作用域连接 provider、outbox、远端 receipt/head 与 merge，但产品设置、解锁和自动调度尚未接线。
 
 `sync_outbox` 在独立的 schema-v1 `vpshell-sync.sqlite3` 中原子写入加密 operation、outbox 和同事务业务回调。两分钟 claim 租约、最多六次 2 秒起/5 分钟封顶退避、显式暂停/恢复、不可逆发布态和过期租约恢复都由 SQLite 状态机拥有；前端不能提交或改写状态。远端对象在 Rust 内完成信封解析/AEAD 后，业务合并、receipt 和每设备连续序号 head 同事务提交；key/hash/对象身份唯一性阻止无序号对象换 key 重放。journal 的 10,000 未发布项/256 MiB、50,000 总对象/384 MiB、512 MiB 文件、30/90 天保留和两份损坏隔离备份均为硬边界。损坏恢复默认 `reconcile-required`，不会静默恢复上传。协调 worker、provider 接线、哈希链和设备签名仍未实现。
 
-`sync_merge` 已实现 version 1 operation/state、HLC/device/operation 确定性字段 register、history event 并集、因果 tombstone 和冲突中心。host/script/setting/background 只有逐字段类型/范围白名单；host trust pin、credential ref、本机背景路径、密码/Token/私钥和敏感参数 history 不属于格式。删除保存 observed-field stamps，使并发编辑/删除在任意到达顺序生成同一冲突；风险降低、连接身份和脚本正文变化也会持续显示。冲突解决自身使用 LWW stamp，支持保持删除或明确恢复。`sync_merge_state` 的 revision、apply 和写回可嵌入 outbox/remote receipt 的同一 SQLite transaction；它尚未连接产品状态或前端冲突界面。
+`sync_merge` 已实现 version 1 operation/state、HLC/device/operation 确定性字段 register、history event 并集、因果 tombstone 和冲突中心。host/script/setting/background 只有逐字段类型/范围白名单；host trust pin、credential ref、本机背景路径、密码/Token/私钥和敏感参数 history 不属于格式。删除保存 observed-field stamps，使并发编辑/删除在任意到达顺序生成同一冲突；风险降低、连接身份和脚本正文变化也会持续显示。冲突解决自身使用 LWW stamp，支持保持删除或明确恢复。`sync_merge_state` 的 revision、apply 和写回现由协调器嵌入 remote receipt 的同一 SQLite transaction；Android 只显示 revision/冲突数，冲突详情与解决 UI 尚未接线。
 
 `sync_recovery` 已实现独立的 256-bit 可打印恢复密钥与 recovery keyslot，以及最多 32 台设备的 schema-v1 加密 registry。设备公钥身份不可替换，expected revision、撤销优先合并、最后活动设备保护和已撤销发布者拒绝防止本地静默复活。加密导出只封装 keyslot、认证密文和 manifest，限制为 10,000 对象/256 MiB 密文/384 MiB 文件；Rust 使用私有同目录暂存、文件与目录同步、hard-link 无覆盖提交，读取拒绝符号链接。恢复演练解包 VMK 后逐对象认证，严格解析 event 与 device registry。该模块不持久化恢复密钥、密码、私钥、provider 凭据或明文；设备 operation 签名、远端 registry 回滚防护、VMK 轮换、恢复写入、协调器与 UI 仍未实现。
 

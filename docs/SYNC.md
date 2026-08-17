@@ -1,6 +1,6 @@
 # VPShell 加密同步设计
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。自动同步协调器与 UI、真实扩展 transport/Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把内部原语描述成可用同步产品。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。设置与密钥解锁、自动触发和冲突解决 UI、真实扩展 transport/Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把内部原语描述成可用同步产品。
 
 ### 当前 v1 密码学边界
 
@@ -51,9 +51,9 @@ TLS 仍然必须启用，但 TLS 只保护传输链路，不能替代客户端�
 | 能力 | v0.1.0 | 目标 |
 | --- | --- | --- |
 | 本地业务存储 | WebView `localStorage` 明文 JSON（legacy） | Rust 管理的 SQLite schema v1 快照 + 有界事件域；同步前再做 E2EE 对象化 |
-| Provider | 设置页仍是草稿；Rust 已实现未接线的 Local Folder/WebDAV 不可变对象接口 | 可插拔不可变对象存储接口和同步协调器 |
+| Provider | 设置页仍是草稿；Rust 已实现 Local Folder/WebDAV 不可变对象接口并接入内部协调器 | 可由用户配置、解锁和自动调度的 provider |
 | 二级密码 | 设置 UI 仍只是本地草稿；Rust v1 密码学层已能用 Argon2id 派生 KEK 并包裹随机 VMK，但尚未接入 UI/provider | Argon2id 派生 KEK，包裹随机 Vault Master Key |
-| 同步动作 | UI 仍只写本地设置；Rust schema-v1 journal 已实现未接线的事务 outbox/重试/receipt/head 状态机 | 自动 push/pull 协调器连接 provider、密码学和合并层 |
+| 同步动作 | UI 仍只写本地草稿；Rust 单周期协调器已连接 provider、outbox、密码学和 merge，Android 只读状态可见 | 启动/网络恢复/业务变更/手动触发的自动调度与完整冲突处理 |
 | 冲突 | 无 | 事件并集、字段级 LWW、tombstone、冲突中心 |
 | TOTP | 只有 Gateway 条件开关 | 只用于自建 Gateway 账户登录 |
 | 凭据同步 | 只有开关 | 默认关闭的独立凭据密钥域 |
@@ -86,7 +86,7 @@ COMMIT;
 
 当前 `sync_outbox.rs` 使用独立 `vpshell-sync.sqlite3` schema v1 落实这条原子边界。调用者只能通过 Rust 内部闭包修改同一个 SQLite transaction；闭包不得执行网络、文件写入或其他不可回滚副作用。`sync_operations` 只保存已通过 v1 严格解析的加密信封，`sync_outbox` 保存状态/次数/租约/稳定错误码，业务明文、密码、私钥、credential ref、Token 和 provider 凭据不进入 journal。未发布最多 10,000 对象/256 MiB，整个 journal 最多 50,000 对象/384 MiB，数据库文件启动硬限制 512 MiB；已发布本地对象保留 30 天，远端 receipt 保留 90 天，但每设备持久高水位不会清理。
 
-worker claim 使用两分钟租约；进程中断后的过期租约不会立即重放，而是进入 `retry_wait`。网络、超时、限流和远端暂不可用按 2/4/8/16/32 秒退避，最多六次且单次最长五分钟；协议、认证、不可变冲突和完整性错误直接进入 `permanent_failure`。取消进入 `paused`，只能显式恢复且不重置尝试次数；`published` 是不可逆终态。损坏、截断或超过 512 MiB 的 journal 最多保留两个隔离备份，新库写入 `reconcile-required` 安全阻止，必须由后续协调器完成远端核对后显式解除，不能自动继续上传。
+worker claim 使用两分钟租约；进程中断后的过期租约不会立即重放，而是进入 `retry_wait`。网络、超时、限流和远端暂不可用按 2/4/8/16/32 秒退避，最多六次且单次最长五分钟；协议、认证、不可变冲突和完整性错误直接进入 `permanent_failure`。取消进入 `paused`，只能显式恢复且不重置尝试次数；`published` 是不可逆终态。损坏、截断或超过 512 MiB 的 journal 最多保留两个隔离备份，新库写入 `reconcile-required`；协调器会保持停止并只报告状态，远端核对和显式解除流程未接线前不能自动继续上传。
 
 远端对象先做严格信封解析与 AEAD 认证，再在同一事务执行合并回调、写 operation/receipt 并推进设备连续序号。重复 key+hash 幂等忽略；序号回退、缺口、相同密文换 key、或相同 `(vault, kind, object_id)` 出现不同密文均在业务回调前拒绝。90 天后 receipt 可清理以控制容量，此后旧序号仍由设备高水位拒绝，不会重新应用。哈希链、设备签名和见证 head 属于后续协议层，当前水位不能独立证明远端完整历史。
 
@@ -386,8 +386,8 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：内部 Local Folder 和 WebDAV 不可变对象层已完成；仍需协调器、outbox、真实外部服务器兼容矩阵及断网退避测试。
-4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心和远端路径作用域已实现；仍需协调器/UI 接线和多进程/真实设备演练。
+3. **MVP provider**：内部 Local Folder/WebDAV、outbox 与单周期协调器已接通；仍需产品设置/解锁/自动触发、真实外部服务器兼容矩阵及断网退避测试。
+4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心和远端路径作用域已接入协调器事务；仍需冲突详情/解决 UI 和多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
 6. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。
 7. **Provider 扩展**：SFTP、S3-compatible、Gateway 的结构化不可变适配层已完成；仍需真实 transport、协调器、协议兼容与故障矩阵，再评估 rclone 适配。

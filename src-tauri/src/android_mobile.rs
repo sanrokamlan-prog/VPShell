@@ -24,6 +24,7 @@ use crate::{
         AndroidPreviewRuntime,
     },
     file_transfer,
+    sync_coordinator::{SyncCoordinatorManager, SyncCoordinatorStatus},
 };
 
 const MAX_DECODED_INPUT_BYTES: usize = 64 * 1024;
@@ -243,6 +244,15 @@ pub(crate) fn android_preview_status(
         generation: state.runtime.generation(),
         session_count: state.sessions.len(),
     })
+}
+
+/// Android can inspect recovery/conflict progress without gaining any sync
+/// configuration, key, provider, worker, or conflict-resolution authority.
+#[tauri::command]
+pub(crate) fn android_sync_status(
+    coordinator: tauri::State<'_, SyncCoordinatorManager>,
+) -> Result<SyncCoordinatorStatus, String> {
+    coordinator.status()
 }
 
 #[tauri::command]

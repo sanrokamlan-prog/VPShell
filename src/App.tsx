@@ -169,6 +169,26 @@ interface HostKeyInspection {
   fingerprint: string;
 }
 
+type SyncCoordinatorPhase = "notConfigured" | "idle" | "uploading" | "downloading" | "merging" | "waitingRetry" | "conflicts" | "reconcileRequired" | "suspended" | "cancelled";
+
+interface SyncCoordinatorStatus {
+  schemaVersion: number;
+  phase: SyncCoordinatorPhase;
+  configured: boolean;
+  running: boolean;
+  generation: number;
+  pendingObjects: number;
+  pendingBytes: number;
+  mergeRevision: number;
+  openConflicts: number;
+  recoveryRequired: boolean;
+  recoveryNote?: string;
+  lastErrorCode?: string;
+  lastCompletedAtMs?: number;
+  lastUploadedObjects: number;
+  lastDownloadedObjects: number;
+}
+
 interface RenderAsset {
   dataUrl: string;
   label: string;
@@ -195,6 +215,19 @@ const environmentLabels: Record<EnvironmentKind, string> = {
   production: "生产",
   staging: "基础设施",
   development: "测试",
+};
+
+const syncPhaseLabels: Record<SyncCoordinatorPhase, string> = {
+  notConfigured: "未配置",
+  idle: "空闲",
+  uploading: "正在上传",
+  downloading: "正在下载",
+  merging: "正在合并",
+  waitingRetry: "等待重试",
+  conflicts: "存在冲突",
+  reconcileRequired: "需要恢复核对",
+  suspended: "已暂停",
+  cancelled: "已取消",
 };
 
 const sidebarLabels: Record<SidebarView, { eyebrow: string; title: string; placeholder: string }> = {
@@ -334,6 +367,8 @@ function App() {
   const [trustingHostKey, setTrustingHostKey] = useState(false);
   const [androidTerminalIds, setAndroidTerminalIds] = useState<Record<string, string>>({});
   const [androidCredentialKind, setAndroidCredentialKind] = useState<"password" | "privateKey">("password");
+  const [androidSyncStatus, setAndroidSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
+  const [androidSyncError, setAndroidSyncError] = useState<string | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
@@ -343,6 +378,17 @@ function App() {
   )?.passphraseRef;
   const activeShellContext = activeSession.contextStack?.[activeSession.contextStack.length - 1];
   const deletedHosts = appState.deletedHosts ?? [];
+
+  const refreshAndroidSyncStatus = useCallback(async () => {
+    if (!isAndroidRuntime()) return;
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("android_sync_status");
+      setAndroidSyncStatus(status);
+      setAndroidSyncError(null);
+    } catch (error) {
+      setAndroidSyncError(String(error));
+    }
+  }, []);
 
   useEffect(() => {
     if (!isAndroidRuntime()) return undefined;
@@ -364,6 +410,13 @@ function App() {
       window.removeEventListener("vpshell-native-foreground", enterForeground);
     };
   }, []);
+
+  useEffect(() => {
+    if (!isAndroidRuntime()) return undefined;
+    void refreshAndroidSyncStatus();
+    const timer = window.setInterval(() => void refreshAndroidSyncStatus(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [refreshAndroidSyncStatus]);
 
   useEffect(() => {
     if (!appStoreStatus.ready || appState.hosts.length === 0) return;
@@ -1332,12 +1385,14 @@ function App() {
         <div className="topbar-right">
           <div className="topbar-actions">
             <button
-              className={`sync-status ${appState.sync.enabled ? "is-synced" : ""}`}
+              className={`sync-status ${(isAndroidRuntime() ? androidSyncStatus?.phase === "idle" : appState.sync.enabled) ? "is-synced" : ""}`}
               type="button"
               onClick={() => setDialog("sync")}
             >
-              {appState.sync.enabled ? <Cloud size={15} /> : <CloudOff size={15} />}
-              <span>{appState.sync.enabled ? relativeTime(appState.sync.lastSyncedAt) : appState.sync.endpoint ? "同步后端未启用" : "同步未配置"}</span>
+              {(isAndroidRuntime() ? androidSyncStatus?.configured : appState.sync.enabled) ? <Cloud size={15} /> : <CloudOff size={15} />}
+              <span>{isAndroidRuntime()
+                ? androidSyncError ? "同步状态不可用" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取同步状态"
+                : appState.sync.enabled ? relativeTime(appState.sync.lastSyncedAt) : appState.sync.endpoint ? "同步后端未启用" : "同步未配置"}</span>
             </button>
             <span className="route-status"><Route size={15} /> 路线：直连</span>
             <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
@@ -1895,7 +1950,20 @@ function App() {
       ) : null}
 
       {dialog === "sync" ? (
-        <Dialog title="加密同步（设计预览）" wide onClose={() => setDialog(null)} footer={<><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" onClick={saveSyncSettings}><ShieldCheck size={14} /> 保存草稿</button></>}>
+        <Dialog title={isAndroidRuntime() ? "同步状态" : "加密同步（设计预览）"} wide onClose={() => setDialog(null)} footer={isAndroidRuntime() ? <><button className="secondary-button" type="button" onClick={() => void refreshAndroidSyncStatus()}><RefreshCw size={14} /> 刷新</button><button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button></> : <><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" onClick={saveSyncSettings}><ShieldCheck size={14} /> 保存草稿</button></>}>
+          {isAndroidRuntime() ? (
+            <div className="sync-readonly-status" aria-live="polite">
+              <div><span>协调阶段</span><strong>{androidSyncError ? "状态读取失败" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取"}</strong></div>
+              <div><span>同步能力</span><strong>Android Preview 中禁用</strong></div>
+              <div><span>待发布对象</span><strong>{androidSyncStatus ? `${androidSyncStatus.pendingObjects} 项 / ${androidSyncStatus.pendingBytes.toLocaleString("zh-CN")} B` : "-"}</strong></div>
+              <div><span>合并状态</span><strong>{androidSyncStatus ? `revision ${androidSyncStatus.mergeRevision} / ${androidSyncStatus.openConflicts} 个冲突` : "-"}</strong></div>
+              <div><span>恢复保护</span><strong>{androidSyncStatus?.recoveryRequired ? "需要人工核对" : "未触发"}</strong></div>
+              <div><span>最近周期</span><strong>{androidSyncStatus?.lastCompletedAtMs ? new Date(androidSyncStatus.lastCompletedAtMs).toLocaleString("zh-CN", { hour12: false }) : "尚未运行"}</strong></div>
+              {androidSyncStatus?.lastErrorCode ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {androidSyncStatus.lastErrorCode}</p> : null}
+              {androidSyncStatus?.recoveryNote ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {androidSyncStatus.recoveryNote}</p> : null}
+              {androidSyncError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {androidSyncError}</p> : null}
+            </div>
+          ) : <>
           <div className="provider-grid">
             {(Object.keys(providerLabels) as SyncProviderKind[]).map((provider) => (
               <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
@@ -1915,6 +1983,7 @@ function App() {
             <label><input type="checkbox" checked={appState.sync.syncSecrets} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, syncSecrets: event.target.checked } }))} /><span><strong>同步主机凭据与私钥</strong><small>使用独立密钥域加密，默认关闭</small></span></label>
             <label className={appState.sync.provider !== "gateway" ? "disabled" : ""}><input type="checkbox" disabled={appState.sync.provider !== "gateway"} checked={appState.sync.totpEnabled} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, totpEnabled: event.target.checked } }))} /><span><strong>Google Authenticator</strong><small>仅自建同步网关支持 TOTP 身份验证</small></span></label>
           </div>
+          </>}
         </Dialog>
       ) : null}
 

@@ -38,7 +38,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 
 | 运维痛点 | VPShell 方向 | `v0.1.0-alpha.7` |
 | --- | --- | :---: |
-| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **内部基础层**：密码学、恢复/导出、设备 registry、Local/WebDAV provider、持久 outbox/replay 与确定性 merge 已实现并测试；协调器和设置接线未实现，应用仍不能执行同步 |
+| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **内部基础层**：密码学、恢复/导出、设备 registry、Local/WebDAV provider、持久 outbox/replay、确定性 merge 与 Rust 协调器内核已实现；设置、解锁和自动触发未接线，应用仍不能执行用户配置的同步 |
 | 大量小文件/目录传输缓慢 | 自动探测 `tar + zstd`，缺少远端能力时回退 SFTP | **已实现**：直连后端 |
 | 命令、路径和参数反复复制 | 不设产品条数上限的事件历史、快速检索和参数模板 | **部分实现**：本地历史与最近连接 |
 | 操作时忘记当前主机 | 常驻配置 IP、环境标记、Shell Integration 上报 hostname/cwd | **v0.2 工作区**：显式 bash/zsh 探针与 8 层自报上下文栈 |
@@ -230,7 +230,7 @@ VPShell 会持续审计成熟公开项目的模块边界和用户工作流，但
 | Alpha | 真实 SSH/SFTP 工作流与可安装预览版 | 首个技术预览 |
 | v0.2 | 传输可靠性、上下文识别与安全批量运维 | 进行中：跨重启恢复、文件坞移动/递归权限与安全批量任务已实现，等待发布与平台验收 |
 | v0.3 | 用户自控的端到端加密同步 | 内部协议原语分批实现中，尚不是可用产品功能 |
-| Android Preview | 移动终端、SFTP、凭据与同步 | Android 壳及 Rust/libssh2 连接、终端、只读 SFTP 浏览和 Keystore 凭据已接线；同步协调器、生物识别与设备验收待完成 |
+| Android Preview | 移动终端、SFTP、凭据与同步 | Android 壳及 Rust/libssh2 连接、终端、只读 SFTP 浏览和 Keystore 凭据已接线；只读显示 Rust 同步协调器状态但 Sync capability 仍禁用，生物识别与设备验收待完成 |
 | 后续 | 原生 SSH 引擎、可验证中继和可选托管服务 | 研究方向 |
 
 ### Alpha 当前阶段
@@ -261,10 +261,10 @@ Alpha 发布后的重点验证：
 
 - Rust 密码学基础层已实现版本化 keyslot/对象信封、Argon2id、XChaCha20-Poly1305、HKDF 域分离、严格有界解析和固定向量测试；
 - Rust `list/get/put` provider 边界与 Local Folder/WebDAV 不可变对象实现已经具备有界 I/O、无覆盖提交、超时、取消和协议测试；
-- schema v1 SQLite 同步 journal 已实现 operation/outbox 原子事务、租约恢复、暂停、最多六次有界退避、发布终态、AEAD 后幂等应用和设备序号/对象身份重放保护；它尚未由后台协调器或设置 UI 调用；
+- schema v1 SQLite 同步 journal 已实现 operation/outbox 原子事务、租约恢复、暂停、最多六次有界退避、发布终态、AEAD 后幂等应用和设备序号/对象身份重放保护；Rust 协调器已接通有界单周期 push/pull 与 merge，但设置、解锁和自动调度仍未调用它；
 - 主机、公开命令/参数/远端路径历史、脚本、白名单设置和受管背景引用已有 Rust 确定性字段合并、tombstone 因果与持久冲突中心；敏感历史、凭据引用、主机 trust pin 和本机路径拒绝进入 operation；
 - 独立 256-bit 恢复密钥使用带校验码的可打印格式和独立 HKDF/XChaCha recovery keyslot；加密导出包只包含 keyslot、认证密文和校验清单，最多 10,000 对象/256 MiB 密文，以无覆盖原子文件写入，并可离线解密、解析全部 event/device registry 完成恢复演练；
-- 设备 registry 最多 32 台，只记录公开签名键和非敏感标签；撤销单调、最后活动设备不可撤销、已撤销设备不能发布 registry。撤销不能抹除已复制的 VMK，疑似泄露时仍必须轮换主密钥并全量重加密；设备 operation 签名、协调器和管理 UI 尚未接线；
+- 设备 registry 最多 32 台，只记录公开签名键和非敏感标签；撤销单调、最后活动设备不可撤销、已撤销设备不能发布 registry。撤销不能抹除已复制的 VMK，疑似泄露时仍必须轮换主密钥并全量重加密；设备 operation 签名、registry 验证和管理 UI 尚未接线；
 - 独立凭据 vault 策略默认关闭，需活动设备显式启用并逐设备授权；CVK 与业务 VMK 分离，使用 `credentials` keyslot/AAD/HKDF 域。SSH 密码、私钥口令、OpenSSH 私钥和 access token 只进入 Rust 内存中的清零载荷与认证密文，本机 credential reference 不进入对象、错误、日志或事件；系统钥匙串写回、CVK 恢复/轮换和 UI 尚未接线；
 - SFTP、S3-compatible 与自建 Gateway 已通过专用 Rust transport trait 接入同一不可变 provider：严格配置、分页/key/大小、取消、条件创建、同名核对和提交后回读由公共适配层强制。SFTP 配置必须固定 host-key SHA-256，S3/Gateway endpoint 必须 HTTPS；Gateway 密码/TOTP 只传入一次登录调用，provider 会话不保存 TOTP。真实 SFTP 会话、S3 SigV4、Gateway HTTP 客户端与外部兼容矩阵仍未接线；
 - Local Folder + WebDAV 的端到端协调、自动同步和冲突中心 UI；

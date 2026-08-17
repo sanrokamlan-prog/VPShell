@@ -50,6 +50,7 @@ set_remote_monitor_paused
 set_remote_monitor_interval
 stop_remote_monitor
 android_preview_status
+android_sync_status
 android_inspect_host_key
 android_set_lifecycle
 android_connect_host

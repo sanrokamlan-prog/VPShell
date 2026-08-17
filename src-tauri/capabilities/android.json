@@ -7,6 +7,7 @@
   "platforms": ["android"],
   "permissions": [
     "allow-android-preview-status",
+    "allow-android-sync-status",
     "allow-android-inspect-host-key",
     "allow-android-set-lifecycle",
     "allow-android-connect-host",

@@ -11,6 +11,9 @@ use uuid::Uuid;
 
 use crate::{
     sync_crypto::{EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object},
+    sync_merge::{
+        MergeError, MergeErrorCode, apply_persisted_operation, load_persisted_state,
+    },
     sync_provider::validate_key,
 };
 
@@ -181,6 +184,32 @@ pub(crate) struct JournalStatus {
     pub(crate) recovery_note: Option<String>,
     pub(crate) pending_objects: u64,
     pub(crate) pending_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MergeJournalStatus {
+    pub(crate) revision: u64,
+    pub(crate) open_conflicts: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteMergeResult {
+    pub(crate) outcome: RemoteApplyOutcome,
+    pub(crate) revision: u64,
+    pub(crate) open_conflicts: usize,
+}
+
+fn map_merge_error(error: MergeError) -> JournalError {
+    let code = match error.code {
+        MergeErrorCode::Replay => JournalErrorCode::Replay,
+        MergeErrorCode::LimitExceeded => JournalErrorCode::LimitExceeded,
+        MergeErrorCode::RevisionConflict => JournalErrorCode::Conflict,
+        MergeErrorCode::Storage | MergeErrorCode::CorruptState => JournalErrorCode::Storage,
+        MergeErrorCode::InvalidInput
+        | MergeErrorCode::ConflictMissing
+        | MergeErrorCode::StaleResolution => JournalErrorCode::InvalidInput,
+    };
+    JournalError::new(code, error.message)
 }
 
 fn journal_path(app_data_directory: &Path) -> PathBuf {
@@ -654,6 +683,17 @@ impl SyncJournal {
         })
     }
 
+    pub(crate) fn merge_status(&self) -> JournalResult<MergeJournalStatus> {
+        self.transaction(|transaction| {
+            let (revision, state) =
+                load_persisted_state(transaction).map_err(map_merge_error)?;
+            Ok(MergeJournalStatus {
+                revision,
+                open_conflicts: state.open_conflicts().len(),
+            })
+        })
+    }
+
     pub(crate) fn acknowledge_reconciliation(&self) -> JournalResult<()> {
         self.transaction(|transaction| {
             transaction
@@ -773,6 +813,25 @@ impl SyncJournal {
     }
 
     pub(crate) fn claim_next(&self, now_ms: i64) -> JournalResult<Option<ClaimedObject>> {
+        self.claim_next_scoped(None, now_ms)
+    }
+
+    pub(crate) fn claim_next_for_vault(
+        &self,
+        vault_id: &str,
+        now_ms: i64,
+    ) -> JournalResult<Option<ClaimedObject>> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        self.claim_next_scoped(Some(&vault_id), now_ms)
+    }
+
+    fn claim_next_scoped(
+        &self,
+        vault_id: Option<&str>,
+        now_ms: i64,
+    ) -> JournalResult<Option<ClaimedObject>> {
         validate_now(now_ms)?;
         self.transaction(|transaction| {
             ensure_unblocked(transaction)?;
@@ -783,9 +842,10 @@ impl SyncJournal {
                      FROM sync_outbox q JOIN sync_operations o USING(object_key)
                      WHERE q.state IN ('pending', 'retry_wait')
                        AND q.next_attempt_ms <= ?1 AND q.attempt_count < ?2
+                       AND (?3 IS NULL OR o.vault_id = ?3)
                      ORDER BY q.next_attempt_ms, q.updated_at_ms, q.object_key
                      LIMIT 1",
-                    params![now_ms, MAX_ATTEMPTS],
+                    params![now_ms, MAX_ATTEMPTS, vault_id],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
@@ -1112,6 +1172,34 @@ impl SyncJournal {
                 })?;
             update_head(transaction, "remote", &object, &hash, sequence)?;
             Ok(RemoteApplyOutcome::Applied)
+        })
+    }
+
+    pub(crate) fn apply_remote_merge(
+        &self,
+        object_key: &str,
+        encoded: &[u8],
+        vault_key: &VaultKey,
+        now_ms: i64,
+    ) -> JournalResult<RemoteMergeResult> {
+        let outcome = self.apply_remote(
+            object_key,
+            encoded,
+            vault_key,
+            now_ms,
+            |transaction, plaintext| {
+                let (revision, _) =
+                    load_persisted_state(transaction).map_err(map_merge_error)?;
+                apply_persisted_operation(transaction, plaintext, revision, now_ms)
+                    .map_err(map_merge_error)?;
+                Ok(())
+            },
+        )?;
+        let status = self.merge_status()?;
+        Ok(RemoteMergeResult {
+            outcome,
+            revision: status.revision,
+            open_conflicts: status.open_conflicts,
         })
     }
 

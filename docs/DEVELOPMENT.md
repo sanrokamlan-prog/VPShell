@@ -247,7 +247,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 ### 10.10 Android Preview 共享契约（Phase C）
 
 - `src-tauri/src/android_preview.rs` 是桌面与移动端共用的 Rust 策略模型；`android_mobile.rs` 是唯一移动 IPC/会话 owner，不能调用系统 `ssh` 或复用桌面进程命令。新增 Android command 必须进入 command manifest、仅加入 `capabilities/android.json`，并由安全回归证明没有落入桌面 capability。
-- 当前只打开主机连接、终端、SFTP 和凭据 vault；同步必须等 Rust coordinator 接线后才能启用，广播、外部编辑、常驻监控和后台长连接保持关闭。每个 structured host request 逐字段验证 UUID、主机/用户名/端口、host-key 和不透明 credential reference；不得序列化或记录秘密值。
+- 当前只打开主机连接、终端、SFTP 和凭据 vault；Rust coordinator 虽已接通 provider/outbox/merge，Android 也只能读取 value-free 状态。设置、密钥解锁、自动调度和真实设备尚未形成完整安全能力前，Sync 与广播、外部编辑、常驻监控和后台长连接保持关闭。每个 structured host request 逐字段验证 UUID、主机/用户名/端口、host-key 和不透明 credential reference；不得序列化或记录秘密值。
 - 生命周期仅允许前台解锁操作；任何非前台状态清理会话并递增 generation，连接完成时必须再次验证预留状态。平台实现仍需把生物识别、Activity/休眠、软键盘、剪贴板和网络切换作为独立测试面。
 - Linux CI/VPS 可构建 aarch64 debug APK/AAB、验证签名结构和运行 Rust/Gradle unit gate，但这些结果不证明 Keystore 运行时、真实设备或模拟器行为。debug 自签名包不得描述为发布签名。
 - `android_native_transport.rs` 只允许 `ssh2`/libssh2 Rust API；握手后的 host-key pin 比对必须先于认证，秘密只以 `Zeroizing` 短生命周期进入调用。SFTP list 的路径、数量和条目类型必须在 Rust 再验证，symlink/special 不得被跟随。该模块的 fake/边界夹具不能替代真实服务器和 Android 链接测试。
