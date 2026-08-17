@@ -1850,7 +1850,12 @@ mod tests {
         key_hop.host = "target.example".to_string();
         key_hop.host_key_sha256 = format!("SHA256:{}", "B".repeat(43));
         key_hop.credential_ref = None;
-        key_hop.identity_file = Some("/tmp/target-key".to_string());
+        key_hop.identity_file = Some(
+            std::env::temp_dir()
+                .join("vpshell-target-key")
+                .to_string_lossy()
+                .into_owned(),
+        );
         key_hop.identity_passphrase_ref =
             Some("key-018f1f55-26f8-7a9f-9cd8-4d7558482215".to_string());
         let route = validate_route(NativeRouteRequest {
