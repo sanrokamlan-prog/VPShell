@@ -838,7 +838,10 @@ impl NativeEngineManager {
                 false,
             ));
         }
-        if forwards.values().any(|forward| forward.bind_port == bind_port) {
+        if forwards
+            .values()
+            .any(|forward| forward.bind_port == bind_port)
+        {
             return Err(NativeEngineError::new(
                 "native-local-forward-bind-conflict",
                 "本地转发回环端口已经在使用",
@@ -2652,8 +2655,16 @@ mod tests {
         assert_eq!(error.code, "native-local-forward-capacity");
         let snapshots = manager.list_local_forwards().unwrap();
         assert_eq!(snapshots.len(), MAX_LOCAL_FORWARDS);
-        assert!(snapshots.iter().all(|snapshot| snapshot.bind_host == "127.0.0.1"));
-        assert!(snapshots.iter().all(|snapshot| snapshot.state == "starting"));
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.bind_host == "127.0.0.1")
+        );
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.state == "starting")
+        );
         manager.stop_local_forward(&ids[0].to_string()).unwrap();
         assert!(
             manager
@@ -2684,7 +2695,12 @@ mod tests {
             )
             .unwrap();
         manager.finish_local_forward(reused_id, 99);
-        assert!(manager.lock_local_forwards().unwrap().contains_key(&reused_id));
+        assert!(
+            manager
+                .lock_local_forwards()
+                .unwrap()
+                .contains_key(&reused_id)
+        );
         manager.finish_local_forward(reused_id, 100);
         assert!(manager.list_local_forwards().unwrap().is_empty());
 
@@ -3266,9 +3282,7 @@ mod tests {
         let snapshots = manager.list_local_forwards().unwrap();
         assert_eq!(snapshots.len(), 1);
         assert!(snapshots[0].accepted_connections >= 1);
-        manager
-            .stop_local_forward(&forward_id.to_string())
-            .unwrap();
+        manager.stop_local_forward(&forward_id.to_string()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if manager.list_local_forwards().unwrap().is_empty() {
