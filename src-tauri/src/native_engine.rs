@@ -1153,9 +1153,7 @@ impl NativeConnectionChain {
     }
 }
 
-async fn connect_route(
-    route: ValidatedRoute,
-) -> Result<NativeConnectionChain, NativeEngineError> {
+async fn connect_route(route: ValidatedRoute) -> Result<NativeConnectionChain, NativeEngineError> {
     let mut hops = route.hops.into_iter();
     let first = hops.next().ok_or_else(|| {
         NativeEngineError::new(
@@ -1166,22 +1164,18 @@ async fn connect_route(
     })?;
     let first_hop_index = first.hop_index;
     let first_timeout = Duration::from_secs(u64::from(first.timeout_seconds));
-    let first_session = match tokio::time::timeout(
-        first_timeout,
-        connect_authenticated_direct_hop(first),
-    )
-    .await
-    {
-        Ok(result) => result.map_err(|error| error.at_hop(first_hop_index))?,
-        Err(_) => {
-            return Err(NativeEngineError::new(
-                "native-engine-hop-timeout",
-                "原生 SSH 路由连接超时",
-                true,
-            )
-            .at_hop(first_hop_index));
-        }
-    };
+    let first_session =
+        match tokio::time::timeout(first_timeout, connect_authenticated_direct_hop(first)).await {
+            Ok(result) => result.map_err(|error| error.at_hop(first_hop_index))?,
+            Err(_) => {
+                return Err(NativeEngineError::new(
+                    "native-engine-hop-timeout",
+                    "原生 SSH 路由连接超时",
+                    true,
+                )
+                .at_hop(first_hop_index));
+            }
+        };
     let mut sessions = vec![first_session];
 
     for hop in hops {
@@ -1194,11 +1188,8 @@ async fn connect_route(
                 false,
             )
         })?;
-        let outcome = tokio::time::timeout(
-            timeout,
-            connect_authenticated_tunneled_hop(previous, hop),
-        )
-        .await;
+        let outcome =
+            tokio::time::timeout(timeout, connect_authenticated_tunneled_hop(previous, hop)).await;
         let session = match outcome {
             Ok(Ok(session)) => session,
             Ok(Err(error)) => {
@@ -1404,9 +1395,7 @@ async fn disconnect_sessions(
     disconnected
 }
 
-async fn probe_once(
-    request: ValidatedRoute,
-) -> Result<NativeEngineProbeResult, NativeEngineError> {
+async fn probe_once(request: ValidatedRoute) -> Result<NativeEngineProbeResult, NativeEngineError> {
     let timeout_seconds = request
         .hops
         .last()
@@ -1457,13 +1446,11 @@ async fn probe_once(
         .await;
     probe?;
     if !disconnected {
-        return Err(
-            NativeEngineError::new(
-                "native-engine-disconnect-failed",
-                "原生 SSH 检查已完成但连接关闭失败",
-                true,
-            ),
-        );
+        return Err(NativeEngineError::new(
+            "native-engine-disconnect-failed",
+            "原生 SSH 检查已完成但连接关闭失败",
+            true,
+        ));
     }
 
     Ok(NativeEngineProbeResult {
@@ -1478,14 +1465,7 @@ async fn open_native_terminal(
     request: ValidatedRoute,
     cols: u16,
     rows: u16,
-) -> Result<
-    (
-        NativeConnectionChain,
-        Channel<client::Msg>,
-        Vec<u8>,
-    ),
-    NativeEngineError,
-> {
+) -> Result<(NativeConnectionChain, Channel<client::Msg>, Vec<u8>), NativeEngineError> {
     let final_hop_index = request.final_hop_index();
     let connection_chain = connect_route(request).await?;
     let session = connection_chain.final_session()?;
@@ -2629,10 +2609,9 @@ mod tests {
             .expect("jump test port")
             .parse()
             .expect("numeric jump test port");
-        let jump_username =
-            std::env::var("VPSHELL_NATIVE_TEST_JUMP_USER").expect("jump test user");
-        let jump_fingerprint = std::env::var("VPSHELL_NATIVE_TEST_JUMP_HOST_KEY_SHA256")
-            .expect("jump test host key");
+        let jump_username = std::env::var("VPSHELL_NATIVE_TEST_JUMP_USER").expect("jump test user");
+        let jump_fingerprint =
+            std::env::var("VPSHELL_NATIVE_TEST_JUMP_HOST_KEY_SHA256").expect("jump test host key");
         let jump_identity_file = std::env::var("VPSHELL_NATIVE_TEST_JUMP_IDENTITY_FILE")
             .expect("jump test identity file");
         let target_host = std::env::var("VPSHELL_NATIVE_TEST_HOST").expect("target test host");
@@ -2640,12 +2619,11 @@ mod tests {
             .expect("target test port")
             .parse()
             .expect("numeric target test port");
-        let target_username =
-            std::env::var("VPSHELL_NATIVE_TEST_USER").expect("target test user");
-        let target_fingerprint = std::env::var("VPSHELL_NATIVE_TEST_HOST_KEY_SHA256")
-            .expect("target test host key");
-        let target_identity_file = std::env::var("VPSHELL_NATIVE_TEST_IDENTITY_FILE")
-            .expect("target test identity file");
+        let target_username = std::env::var("VPSHELL_NATIVE_TEST_USER").expect("target test user");
+        let target_fingerprint =
+            std::env::var("VPSHELL_NATIVE_TEST_HOST_KEY_SHA256").expect("target test host key");
+        let target_identity_file =
+            std::env::var("VPSHELL_NATIVE_TEST_IDENTITY_FILE").expect("target test identity file");
         let route = |target_host_key_sha256: String| NativeRouteRequest {
             hops: vec![
                 NativeRouteHopRequest {
