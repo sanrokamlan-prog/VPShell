@@ -116,7 +116,7 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 完成 | 使用 Rust `ssh2`/libssh2 兼容 transport、固定 host-key 与有界 SFTP，不依赖系统 `ssh`；真实 Android/arm64/服务器兼容仍外部验收 |
 | 完成 | 主机连接、终端、只读 SFTP 浏览与密码/私钥已接线；Rust-owned 同步协调器已接通 provider/outbox/merge，Android 只读展示恢复/冲突/队列状态且 manifest 继续禁用 Sync；PR #1 run `32056611606` 全绿 |
 | 完成 | Android capability 排除广播、外部编辑、常驻监控、后台长连接和桌面 process/updater/dialog；非前台清理连接 |
-| 进行中 | Android Keystore store、私钥导入、禁备份/明文网络/FileProvider、`FLAG_SECURE`、Rust-owned 可选系统生物识别/设备凭据访问门、原生失焦重锁、后台隐藏、默认 Rust Locked 与 WebView 泄漏防护已实现；等待本提交 Actions，真机泄漏测试仍为外部验收 |
+| 完成 | Android Keystore store、私钥导入、禁备份/明文网络/FileProvider、`FLAG_SECURE`、Rust-owned 可选系统生物识别/设备凭据访问门、原生失焦重锁、后台隐藏、默认 Rust Locked 与 WebView 泄漏防护已实现；PR #1 run `32061260435` 全绿，真机泄漏测试仍为外部验收 |
 | 完成 | Linux VPS 生成并哈希校验 aarch64 debug APK/AAB；Rust/security tests 与 Gradle unit gate 按可用范围执行，emulator/instrumentation 留作外部验收 |
 | 外部验收 | arm64 真机、休眠、网络切换、软键盘、截图/剪贴板和生命周期人工验收 |
 
@@ -155,9 +155,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-10 | C1 Android Preview 共享契约 | `android_preview::tests` 4/4；schema-v1 能力清单与 NativeRustSshSftp 固定、最多 8 会话、结构化 host/user/port 与不透明 credential reference 验证、后台/锁定/断开代际门禁和明确禁用能力通过；后续 Android 壳现已生成，设备生命周期仍待外部环境 |
 | 2026-08-10 | C2 Android Rust SSH/SFTP transport 边界 | `android_native_transport::tests` 4/4；`ssh2`/libssh2 直接 Rust 会话、5–60 秒超时、固定 SHA-256 host-key 先验、Zeroizing 密码/内存私钥类型、有界绝对 SFTP 路径与无系统 `ssh` 静态边界通过；未新增依赖；真实 SSH 算法/权限、Android arm64 链接、断网与设备测试仍待外部环境 |
 | 2026-08-17 | C3 同步协调器与 Android 只读状态 | 新增 `sync_coordinator` 与 7 个聚焦测试，接通 vault-scoped outbox claim、不可变 provider push/pull、AEAD 后 merge、冲突计数、恢复阻止、取消和代际状态；Tauri setup 持有协调器，Android capability 只增加 value-free `android_sync_status`，无 attach/run/ack 写权限且 Sync manifest 保持 disabled；首轮 run `32056255938` 的 fmt 差异已修复，PR #1 run `32056611606` 的 frontend 与 Windows/macOS Intel/macOS arm/Linux fmt-check-test 全绿 |
-| 2026-08-17 | C4 Android 可选系统验证与泄漏防护（待 Actions） | Rust 通过 `tauri-plugin-biometric` 2.3.2 直接发起系统生物识别并允许设备凭据回退，启用/关闭均需认证且开关存入 Keystore-backed 固定条目；插件 Android 实现为 `BIOMETRIC_WEAK`，不宣称强生物识别。runtime 默认 Locked，Tauri 原生窗口失焦与前端后台通知均清会话，只有 Rust unlock/设置 command 可 foreground；host-key 预检和凭据增删补齐授权/代际保护。Activity 先隐藏 WebView并使用 `FLAG_SECURE`，限定主 frame/origin 的 32-byte WebMessage 只控制 `show`/`hide`/`failed`，禁通用 JS interface、长按选择、autofill/content capture、file/content access；新增 Rust lifecycle/静态安全回归及 CI aarch64 debug APK/Gradle gate。本机 `git diff --check`、JSON/清单静态检查通过，无 Cargo/rustfmt/node_modules，完整 frontend/Rust/Android 验证交给 Actions；真机 prompt/任务切换/截图/剪贴板/Keystore 仍外部验收 |
-| 2026-08-17 | C4 首次 Actions 修复 | PR #1 run `32060654557` frontend 成功；四个平台先因 `security_regression.rs` 一处长断言未按 rustfmt 换行而失败，已按 runner diff 修复。Android job 进入 OpenSSL 编译后因 NDK r27 缺少 `aarch64-linux-android-ranlib` 别名失败，CI 增加 runner 内 LLVM `ar/ranlib/nm` 别名及 Cargo/cc 交叉编译变量；待 supervisor 提交后重跑。 |
+| 2026-08-17 | C4 Android 可选系统验证与泄漏防护 | Rust 通过 `tauri-plugin-biometric` 2.3.2 直接发起系统生物识别并允许设备凭据回退，启用/关闭均需认证且开关存入 Keystore-backed 固定条目；插件 Android 实现为 `BIOMETRIC_WEAK`，不宣称强生物识别。runtime 默认 Locked，Tauri 原生窗口失焦与前端后台通知均清会话，只有 Rust unlock/设置 command 可 foreground；host-key 预检和凭据增删补齐授权/代际保护。Activity 先隐藏 WebView并使用 `FLAG_SECURE`，限定主 frame/origin 的 32-byte WebMessage 只控制 `show`/`hide`/`failed`，禁通用 JS interface、长按选择、autofill/content capture、file/content access；新增 Rust lifecycle/静态安全回归及 CI aarch64 debug APK/Gradle gate。本机 `git diff --check`、JSON/清单静态检查通过，无 Cargo/rustfmt/node_modules；真机 prompt/任务切换/截图/剪贴板/Keystore 仍外部验收 |
+| 2026-08-17 | C4 Actions 修复与完整验证 | PR #1 首轮 run `32060654557` 的 frontend 成功；四个平台因 `security_regression.rs` 一处长断言未按 rustfmt 换行而失败，Android job 因 NDK r27 缺少 `aarch64-linux-android-ranlib` 别名失败。提交 `0d62d06` 修复格式，并在 CI runner 内增加 LLVM `ar/ranlib/nm` 别名及 Cargo/cc 交叉编译变量；后续 run `32061260435` 的 frontend、Ubuntu/Windows/macOS Intel/macOS arm Rust fmt-check-test、aarch64 debug APK 与 Gradle unit gate 全部通过。 |
 
 ## 下一个动作
 
-等待 C4 CI fmt 与 NDK 工具别名修复提交的 GitHub Actions 全绿；通过后把代码可验证部分改为完成，真机泄漏矩阵保持外部验收，再进入 Phase D 原生引擎。自动同步配置、密钥解锁与真实 provider 尚未形成安全完整能力，Android manifest 的 Sync capability 继续保持 disabled。
+进入 Phase D 第一个未完成项：实现 russh 原生 SSH/SFTP 引擎，并以 Rust-owned 具名结构、硬上限、稳定错误、取消和代际保护为边界；随后分项接通每跳独立凭据、host-key、跳板与端口转发。C4 真机泄漏矩阵保持外部验收；自动同步配置、密钥解锁与真实 provider 尚未形成安全完整能力，Android manifest 的 Sync capability 继续保持 disabled。
