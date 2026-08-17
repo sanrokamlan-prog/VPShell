@@ -248,11 +248,11 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 
 - `src-tauri/src/android_preview.rs` 是桌面与移动端共用的 Rust 策略模型；`android_mobile.rs` 是唯一移动 IPC/会话 owner，不能调用系统 `ssh` 或复用桌面进程命令。新增 Android command 必须进入 command manifest、仅加入 `capabilities/android.json`，并由安全回归证明没有落入桌面 capability。
 - 当前只打开主机连接、终端、SFTP 和凭据 vault；Rust coordinator 虽已接通 provider/outbox/merge，Android 也只能读取 value-free 状态。设置、密钥解锁、自动调度和真实设备尚未形成完整安全能力前，Sync 与广播、外部编辑、常驻监控和后台长连接保持关闭。每个 structured host request 逐字段验证 UUID、主机/用户名/端口、host-key 和不透明 credential reference；不得序列化或记录秘密值。
-- 生命周期仅允许前台解锁操作；任何非前台状态清理会话并递增 generation，连接完成时必须再次验证预留状态。平台实现仍需把生物识别、Activity/休眠、软键盘、剪贴板和网络切换作为独立测试面。
+- 生命周期默认 `Locked`；Tauri 原生窗口失焦与前端后台通知都清理会话并递增 generation，连接和 host-key 完成时必须再次验证代际。只有 Rust `android_unlock`/`android_set_biometric_enabled` 可切换 `Foreground`，启用或关闭访问门都要求官方 Tauri Biometric 插件完成系统认证；前端没有通用 lifecycle setter。原生 WebMessage 只允许固定 Tauri 主 frame/origin 和 `show`/`hide`/`failed` 三个不超过 32 bytes 的可见性信号，不授予 Rust 权限且不得传秘密；禁止退回 `addJavascriptInterface` 或 `*` origin。Activity/休眠、软键盘、剪贴板和网络切换仍是独立真机测试面。
 - Linux CI/VPS 可构建 aarch64 debug APK/AAB、验证签名结构和运行 Rust/Gradle unit gate，但这些结果不证明 Keystore 运行时、真实设备或模拟器行为。debug 自签名包不得描述为发布签名。
 - `android_native_transport.rs` 只允许 `ssh2`/libssh2 Rust API；握手后的 host-key pin 比对必须先于认证，秘密只以 `Zeroizing` 短生命周期进入调用。SFTP list 的路径、数量和条目类型必须在 Rust 再验证，symlink/special 不得被跟随。该模块的 fake/边界夹具不能替代真实服务器和 Android 链接测试。
 - Android aarch64 首次构建要求 NDK 27；`ssh2` 仅在 `target_os = "android"` 时启用 `vendored-openssl`，使 libssh2/OpenSSL 用目标 NDK 编译而不是错误链接主机 OpenSSL，桌面目标继续使用原有系统链接。该 feature 增加 Android 原生冷构建时间与包体积，但不增加运行时权限；许可证和删除方案记录在 `THIRD_PARTY_NOTICES.md`。
-- Android 凭据使用 `android-native-keyring-store`/`keyring-core` 明确注册 Keystore-backed store。凭据写入请求只允许反序列化且不得派生 `Debug`/`Serialize`；业务状态只保存 `ssh-<UUID>`/`key-<UUID>` 引用。私钥正文最多 1 MiB，密码/口令最多 16 KiB，错误不能包含底层秘密。生物识别尚未实现时必须保持文档与 manifest 真实。
+- Android 凭据使用 `android-native-keyring-store`/`keyring-core` 明确注册 Keystore-backed store，访问门开关使用独立固定条目。凭据写入请求只允许反序列化且不得派生 `Debug`/`Serialize`；业务状态只保存 `ssh-<UUID>`/`key-<UUID>` 引用。私钥正文最多 1 MiB，密码/口令最多 16 KiB，错误不能包含底层秘密。`tauri-plugin-biometric` 2.3.2/其 AndroidX 传递依赖只是应用访问门，不得描述为强生物识别保证、逐凭据硬件认证或替代真机 Keystore 验收。
 
 ### 10.9 B8 协议回归矩阵（v0.3 工作树）
 

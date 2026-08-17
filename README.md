@@ -230,7 +230,7 @@ VPShell 会持续审计成熟公开项目的模块边界和用户工作流，但
 | Alpha | 真实 SSH/SFTP 工作流与可安装预览版 | 首个技术预览 |
 | v0.2 | 传输可靠性、上下文识别与安全批量运维 | 进行中：跨重启恢复、文件坞移动/递归权限与安全批量任务已实现，等待发布与平台验收 |
 | v0.3 | 用户自控的端到端加密同步 | 内部协议原语分批实现中，尚不是可用产品功能 |
-| Android Preview | 移动终端、SFTP、凭据与同步 | Android 壳及 Rust/libssh2 连接、终端、只读 SFTP 浏览和 Keystore 凭据已接线；只读显示 Rust 同步协调器状态但 Sync capability 仍禁用，生物识别与设备验收待完成 |
+| Android Preview | 移动终端、SFTP、凭据与同步 | Android 壳及 Rust/libssh2 连接、终端、只读 SFTP、Keystore 凭据和可选系统验证访问门已接线；只读显示 Rust 同步协调器状态但 Sync capability 仍禁用，设备验收待完成 |
 | 后续 | 原生 SSH 引擎、可验证中继和可选托管服务 | 研究方向 |
 
 ### Alpha 当前阶段
@@ -276,7 +276,7 @@ Alpha 发布后的重点验证：
 - 复用 React/xterm.js 工作台、主机/历史/命令/脚本数据模型和端到端加密同步协议，针对触屏、软键盘、安全区和小屏重新编排交互；
 - Android Preview 的 Rust transport 直接使用 `ssh2`/libssh2 API、固定 SHA-256 host-key、有界终端 I/O 和只读 SFTP 列表，不依赖系统 `ssh` 可执行文件；真实服务器算法、文件上传下载与 Android arm64 兼容矩阵仍待后续验收；
 - 首个预览范围只包含主机连接、终端、SFTP、密码/密钥凭据和同步；广播、外部编辑、常驻监控及后台长连接在完成移动端安全与耗电评估后再开放；
-- 密码、OpenSSH 私钥和可选私钥口令只经具名 IPC 写入 Android Keystore-backed store，不进入业务状态；manifest 禁止备份与明文网络，Activity 设置 `FLAG_SECURE`。可选生物识别、剪贴板策略和真机生命周期验证尚未完成；
+- 密码、OpenSSH 私钥和可选私钥口令只经具名 IPC 写入 Android Keystore-backed store，不进入业务状态；manifest 禁止备份与明文网络，Activity 设置 `FLAG_SECURE`。设置中可选启用 Rust 调用的 Tauri Biometric 系统生物识别/设备凭据访问门；开关同样保存在 Keystore-backed store，后台立即隐藏 WebView、清空 Rust 会话，认证成功前保持 `Locked`。前端只有有界可见性消息，不能自行解锁；WebView 还禁用长按选择、autofill/content-capture、文件/内容访问。该访问门不等同于逐凭据硬件绑定，真机截图、剪贴板与生命周期验证仍待完成；
 - Linux VPS 已生成并校验本地 `aarch64` debug APK/AAB；它们只使用 Android Debug 自签名证书，不是发布物，也未上传。emulator/instrumentation、arm64 真机、网络切换、休眠恢复和软键盘仍是外部验收。
 
 ### 后续 - 原生引擎与可验证中继

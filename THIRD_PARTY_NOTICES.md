@@ -53,6 +53,17 @@ telemetry or backup surface. The dependency can be removed when VPShell owns an 
 Keystore adapter behind the same opaque-reference boundary; credential values must be deleted or
 migrated explicitly before such removal.
 
+## Android biometric access gate
+
+VPShell uses `tauri-plugin-biometric` 2.3.2 through its public Rust API. The plugin is distributed
+under MIT or Apache-2.0 and uses Apache-2.0 AndroidX Biometric transitively on Android. It adds no
+Android runtime permission and receives no SSH credential material; Rust calls it only to gate the
+Android lifecycle before local credential-backed operations are authorized. The plugin currently
+allows Android `BIOMETRIC_WEAK` and an optional device-credential fallback, so VPShell does not
+claim a strong-biometric guarantee. It can be removed together with the optional access gate
+without changing stored SSH credential formats. No plugin or AndroidX source or asset was copied
+into VPShell.
+
 Projects reviewed only for behavior or architecture are not third-party code dependencies. Their
 license boundaries and the decisions derived from that review are recorded in
 [`docs/OPEN_SOURCE_REFERENCES.md`](docs/OPEN_SOURCE_REFERENCES.md).

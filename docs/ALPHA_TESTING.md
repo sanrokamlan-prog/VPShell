@@ -138,7 +138,7 @@
 
 - `android_preview::tests` 必须验证 schema-v1 capability 清单、最多 8 个会话、结构化 host/user/port 和 `ssh-`/`key-` UUID 引用边界；模块不能出现系统 `ssh` 进程入口。
 - 前台建立会话后切到后台应拒绝新连接与操作；锁定或断开应清理会话索引，恢复前台后必须重新建立会话。广播、外部编辑、常驻监控和后台长连接应保持明确禁用。
-- `android_mobile::tests` 与安全回归还应验证 64 KiB 终端 I/O、密码/私钥类型和大小、桌面/Android capability 平台互斥、仅 INTERNET 权限、禁用 backup/cleartext/FileProvider 及 `FLAG_SECURE`。移动敏感请求不得派生 `Debug`/`Serialize` 或使用日志宏。
+- `android_mobile::tests` 与安全回归还应验证 64 KiB 终端 I/O、密码/私钥类型和大小、默认 Locked/原生失焦重锁、只有 Rust 系统认证 command 可解锁、host-key/凭据命令授权、固定主 frame/origin 与 32-byte 可见性 WebMessage、桌面/Android capability 平台互斥且不给 WebView biometric permission、仅 INTERNET 权限、禁用 backup/cleartext/FileProvider、长按选择/autofill/content capture 及 `FLAG_SECURE`。移动敏感请求不得派生 `Debug`/`Serialize` 或使用日志宏。
 - Linux VPS 可记录 aarch64 debug APK/AAB 的路径、大小、SHA-256 与 debug 签名结构，但不能替代 Android Keystore/生物识别、emulator/instrumentation、arm64 真机、休眠/网络切换、软键盘、截图或剪贴板人工验收。
 - `android_native_transport::tests` 还应验证固定 SHA-256 host-key、5--60 秒超时、清零密码/内存私钥载荷、绝对远端路径与 1,000 条 list 上限；它只能证明 Rust API 边界，不证明真实 SSH 算法、SFTP 权限或 Android arm64 链接。
 

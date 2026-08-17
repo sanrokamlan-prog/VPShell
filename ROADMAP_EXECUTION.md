@@ -114,9 +114,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | --- | --- |
 | 完成 | 基于共享桌面模型/同步协议建立 Rust `android_preview` 模块、Tauri Android 壳与明确移动能力边界；设备仍需外部验收 |
 | 完成 | 使用 Rust `ssh2`/libssh2 兼容 transport、固定 host-key 与有界 SFTP，不依赖系统 `ssh`；真实 Android/arm64/服务器兼容仍外部验收 |
-| 进行中 | 主机连接、终端、只读 SFTP 浏览与密码/私钥已接线；Rust-owned 同步协调器已接通 provider/outbox/merge，Android 只读展示恢复/冲突/队列状态且 manifest 继续禁用 Sync；代码与测试已完成，等待本提交 GitHub Actions 验证 |
+| 完成 | 主机连接、终端、只读 SFTP 浏览与密码/私钥已接线；Rust-owned 同步协调器已接通 provider/outbox/merge，Android 只读展示恢复/冲突/队列状态且 manifest 继续禁用 Sync；PR #1 run `32056611606` 全绿 |
 | 完成 | Android capability 排除广播、外部编辑、常驻监控、后台长连接和桌面 process/updater/dialog；非前台清理连接 |
-| 进行中 | Android Keystore store、私钥导入、禁备份/明文网络/FileProvider 与 `FLAG_SECURE` 已实现；可选生物识别和真机泄漏测试待实现/外部验收 |
+| 进行中 | Android Keystore store、私钥导入、禁备份/明文网络/FileProvider、`FLAG_SECURE`、Rust-owned 可选系统生物识别/设备凭据访问门、原生失焦重锁、后台隐藏、默认 Rust Locked 与 WebView 泄漏防护已实现；等待本提交 Actions，真机泄漏测试仍为外部验收 |
 | 完成 | Linux VPS 生成并哈希校验 aarch64 debug APK/AAB；Rust/security tests 与 Gradle unit gate 按可用范围执行，emulator/instrumentation 留作外部验收 |
 | 外部验收 | arm64 真机、休眠、网络切换、软键盘、截图/剪贴板和生命周期人工验收 |
 
@@ -154,8 +154,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-10 | B8 跨模块协议回归与测试报告 | `sync_protocol_regression::tests` 3/3，覆盖未知 envelope 版本、错误密钥/AEAD、对象身份搬移、journal 同 key/同身份 replay、published finality、merge 双到达顺序/截断状态、Local Folder 截断字节/取消；叠加三类 adapter/crypto/recovery/outbox/merge 全套夹具；`npm ci`（0 vulnerabilities）、生产前端构建、Rust fmt check、`cargo check --locked`、完整 Rust tests 151/151、`git diff --check`、基线 HEAD 与空 remote 全部通过；真实 OpenSSH SFTP、MinIO/S3、Gateway HTTP、两台以上设备和 Windows/macOS/Android 外部验收仍待外部环境 |
 | 2026-08-10 | C1 Android Preview 共享契约 | `android_preview::tests` 4/4；schema-v1 能力清单与 NativeRustSshSftp 固定、最多 8 会话、结构化 host/user/port 与不透明 credential reference 验证、后台/锁定/断开代际门禁和明确禁用能力通过；后续 Android 壳现已生成，设备生命周期仍待外部环境 |
 | 2026-08-10 | C2 Android Rust SSH/SFTP transport 边界 | `android_native_transport::tests` 4/4；`ssh2`/libssh2 直接 Rust 会话、5–60 秒超时、固定 SHA-256 host-key 先验、Zeroizing 密码/内存私钥类型、有界绝对 SFTP 路径与无系统 `ssh` 静态边界通过；未新增依赖；真实 SSH 算法/权限、Android arm64 链接、断网与设备测试仍待外部环境 |
-| 2026-08-17 | C3 同步协调器与 Android 只读状态（待 Actions） | 新增 `sync_coordinator` 与 7 个聚焦测试，接通 vault-scoped outbox claim、不可变 provider push/pull、AEAD 后 merge、冲突计数、恢复阻止、取消和代际状态；Tauri setup 持有协调器，Android capability 只增加 value-free `android_sync_status`，无 attach/run/ack 写权限且 Sync manifest 保持 disabled；CI 前复核已修正本机已发布对象 pull 回后应幂等跳过、不重复推进 merge/download 计数的测试期望；PR #1 首轮 Actions run `32056255938` 在 Rust `cargo fmt --check` 报告纯格式差异，本提交按 runner 输出修正，完整检查等待重跑；VPS 无 cargo/rustfmt/node_modules |
+| 2026-08-17 | C3 同步协调器与 Android 只读状态 | 新增 `sync_coordinator` 与 7 个聚焦测试，接通 vault-scoped outbox claim、不可变 provider push/pull、AEAD 后 merge、冲突计数、恢复阻止、取消和代际状态；Tauri setup 持有协调器，Android capability 只增加 value-free `android_sync_status`，无 attach/run/ack 写权限且 Sync manifest 保持 disabled；首轮 run `32056255938` 的 fmt 差异已修复，PR #1 run `32056611606` 的 frontend 与 Windows/macOS Intel/macOS arm/Linux fmt-check-test 全绿 |
+| 2026-08-17 | C4 Android 可选系统验证与泄漏防护（待 Actions） | Rust 通过 `tauri-plugin-biometric` 2.3.2 直接发起系统生物识别并允许设备凭据回退，启用/关闭均需认证且开关存入 Keystore-backed 固定条目；插件 Android 实现为 `BIOMETRIC_WEAK`，不宣称强生物识别。runtime 默认 Locked，Tauri 原生窗口失焦与前端后台通知均清会话，只有 Rust unlock/设置 command 可 foreground；host-key 预检和凭据增删补齐授权/代际保护。Activity 先隐藏 WebView并使用 `FLAG_SECURE`，限定主 frame/origin 的 32-byte WebMessage 只控制 `show`/`hide`/`failed`，禁通用 JS interface、长按选择、autofill/content capture、file/content access；新增 Rust lifecycle/静态安全回归及 CI aarch64 debug APK/Gradle gate。本机 `git diff --check`、JSON/清单静态检查通过，无 Cargo/rustfmt/node_modules，完整 frontend/Rust/Android 验证交给 Actions；真机 prompt/任务切换/截图/剪贴板/Keystore 仍外部验收 |
 
 ## 下一个动作
 
-等待 C3 提交的 GitHub Actions 全绿；通过后把该项改为完成，并进入 Phase C 的可选生物识别与泄漏防护。自动同步配置、密钥解锁与真实 provider 尚未形成安全完整能力，Android manifest 的 Sync capability 继续保持 disabled。
+等待 C4 提交的 GitHub Actions 全绿；失败先修复 Android/Kotlin/Rust/frontend 门禁，通过后把代码可验证部分改为完成，真机泄漏矩阵保持外部验收，再进入 Phase D 原生引擎。自动同步配置、密钥解锁与真实 provider 尚未形成安全完整能力，Android manifest 的 Sync capability 继续保持 disabled。

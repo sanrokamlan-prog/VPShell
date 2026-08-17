@@ -743,14 +743,17 @@ fn delete_credential(reference: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(TerminalManager::default())
-        .manage(android_mobile::AndroidMobileManager::default())
         .manage(remote_file_ops::RemoteFileOperationManager::default())
         .manage(remote_monitor::RemoteMonitorManager::default())
         .manage(safe_broadcast::SafeBroadcastManager::default())
         .manage(migration::MigrationManager::default())
         .setup(|app| {
             #[cfg(target_os = "android")]
-            initialize_android_keyring()?;
+            {
+                initialize_android_keyring()?;
+                app.handle().plugin(tauri_plugin_biometric::init())?;
+            }
+            app.manage(android_mobile::AndroidMobileManager::load()?);
             let app_data_directory = app
                 .path()
                 .app_data_dir()
@@ -772,6 +775,14 @@ pub fn run() {
             )?);
             app.manage(transfer_manager::TransferManager::load(app_data_directory));
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(focused) = event {
+                android_mobile::android_window_focus_changed(
+                    window.state::<android_mobile::AndroidMobileManager>(),
+                    *focused,
+                );
+            }
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -831,8 +842,11 @@ pub fn run() {
             remote_monitor::stop_remote_monitor,
             android_mobile::android_preview_status,
             android_mobile::android_sync_status,
+            android_mobile::android_security_status,
+            android_mobile::android_unlock,
+            android_mobile::android_set_biometric_enabled,
             android_mobile::android_inspect_host_key,
-            android_mobile::android_set_lifecycle,
+            android_mobile::android_enter_background,
             android_mobile::android_connect_host,
             android_mobile::android_disconnect_host,
             android_mobile::android_list_remote_files,

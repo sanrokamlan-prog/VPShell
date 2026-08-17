@@ -33,6 +33,8 @@ Actual third-party code used or adapted by VPShell is listed separately in
 | [quick-xml](https://github.com/tafia/quick-xml) and [percent-encoding](https://github.com/servo/rust-url) | MIT | Bounded WebDAV XML parsing and href decoding | Existing locked packages promoted to direct dependencies; public APIs only, no copied source or provider implementation |
 | [ssh2-rs](https://github.com/alexcrichton/ssh2-rs), libssh2 and OpenSSL | MIT or Apache-2.0 / BSD-style / Apache-2.0 | Android-compatible SSH/SFTP transport without a system executable | Existing dependency used through public APIs; vendored OpenSSL only enables NDK cross-compilation; no copied source |
 | [android-native-keyring-store](https://github.com/open-source-cooperative/android-native-keyring-store) and keyring-core | MIT or Apache-2.0 | Android Keystore-backed opaque credential references | Dependencies used through public APIs; no copied source; platform scope and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
+| [Tauri Biometric plugin](https://github.com/tauri-apps/plugins-workspace/tree/db9c5998feff9384f9cbbefcbe0d45937c00a1fc/plugins/biometric) and AndroidX Biometric | MIT or Apache-2.0 / Apache-2.0 | Rust-owned system biometric/device-credential prompt and capability checks | Plugin 2.3.2 used through its public Rust API; AndroidX is transitive; no source copied; access-gate and removal boundaries recorded in `THIRD_PARTY_NOTICES.md` |
+| [MaidKit](https://github.com/Solsynth/MaidKit/tree/eaf4922072960158f04021ed866323e6c17209cd) | AGPL-3.0 | SSH-only non-intrusive management, dual-pane SFTP, services/containers/databases, jump/forwarding, audit, scripts and explicit agent action approval | Behavior and product decomposition reference only; no source, assets, text or implementation copied/adapted into Apache-2.0 VPShell |
 
 ## Adopted decisions
 
@@ -79,3 +81,10 @@ inventory and per-item partial results. No reviewed project's file-manager code 
   cross-compilation and recorded its dependency boundary; no upstream implementation was copied.
 - 2026-08-10: Added the maintained Android-native keyring store through its public Rust API and
   recorded its Keystore/SharedPreferences, license and removal boundaries; no upstream source was copied.
+- 2026-08-17: Reviewed Tauri plugins-workspace biometric implementation at commit
+  `db9c5998feff9384f9cbbefcbe0d45937c00a1fc` and AndroidX documentation; used plugin 2.3.2's
+  public Rust API and recorded its weak-biometric/device-credential contract without copying source.
+- 2026-08-17: Reviewed MaidKit README at commit
+  `eaf4922072960158f04021ed866323e6c17209cd`; its AGPL-3.0 code/assets remain outside VPShell,
+  and only the abstract SSH-only module split, dual-pane operations, audit and approval patterns
+  were recorded for later independent design.

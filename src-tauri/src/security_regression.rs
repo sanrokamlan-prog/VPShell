@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            65,
+            68,
             "command manifest contains duplicates or changed count"
         );
 
@@ -162,6 +162,11 @@ mod tests {
             assert!(!android_permissions.contains(forbidden));
         }
         assert!(android_permissions.contains("allow-android-sync-status"));
+        assert!(android_permissions.contains("allow-android-security-status"));
+        assert!(android_permissions.contains("allow-android-unlock"));
+        assert!(android_permissions.contains("allow-android-enter-background"));
+        assert!(!android_permissions.contains("allow-android-set-lifecycle"));
+        assert!(!android_permissions.iter().any(|permission| permission.starts_with("biometric:")));
     }
 
     #[test]
@@ -218,13 +223,39 @@ mod tests {
         assert!(!manifest.contains("external-path"));
         assert!(activity.contains("WindowManager.LayoutParams.FLAG_SECURE"));
         assert!(activity.contains("vpshell-native-background"));
-        assert!(activity.contains("vpshell-native-foreground"));
+        assert!(activity.contains("vpshell-native-resume"));
+        assert!(activity.contains("WebViewCompat.addWebMessageListener"));
+        assert!(activity.contains("http://tauri.localhost"));
+        assert!(!activity.contains("addJavascriptInterface"));
+        assert!(!activity.contains("setOf(\"*\")"));
+        assert!(activity.contains("if (BuildConfig.DEBUG)"));
+        assert!(activity.contains("IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS"));
+        assert!(activity.contains("IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS"));
+        assert!(activity.contains("setOnLongClickListener { true }"));
+        assert!(activity.contains("MAX_VISIBILITY_MESSAGE_BYTES = 32"));
+        assert!(activity.contains("webView.visibility = View.INVISIBLE"));
+        assert!(!activity.contains("BiometricPrompt"));
+        assert!(!activity.contains("SharedPreferences"));
         assert!(!gradle.contains("usesCleartextTraffic\"] = \"true\""));
+        assert!(!gradle.contains("androidx.biometric:biometric"));
+
+        let frontend = include_str!("../../src/androidSecurity.ts");
+        assert!(frontend.contains("requestAndroidSecurity"));
+        assert!(frontend.contains("android_unlock"));
+        assert!(!frontend.contains("password"));
+        assert!(!frontend.contains("privateKey"));
 
         let source = include_str!("android_mobile.rs");
         for forbidden in ["println!", "eprintln!", "dbg!", "tracing::", "log::"] {
             assert!(!source.contains(forbidden));
         }
         assert!(!source.contains("Serialize)]\npub(crate) struct AndroidStoreCredentialRequest"));
+        assert!(source.contains("tauri_plugin_biometric::BiometricExt"));
+        assert!(source.contains("AndroidPreviewOperation::CredentialVault"));
+        assert!(source.contains("AndroidPreviewOperation::Connect"));
+        assert!(!source.contains("pub(crate) fn android_set_lifecycle"));
+
+        let cargo = include_str!("../Cargo.toml");
+        assert!(cargo.contains("tauri-plugin-biometric = \"=2.3.2\""));
     }
 }

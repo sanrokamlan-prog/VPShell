@@ -250,7 +250,7 @@ v0.2 工作树只开放 Compose 安全广播，不开放 Raw input。Rust 后端
 
 `android_preview.rs` 在 Rust 信任边界建立平台无关的 schema-v1 manifest、结构化主机请求和生命周期运行时。manifest 固定 `NativeRustSshSftp` 引擎，最多 8 个会话；当前只启用主机连接、终端、SFTP 与凭据 vault。Android 可读取协调器的 value-free 队列、恢复和冲突计数，但同步仍与广播、外部编辑、常驻监控和后台长连接一样显式 disabled。主机请求只传 UUID、受限 host/user/port、固定 host-key 与 `ssh-<UUID>` 或 `key-<UUID>` 不透明引用，不传秘密值。
 
-运行时只有前台且解锁时允许建立会话或调用支持的操作；任何非前台状态都会增加 generation、清空原生连接并拒绝迟到的连接结果。`android_native_transport.rs` 直接使用 Rust `ssh2`/libssh2 API，握手后先校验固定 SHA-256 host-key，再执行清零密码/内存私钥认证，并提供有界 PTY I/O 与不跟随链接的 SFTP 列表。`android_mobile.rs` 是单独的 Tauri IPC/会话 owner，Android capability 不包含桌面 OpenSSH PTY、广播、编辑器、监控、updater/process/dialog。移动密码和私钥只写入 Android Keystore-backed store；manifest 禁止 backup/cleartext/FileProvider，Activity 设置 `FLAG_SECURE`。Linux 已构建 debug APK/AAB，但同步、生物识别、真机 Keystore/生命周期和真实 SSH/SFTP 仍未验收。
+运行时默认 `Locked`，只有活动窗口且经 Rust 解锁时允许建立会话或调用支持的操作；原生窗口失焦或前端后台通知都会增加 generation、清空原生连接并拒绝迟到的连接/host-key 结果。`android_native_transport.rs` 直接使用 Rust `ssh2`/libssh2 API，握手后先校验固定 SHA-256 host-key，再执行清零密码/内存私钥认证，并提供有界 PTY I/O 与不跟随链接的 SFTP 列表。`android_mobile.rs` 是单独的 Tauri IPC/会话 owner，Android capability 不包含桌面 OpenSSH PTY、广播、编辑器、监控、updater/process/dialog。移动密码、私钥和访问门开关只写入 Android Keystore-backed store；manifest 禁止 backup/cleartext/FileProvider，Activity 设置 `FLAG_SECURE`。可选 `tauri-plugin-biometric` 2.3.2 由 Rust 直接调用系统生物识别，并允许设备凭据回退；只有认证成功的 Rust command 能切换 `Foreground`。固定 Tauri 主 frame/origin 的 32-byte WebMessage 只控制原生 WebView 可见性，不能改变 Rust 状态；同时禁用长按选择、autofill/content capture 与 file/content access。Linux CI 构建 debug APK并跑 Gradle/Rust 测试，但真机 prompt、Keystore/生命周期和真实 SSH/SFTP 仍未验收。
 
 ## 8. 历史与本地数据模型
 

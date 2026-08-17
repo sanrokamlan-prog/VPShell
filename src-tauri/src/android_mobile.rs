@@ -30,8 +30,9 @@ use crate::{
 const MAX_DECODED_INPUT_BYTES: usize = 64 * 1024;
 const MAX_PASSWORD_BYTES: usize = 16 * 1024;
 const MAX_PRIVATE_KEY_BYTES: usize = 1024 * 1024;
+const BIOMETRIC_SETTING_ACCOUNT: &str = "android-biometric-access-gate";
+const BIOMETRIC_SETTING_VALUE: &str = "enabled-v1";
 
-#[derive(Default)]
 pub(crate) struct AndroidMobileManager {
     inner: Mutex<AndroidMobileState>,
 }
@@ -39,6 +40,9 @@ pub(crate) struct AndroidMobileManager {
 struct AndroidMobileState {
     runtime: AndroidPreviewRuntime,
     sessions: HashMap<Uuid, Arc<Mutex<AndroidMobileSession>>>,
+    biometric_enabled: bool,
+    authenticating: bool,
+    window_focused: bool,
 }
 
 struct AndroidMobileSession {
@@ -51,7 +55,43 @@ impl Default for AndroidMobileState {
         Self {
             runtime: AndroidPreviewRuntime::default(),
             sessions: HashMap::new(),
+            biometric_enabled: false,
+            authenticating: false,
+            window_focused: false,
         }
+    }
+}
+
+impl Default for AndroidMobileManager {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(AndroidMobileState::default()),
+        }
+    }
+}
+
+impl AndroidMobileManager {
+    #[cfg(target_os = "android")]
+    pub(crate) fn load() -> Result<Self, String> {
+        let entry = keyring::Entry::new(crate::CREDENTIAL_SERVICE, BIOMETRIC_SETTING_ACCOUNT)
+            .map_err(|_| "Android 系统验证设置不可用".to_string())?;
+        let biometric_enabled = match entry.get_password() {
+            Ok(value) if value == BIOMETRIC_SETTING_VALUE => true,
+            Ok(_) => return Err("Android 系统验证设置格式无效".to_string()),
+            Err(keyring::Error::NoEntry) => false,
+            Err(_) => return Err("Android 系统验证设置读取失败".to_string()),
+        };
+        Ok(Self {
+            inner: Mutex::new(AndroidMobileState {
+                biometric_enabled,
+                ..AndroidMobileState::default()
+            }),
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn load() -> Result<Self, String> {
+        Ok(Self::default())
     }
 }
 
@@ -62,6 +102,16 @@ pub(crate) struct AndroidPreviewStatus {
     pub lifecycle: AndroidLifecycle,
     pub generation: u64,
     pub session_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AndroidSecurityStatus {
+    pub available: bool,
+    pub enabled: bool,
+    pub locked: bool,
+    pub generation: u64,
+    pub code: Option<&'static str>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -145,6 +195,92 @@ fn lock_session(
         .map_err(|_| "Android SSH 会话状态已损坏".to_string())
 }
 
+fn security_status(
+    state: &AndroidMobileState,
+    available: bool,
+    code: Option<&'static str>,
+) -> AndroidSecurityStatus {
+    AndroidSecurityStatus {
+        available,
+        enabled: state.biometric_enabled,
+        locked: state.runtime.lifecycle() != AndroidLifecycle::Foreground,
+        generation: state.runtime.generation(),
+        code,
+    }
+}
+
+fn set_background(state: &mut AndroidMobileState) {
+    state.runtime.set_lifecycle(AndroidLifecycle::Background);
+    state.sessions.clear();
+}
+
+pub(crate) fn android_window_focus_changed(
+    manager: tauri::State<'_, AndroidMobileManager>,
+    focused: bool,
+) {
+    if let Ok(mut state) = lock_manager(&manager) {
+        state.window_focused = focused;
+        if !focused {
+            set_background(&mut state);
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn biometric_available(app: &tauri::AppHandle) -> (bool, Option<&'static str>) {
+    use tauri_plugin_biometric::BiometricExt;
+
+    match app.biometric().status() {
+        Ok(status) if status.is_available => (true, None),
+        Ok(_) => (false, Some("authentication-unavailable")),
+        Err(_) => (false, Some("authentication-status-failed")),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn biometric_available(_app: &tauri::AppHandle) -> (bool, Option<&'static str>) {
+    (false, Some("authentication-unavailable"))
+}
+
+#[cfg(target_os = "android")]
+fn authenticate_system(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_biometric::{AuthOptions, BiometricExt};
+
+    app.biometric()
+        .authenticate(
+            "验证后才能访问连接与本机凭据".to_string(),
+            AuthOptions {
+                allow_device_credential: true,
+                cancel_title: Some("取消".to_string()),
+                fallback_title: None,
+                title: Some("解锁 VPShell".to_string()),
+                subtitle: Some("系统验证由 Android 处理".to_string()),
+                confirmation_required: Some(true),
+            },
+        )
+        .map_err(|_| "authentication-failed".to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+fn authenticate_system(_app: &tauri::AppHandle) -> Result<(), String> {
+    Err("authentication-unavailable".to_string())
+}
+
+fn persist_biometric_enabled(enabled: bool) -> Result<(), String> {
+    let entry = keyring::Entry::new(crate::CREDENTIAL_SERVICE, BIOMETRIC_SETTING_ACCOUNT)
+        .map_err(|_| "Android 系统验证设置不可用".to_string())?;
+    if enabled {
+        entry
+            .set_password(BIOMETRIC_SETTING_VALUE)
+            .map_err(|_| "Android 系统验证设置写入失败".to_string())
+    } else {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err("Android 系统验证设置删除失败".to_string()),
+        }
+    }
+}
+
 fn resolve_auth(request: &AndroidHostRequest) -> Result<AndroidNativeAuth, String> {
     let secret =
         file_transfer::read_secret(&request.credential_ref, "Android 凭据引用不存在或无法读取")?;
@@ -205,8 +341,13 @@ fn validate_credential_value(
 
 #[tauri::command]
 pub(crate) fn android_store_credential(
+    manager: tauri::State<'_, AndroidMobileManager>,
     request: AndroidStoreCredentialRequest,
 ) -> Result<String, String> {
+    let state = lock_manager(&manager)?;
+    state
+        .runtime
+        .authorize(AndroidPreviewOperation::CredentialVault)?;
     let prefix = validate_credential_value(&request)?;
     let reference = format!("{prefix}{}", Uuid::new_v4());
     keyring::Entry::new(crate::CREDENTIAL_SERVICE, &reference)
@@ -216,7 +357,14 @@ pub(crate) fn android_store_credential(
 }
 
 #[tauri::command]
-pub(crate) fn android_delete_credential(reference: String) -> Result<(), String> {
+pub(crate) fn android_delete_credential(
+    manager: tauri::State<'_, AndroidMobileManager>,
+    reference: String,
+) -> Result<(), String> {
+    let state = lock_manager(&manager)?;
+    state
+        .runtime
+        .authorize(AndroidPreviewOperation::CredentialVault)?;
     let prefix = if reference.starts_with("ssh-") {
         "ssh-"
     } else if reference.starts_with("key-") {
@@ -256,24 +404,142 @@ pub(crate) fn android_sync_status(
 }
 
 #[tauri::command]
+pub(crate) fn android_security_status(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, AndroidMobileManager>,
+) -> Result<AndroidSecurityStatus, String> {
+    let (available, code) = biometric_available(&app);
+    let state = lock_manager(&manager)?;
+    Ok(security_status(&state, available, code))
+}
+
+#[tauri::command]
+pub(crate) fn android_unlock(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, AndroidMobileManager>,
+) -> Result<AndroidSecurityStatus, String> {
+    {
+        let mut state = lock_manager(&manager)?;
+        if !state.window_focused {
+            return Err("Android Preview 仅允许在活动窗口解锁".to_string());
+        }
+        if state.authenticating {
+            return Err("authentication-in-progress".to_string());
+        }
+        if !state.biometric_enabled {
+            state.runtime.set_lifecycle(AndroidLifecycle::Foreground);
+            return Ok(security_status(&state, biometric_available(&app).0, None));
+        }
+        state.authenticating = true;
+        state.runtime.set_lifecycle(AndroidLifecycle::Locked);
+        state.sessions.clear();
+    }
+
+    let authentication = authenticate_system(&app);
+    let (available, availability_code) = biometric_available(&app);
+    let mut state = lock_manager(&manager)?;
+    state.authenticating = false;
+    match authentication {
+        Ok(()) if state.window_focused => {
+            state.runtime.set_lifecycle(AndroidLifecycle::Foreground);
+            Ok(security_status(&state, available, availability_code))
+        }
+        Ok(()) => {
+            state.runtime.set_lifecycle(AndroidLifecycle::Locked);
+            Err("authentication-window-inactive".to_string())
+        }
+        Err(error) => {
+            state.runtime.set_lifecycle(AndroidLifecycle::Locked);
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn android_set_biometric_enabled(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, AndroidMobileManager>,
+    enabled: bool,
+) -> Result<AndroidSecurityStatus, String> {
+    {
+        let mut state = lock_manager(&manager)?;
+        state
+            .runtime
+            .authorize(AndroidPreviewOperation::CredentialVault)?;
+        if state.authenticating {
+            return Err("authentication-in-progress".to_string());
+        }
+        if state.biometric_enabled == enabled {
+            return Ok(security_status(&state, biometric_available(&app).0, None));
+        }
+        state.authenticating = true;
+        state.runtime.set_lifecycle(AndroidLifecycle::Locked);
+        state.sessions.clear();
+    }
+
+    let authentication = authenticate_system(&app);
+    let mut state = lock_manager(&manager)?;
+    state.authenticating = false;
+    if let Err(error) = authentication {
+        let lifecycle = if state.window_focused {
+            AndroidLifecycle::Foreground
+        } else {
+            AndroidLifecycle::Locked
+        };
+        state.runtime.set_lifecycle(lifecycle);
+        return Err(error);
+    }
+    if let Err(error) = persist_biometric_enabled(enabled) {
+        let lifecycle = if state.window_focused {
+            AndroidLifecycle::Foreground
+        } else {
+            AndroidLifecycle::Locked
+        };
+        state.runtime.set_lifecycle(lifecycle);
+        return Err(error);
+    }
+    state.biometric_enabled = enabled;
+    let (available, code) = biometric_available(&app);
+    if !state.window_focused {
+        state.runtime.set_lifecycle(AndroidLifecycle::Locked);
+        return Ok(security_status(
+            &state,
+            available,
+            Some("authentication-window-inactive"),
+        ));
+    }
+    state.runtime.set_lifecycle(AndroidLifecycle::Foreground);
+    Ok(security_status(&state, available, code))
+}
+
+#[tauri::command]
 pub(crate) fn android_inspect_host_key(
+    manager: tauri::State<'_, AndroidMobileManager>,
     host: String,
     port: u16,
     timeout_seconds: u16,
 ) -> Result<AndroidHostKeyInspection, String> {
-    crate::android_native_transport::inspect_host_key(&host, port, timeout_seconds)
+    let generation = {
+        let state = lock_manager(&manager)?;
+        state.runtime.authorize(AndroidPreviewOperation::Connect)?;
+        state.runtime.generation()
+    };
+    let inspection =
+        crate::android_native_transport::inspect_host_key(&host, port, timeout_seconds)?;
+    let state = lock_manager(&manager)?;
+    state.runtime.authorize(AndroidPreviewOperation::Connect)?;
+    if state.runtime.generation() != generation {
+        return Err("Android 生命周期已变化，主机指纹结果已丢弃".to_string());
+    }
+    Ok(inspection)
 }
 
 #[tauri::command]
-pub(crate) fn android_set_lifecycle(
+pub(crate) fn android_enter_background(
     manager: tauri::State<'_, AndroidMobileManager>,
-    lifecycle: AndroidLifecycle,
 ) -> Result<AndroidPreviewStatus, String> {
     let mut state = lock_manager(&manager)?;
-    state.runtime.set_lifecycle(lifecycle);
-    if lifecycle != AndroidLifecycle::Foreground {
-        state.sessions.clear();
-    }
+    set_background(&mut state);
     Ok(AndroidPreviewStatus {
         manifest: state.runtime.manifest().clone(),
         lifecycle: state.runtime.lifecycle(),
@@ -480,5 +746,26 @@ mod tests {
             value: "x".repeat(MAX_PASSWORD_BYTES + 1),
         };
         assert!(validate_credential_value(&oversized).is_err());
+    }
+
+    #[test]
+    fn security_state_is_locked_by_default_and_background_is_fail_closed() {
+        let manager = AndroidMobileManager::default();
+        let mut state = lock_manager(&manager).unwrap();
+        let status = security_status(&state, true, None);
+        assert!(!status.enabled);
+        assert!(status.locked);
+        assert!(!state.window_focused);
+
+        state.window_focused = true;
+        state.runtime.set_lifecycle(AndroidLifecycle::Foreground);
+        set_background(&mut state);
+        assert_eq!(state.runtime.lifecycle(), AndroidLifecycle::Background);
+        assert!(
+            state
+                .runtime
+                .authorize(AndroidPreviewOperation::CredentialVault)
+                .is_err()
+        );
     }
 }

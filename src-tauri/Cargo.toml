@@ -52,6 +52,7 @@ tauri-plugin-process = "2"
 ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
 android-native-keyring-store = "1.0.0"
 keyring-core = "1.0.0"
+tauri-plugin-biometric = "=2.3.2"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }

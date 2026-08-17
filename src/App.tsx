@@ -62,6 +62,11 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { TerminalView } from "./components/TerminalView";
 import { usePersistedState } from "./hooks/usePersistedState";
 import brandMark from "./assets/vpshell.svg";
+import {
+  postAndroidVisibility,
+  requestAndroidSecurity,
+  type AndroidSecurityStatus,
+} from "./androidSecurity";
 import type {
   AppState,
   CommandRecipe,
@@ -369,6 +374,7 @@ function App() {
   const [androidCredentialKind, setAndroidCredentialKind] = useState<"password" | "privateKey">("password");
   const [androidSyncStatus, setAndroidSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
   const [androidSyncError, setAndroidSyncError] = useState<string | null>(null);
+  const [androidSecurityStatus, setAndroidSecurityStatus] = useState<AndroidSecurityStatus | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
@@ -392,22 +398,45 @@ function App() {
 
   useEffect(() => {
     if (!isAndroidRuntime()) return undefined;
-    const setLifecycle = (lifecycle: "background" | "foreground") => {
-      void invoke("android_set_lifecycle", {
-        lifecycle,
-      }).catch(() => undefined);
+    let active = true;
+    let unlocking = false;
+    const enterBackground = () => {
+      postAndroidVisibility("hide");
+      setAndroidSecurityStatus((current) => current ? { ...current, locked: true } : current);
+      void invoke("android_enter_background").catch(() => undefined);
     };
-    const updateLifecycle = () => setLifecycle(document.hidden ? "background" : "foreground");
-    const enterBackground = () => setLifecycle("background");
-    const enterForeground = () => setLifecycle("foreground");
-    updateLifecycle();
+    const unlock = async () => {
+      if (unlocking) return;
+      unlocking = true;
+      try {
+        const status = await requestAndroidSecurity("unlock");
+        if (!active) return;
+        setAndroidSecurityStatus(status);
+        postAndroidVisibility(status.locked ? "failed" : "show");
+      } catch (error) {
+        if (!active || String(error).includes("authentication-in-progress")) return;
+        postAndroidVisibility("failed");
+        void requestAndroidSecurity("status")
+          .then((status) => active && setAndroidSecurityStatus(status))
+          .catch(() => undefined);
+      } finally {
+        unlocking = false;
+      }
+    };
+    const updateLifecycle = () => {
+      if (document.hidden) enterBackground();
+      else void unlock();
+    };
+    postAndroidVisibility("hide");
+    void unlock();
     document.addEventListener("visibilitychange", updateLifecycle);
     window.addEventListener("vpshell-native-background", enterBackground);
-    window.addEventListener("vpshell-native-foreground", enterForeground);
+    window.addEventListener("vpshell-native-resume", unlock);
     return () => {
+      active = false;
       document.removeEventListener("visibilitychange", updateLifecycle);
       window.removeEventListener("vpshell-native-background", enterBackground);
-      window.removeEventListener("vpshell-native-foreground", enterForeground);
+      window.removeEventListener("vpshell-native-resume", unlock);
     };
   }, []);
 
@@ -1861,6 +1890,20 @@ function App() {
           }))}
           onClose={() => setDialog(null)}
           showToast={showToast}
+          androidSecurity={isAndroidRuntime() ? androidSecurityStatus : undefined}
+          onAndroidBiometricChange={isAndroidRuntime() ? async (enabled) => {
+            try {
+              const status = await requestAndroidSecurity("setEnabled", enabled);
+              setAndroidSecurityStatus(status);
+              postAndroidVisibility(status.locked ? "failed" : "show");
+              return status;
+            } catch (error) {
+              const status = await requestAndroidSecurity("status").catch(() => null);
+              if (status) setAndroidSecurityStatus(status);
+              postAndroidVisibility(status?.locked === false ? "show" : "failed");
+              throw error;
+            }
+          } : undefined}
         />
       ) : null}
 

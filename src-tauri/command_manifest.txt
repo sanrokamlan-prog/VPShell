@@ -51,8 +51,11 @@ set_remote_monitor_interval
 stop_remote_monitor
 android_preview_status
 android_sync_status
+android_security_status
+android_unlock
+android_set_biometric_enabled
 android_inspect_host_key
-android_set_lifecycle
+android_enter_background
 android_connect_host
 android_disconnect_host
 android_list_remote_files
