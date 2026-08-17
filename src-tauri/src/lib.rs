@@ -518,7 +518,9 @@ async fn native_list_remote_files(
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[tauri::command]
-async fn native_list_remote_files(_request: serde_json::Value) -> Result<serde_json::Value, String> {
+async fn native_list_remote_files(
+    _request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     Err("原生桌面 SFTP 在移动端预览中不可用".to_string())
 }
 

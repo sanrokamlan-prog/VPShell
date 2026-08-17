@@ -1323,13 +1323,16 @@ async fn list_native_sftp_directory(
         )
     })?;
     validate_sftp_canonical_path(&canonical)?;
-    let directory_metadata = sftp.symlink_metadata(canonical.clone()).await.map_err(|_| {
-        NativeEngineError::new(
-            "native-sftp-directory-stat-failed",
-            "无法读取原生 SFTP 目录属性",
-            true,
-        )
-    })?;
+    let directory_metadata = sftp
+        .symlink_metadata(canonical.clone())
+        .await
+        .map_err(|_| {
+            NativeEngineError::new(
+                "native-sftp-directory-stat-failed",
+                "无法读取原生 SFTP 目录属性",
+                true,
+            )
+        })?;
     if directory_metadata.is_symlink() || !directory_metadata.is_dir() {
         return Err(NativeEngineError::new(
             "native-sftp-not-directory",
@@ -1338,11 +1341,7 @@ async fn list_native_sftp_directory(
         ));
     }
     let directory = sftp.read_dir(canonical.clone()).await.map_err(|_| {
-        NativeEngineError::new(
-            "native-sftp-list-failed",
-            "无法读取原生 SFTP 目录",
-            true,
-        )
+        NativeEngineError::new("native-sftp-list-failed", "无法读取原生 SFTP 目录", true)
     })?;
     let mut entries = Vec::new();
     for entry in directory {
