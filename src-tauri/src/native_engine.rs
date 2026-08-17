@@ -183,11 +183,9 @@ impl NativeTerminalHandle {
                     "原生终端输入队列已满，请稍后重试",
                     true,
                 ),
-                mpsc::error::TrySendError::Closed(_) => NativeEngineError::new(
-                    "native-terminal-closed",
-                    "原生终端会话已经关闭",
-                    false,
-                ),
+                mpsc::error::TrySendError::Closed(_) => {
+                    NativeEngineError::new("native-terminal-closed", "原生终端会话已经关闭", false)
+                }
             })
     }
 
@@ -201,11 +199,9 @@ impl NativeTerminalHandle {
                     "原生终端控制队列已满，请稍后重试",
                     true,
                 ),
-                mpsc::error::TrySendError::Closed(_) => NativeEngineError::new(
-                    "native-terminal-closed",
-                    "原生终端会话已经关闭",
-                    false,
-                ),
+                mpsc::error::TrySendError::Closed(_) => {
+                    NativeEngineError::new("native-terminal-closed", "原生终端会话已经关闭", false)
+                }
             })
     }
 
@@ -481,10 +477,8 @@ impl NativeEngineManager {
 
     fn lock_terminal_sessions(
         &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, HashMap<Uuid, ActiveTerminalSession>>,
-        NativeEngineError,
-    > {
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<Uuid, ActiveTerminalSession>>, NativeEngineError>
+    {
         self.inner.terminal_sessions.lock().map_err(|_| {
             NativeEngineError::new(
                 "native-terminal-state-corrupt",
@@ -1231,11 +1225,7 @@ async fn run_native_terminal(
         _ => {}
     }
     let _ = session
-        .disconnect(
-            Disconnect::ByApplication,
-            "native terminal closed",
-            "",
-        )
+        .disconnect(Disconnect::ByApplication, "native terminal closed", "")
         .await;
     manager.finish_terminal(session_id, generation);
     let _ = events
@@ -1397,7 +1387,11 @@ mod tests {
         handle.write(b"first").unwrap();
         let error = handle.write(b"second").unwrap_err();
         assert_eq!(error.code, "native-terminal-backpressure");
-        assert!(handle.write(&vec![0_u8; MAX_TERMINAL_INPUT_BYTES + 1]).is_err());
+        assert!(
+            handle
+                .write(&vec![0_u8; MAX_TERMINAL_INPUT_BYTES + 1])
+                .is_err()
+        );
         assert!(handle.resize(1, 24).is_err());
         assert!(matches!(
             receiver.try_recv().unwrap(),
@@ -1406,7 +1400,10 @@ mod tests {
         handle.resize(120, 40).unwrap();
         assert!(matches!(
             receiver.try_recv().unwrap(),
-            NativeTerminalCommand::Resize { cols: 120, rows: 40 }
+            NativeTerminalCommand::Resize {
+                cols: 120,
+                rows: 40
+            }
         ));
         handle.stop();
         assert!(cancellation.is_cancelled());

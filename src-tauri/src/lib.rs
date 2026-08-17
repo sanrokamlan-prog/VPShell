@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use std::time::Duration;
 use std::{
     collections::HashMap,
     env,
@@ -8,8 +10,6 @@ use std::{
     },
     thread,
 };
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use std::time::Duration;
 
 use base64::prelude::*;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -323,8 +323,7 @@ async fn start_native_terminal(
         }
     };
     let integration = Arc::new(Mutex::new(shell_integration::ShellIntegrationParser::new()));
-    let (acknowledgements, mut acknowledgement_receiver) =
-        mpsc::channel(NATIVE_TERMINAL_ACK_QUEUE);
+    let (acknowledgements, mut acknowledgement_receiver) = mpsc::channel(NATIVE_TERMINAL_ACK_QUEUE);
     let pending_delivery = Arc::new(AtomicU64::new(0));
     let bridge_handle = launch.handle.clone();
     {
@@ -539,10 +538,12 @@ fn ack_native_terminal_output(
     if pending_delivery.load(Ordering::SeqCst) != u64::from(delivery_id) {
         return Err("原生终端输出确认序号已过期或尚未发送".to_string());
     }
-    acknowledgements.try_send(delivery_id).map_err(|error| match error {
-        mpsc::error::TrySendError::Full(_) => "原生终端输出确认队列已满".to_string(),
-        mpsc::error::TrySendError::Closed(_) => "原生终端输出确认通道已关闭".to_string(),
-    })
+    acknowledgements
+        .try_send(delivery_id)
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => "原生终端输出确认队列已满".to_string(),
+            mpsc::error::TrySendError::Closed(_) => "原生终端输出确认通道已关闭".to_string(),
+        })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
