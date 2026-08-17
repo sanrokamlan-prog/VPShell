@@ -2001,6 +2001,7 @@ function App() {
               }}
               connected={activeSession.state === "connected"}
               androidSessionId={isAndroidRuntime() ? activeSession.id : undefined}
+              nativeSessionId={isDesktopRuntime() && activeSession.engine === "russh" ? activeSession.id : undefined}
               initialPath={isAndroidRuntime() && !activeSession.currentPath.startsWith("/") ? "/" : activeSession.currentPath}
               externalEditorPath={appState.settings.externalEditorPath}
               autoUploadEditedFiles={appState.settings.autoUploadEditedFiles}

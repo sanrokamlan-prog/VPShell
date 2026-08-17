@@ -260,8 +260,9 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - `russh` 关闭默认 feature，只启用 `ring` 加密后端和 RSA 密钥支持；不引入默认 `aws-lc-rs` 或压缩面。client config 从默认 host-key 列表删除 `ssh-rsa`，RSA 用户认证也只有服务器明确报告 RSA SHA-2 时才继续，禁止构造器退回 SHA-1。选择 0.62.7 是为了包含 0.62.4 起的全零 Curve25519 共享秘密修复、0.60.3 起的恶意数据包分配修复和 0.62.7 的解压边界修复。Tokio/tokio-util 精确对齐现有锁图的 1.53.1/0.7.19，新增能力只在 Linux/macOS/Windows 编译。
 - 运行权限只有目标 SSH 网络、本机只读私钥和既有系统凭据引用；没有遥测、shell 子进程、任意命令或新增 Android capability。具名请求不可序列化/调试，私钥/密码使用可清零容器，错误和结果不携带底层库文本、credential reference 或秘密值。
 - 长期终端最多 16 个，PTY 行列限制 2–1000，单次输入最多 64 KiB；读写任务分离，各使用 64 项有界队列。每批原生输出必须携带非零单调 `deliveryId`，xterm 解析回调再调用 `ack_native_terminal_output`；Rust 在回执前暂停事件桥，并以同一编号重投直到确认或 30 秒 fail closed。前端必须去重，同一连接重启时清空编号状态；各标签的终端实例在后台保持挂载，只用 `visibility` 隐藏，不能因切换标签卸载消费者。这样队列和 SSH window 才能对慢消费者形成背压而不丢弃终端字节。该确认 command 只在桌面 capability 中，不能携带输出或秘密。连接中可按 session UUID 取消，PTY/Shell 明确确认后才登记成功；输出、退出、取消和异常事件只按匹配代际处理，复用标签不会被迟到任务移除或误报退出。
-- Linux CI 启动仅监听回环的临时 OpenSSH，禁用密码、交互认证和 root，使用一次性 Ed25519 用户密钥，实际完成 host-key pin、公钥认证、SFTP `canonicalize`，并打开 PTY、调整尺寸、验证双向终端字节和取消。其他平台负责编译/单测；真实多版本服务器、长时间流控、网络故障和性能仍是后续兼容矩阵。
-- 系统 OpenSSH 仍为默认，只有用户对未连接标签显式选择 `russh` 才启用长期原生终端；FIDO/U2F、agent、PKCS#11、GSSAPI、Pageant 等未覆盖认证继续使用兼容引擎。文件面板尚未复用该连接。删除方案是移除两个桌面原生终端 capability、`native_engine.rs` 和两项依赖；升级或扩大用途前必须通过锁文件、四平台编译、真实 OpenSSH/SFTP/PTY 和安全回归，并保留系统 OpenSSH 回退。
+- 原生文件坞浏览只接受 `sessionId` 和受限绝对路径/`~`/`.`，不得再次接收 host、凭据引用或私钥路径。每个长期连接只有 16 项 SFTP 请求队列，单目录最多返回 1,000 项；首次浏览懒启动一个持续子系统，失败后关闭并在下次请求重建，终端取消时统一清理。浏览之外的上传下载、外部编辑和文件变更继续使用独立兼容连接，以免大流量阻塞交互终端，并保留 TransferManager/预览令牌的现有安全边界。
+- Linux CI 启动仅监听回环的临时 OpenSSH，禁用密码、交互认证和 root，使用一次性 Ed25519 用户密钥，实际完成 host-key pin、公钥认证、同一连接两次 SFTP 目录读取，并打开 PTY、调整尺寸、验证双向终端字节和取消。其他平台负责编译/单测；真实多版本服务器、长时间流控、网络故障和性能仍是后续兼容矩阵。
+- 系统 OpenSSH 仍为默认，只有用户对未连接标签显式选择 `russh` 才启用长期原生终端及共享目录浏览；FIDO/U2F、agent、PKCS#11、GSSAPI、Pageant 等未覆盖认证继续使用兼容引擎。删除方案是移除三个桌面原生命令 capability、`native_engine.rs` 和两项依赖；升级或扩大用途前必须通过锁文件、四平台编译、真实 OpenSSH/SFTP/PTY 和安全回归，并保留系统 OpenSSH 回退。
 
 ### 10.9 B8 协议回归矩阵（v0.3 工作树）
 

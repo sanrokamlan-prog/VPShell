@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            72,
+            73,
             "command manifest contains duplicates or changed count"
         );
 
@@ -161,6 +161,7 @@ mod tests {
             "allow-native-engine-probe",
             "allow-cancel-native-engine-operation",
             "allow-start-native-terminal",
+            "allow-native-list-remote-files",
             "allow-ack-native-terminal-output",
         ] {
             assert!(!android_permissions.contains(forbidden));

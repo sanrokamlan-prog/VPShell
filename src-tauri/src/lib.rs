@@ -507,6 +507,21 @@ async fn start_native_terminal(
     Ok(result)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+async fn native_list_remote_files(
+    native: State<'_, native_engine::NativeEngineManager>,
+    request: native_engine::NativeSftpListRequest,
+) -> Result<native_engine::NativeSftpDirectoryResult, native_engine::NativeEngineError> {
+    native.list_sftp_directory(request).await
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn native_list_remote_files(_request: serde_json::Value) -> Result<serde_json::Value, String> {
+    Err("原生桌面 SFTP 在移动端预览中不可用".to_string())
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 async fn start_native_terminal(_request: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -1166,6 +1181,7 @@ pub fn run() {
             native_engine_probe,
             cancel_native_engine_operation,
             start_native_terminal,
+            native_list_remote_files,
             ack_native_terminal_output,
             start_ssh_session,
             write_terminal,

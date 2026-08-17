@@ -22,7 +22,7 @@ use russh::{
 };
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -33,6 +33,8 @@ const MAX_ACTIVE_OPERATIONS: usize = 8;
 const MAX_TERMINAL_SESSIONS: usize = 16;
 const TERMINAL_COMMAND_QUEUE: usize = 64;
 const TERMINAL_EVENT_QUEUE: usize = 64;
+const SFTP_REQUEST_QUEUE: usize = 16;
+const MAX_SFTP_DIRECTORY_ENTRIES: usize = 1000;
 const MAX_TERMINAL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_INITIAL_OUTPUT_BYTES: usize = 64 * 1024;
 const MIN_TERMINAL_CELLS: u16 = 2;
@@ -77,6 +79,13 @@ pub(crate) struct NativeTerminalStartRequest {
     rows: u16,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeSftpListRequest {
+    session_id: String,
+    path: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NativeEngineProbeResult {
@@ -92,6 +101,34 @@ pub(crate) struct NativeTerminalStartResult {
     pub(crate) schema_version: u16,
     pub(crate) engine: &'static str,
     pub(crate) session_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum NativeSftpEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeSftpEntry {
+    name: String,
+    path: String,
+    kind: NativeSftpEntryKind,
+    size: u64,
+    modified: Option<u64>,
+    permissions: String,
+    owner_group: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeSftpDirectoryResult {
+    path: String,
+    entries: Vec<NativeSftpEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -143,6 +180,15 @@ struct ActiveOperation {
 struct ActiveTerminalSession {
     generation: u64,
     cancellation: CancellationToken,
+    sftp_requests: mpsc::Sender<NativeSftpCommand>,
+    sftp_timeout: Duration,
+}
+
+enum NativeSftpCommand {
+    List {
+        path: String,
+        reply: oneshot::Sender<Result<NativeSftpDirectoryResult, NativeEngineError>>,
+    },
 }
 
 enum NativeTerminalCommand {
@@ -262,17 +308,18 @@ impl NativeEngineManager {
         request: NativeTerminalStartRequest,
     ) -> Result<NativeTerminalLaunch, NativeEngineError> {
         let session_id = parse_session_id(&request.session_id)?;
+        let validated = ValidatedTerminalStart::try_from(request)?;
+        let timeout = Duration::from_secs(u64::from(validated.connection.timeout_seconds));
         let generation = self.next_generation()?;
         let cancellation = CancellationToken::new();
-        self.reserve_terminal(session_id, generation, cancellation.clone())?;
-        let validated = match ValidatedTerminalStart::try_from(request) {
-            Ok(validated) => validated,
-            Err(error) => {
-                self.finish_terminal(session_id, generation);
-                return Err(error);
-            }
-        };
-        let timeout = Duration::from_secs(u64::from(validated.connection.timeout_seconds));
+        let (sftp_requests, sftp_request_receiver) = mpsc::channel(SFTP_REQUEST_QUEUE);
+        self.reserve_terminal(
+            session_id,
+            generation,
+            cancellation.clone(),
+            sftp_requests,
+            timeout,
+        )?;
         let (commands, command_receiver) = mpsc::channel(TERMINAL_COMMAND_QUEUE);
         let (events, event_receiver) = mpsc::channel(TERMINAL_EVENT_QUEUE);
 
@@ -306,6 +353,18 @@ impl NativeEngineManager {
             }
         };
 
+        let session = Arc::new(session);
+        let sftp_session = Arc::clone(&session);
+        let sftp_cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            run_native_sftp_session(
+                sftp_session,
+                sftp_request_receiver,
+                sftp_cancellation,
+                timeout,
+            )
+            .await;
+        });
         let manager = self.clone();
         let cancellation_for_task = cancellation.clone();
         tokio::spawn(async move {
@@ -335,6 +394,87 @@ impl NativeEngineManager {
             },
             events: event_receiver,
         })
+    }
+
+    pub(crate) async fn list_sftp_directory(
+        &self,
+        request: NativeSftpListRequest,
+    ) -> Result<NativeSftpDirectoryResult, NativeEngineError> {
+        let session_id = parse_session_id(&request.session_id)?;
+        validate_sftp_request_path(&request.path)?;
+        let (generation, cancellation, requests, timeout) = {
+            let sessions = self.lock_terminal_sessions()?;
+            let session = sessions.get(&session_id).ok_or_else(|| {
+                NativeEngineError::new(
+                    "native-sftp-session-not-found",
+                    "原生 SFTP 会话不存在或已经关闭",
+                    false,
+                )
+            })?;
+            (
+                session.generation,
+                session.cancellation.clone(),
+                session.sftp_requests.clone(),
+                session.sftp_timeout,
+            )
+        };
+        if cancellation.is_cancelled() {
+            return Err(NativeEngineError::new(
+                "native-sftp-session-closed",
+                "原生 SFTP 会话已经关闭",
+                true,
+            ));
+        }
+        let (reply, response) = oneshot::channel();
+        requests
+            .try_send(NativeSftpCommand::List {
+                path: request.path,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => NativeEngineError::new(
+                    "native-sftp-backpressure",
+                    "原生 SFTP 请求队列已满，请稍后重试",
+                    true,
+                ),
+                mpsc::error::TrySendError::Closed(_) => NativeEngineError::new(
+                    "native-sftp-session-closed",
+                    "原生 SFTP 会话已经关闭",
+                    true,
+                ),
+            })?;
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(NativeEngineError::new(
+                "native-sftp-cancelled",
+                "原生 SFTP 浏览已取消",
+                true,
+            )),
+            result = tokio::time::timeout(timeout, response) => match result {
+                Ok(response) => response.unwrap_or_else(|_| Err(NativeEngineError::new(
+                    "native-sftp-session-closed",
+                    "原生 SFTP 会话已经关闭",
+                    true,
+                ))),
+                Err(_) => Err(NativeEngineError::new(
+                    "native-sftp-timeout",
+                    "原生 SFTP 浏览超时",
+                    true,
+                )),
+            },
+        }?;
+        let generation_is_current = self
+            .lock_terminal_sessions()?
+            .get(&session_id)
+            .is_some_and(|session| session.generation == generation);
+        if !generation_is_current {
+            return Err(NativeEngineError::new(
+                "native-sftp-generation-stale",
+                "原生 SFTP 会话代际已经失效",
+                true,
+            ));
+        }
+        Ok(outcome)
     }
 
     pub(crate) fn cancel(&self, operation_id: &str) -> Result<(), NativeEngineError> {
@@ -437,6 +577,8 @@ impl NativeEngineManager {
         session_id: Uuid,
         generation: u64,
         cancellation: CancellationToken,
+        sftp_requests: mpsc::Sender<NativeSftpCommand>,
+        sftp_timeout: Duration,
     ) -> Result<(), NativeEngineError> {
         let mut sessions = self.lock_terminal_sessions()?;
         if sessions.len() >= MAX_TERMINAL_SESSIONS {
@@ -458,6 +600,8 @@ impl NativeEngineManager {
             ActiveTerminalSession {
                 generation,
                 cancellation,
+                sftp_requests,
+                sftp_timeout,
             },
         );
         Ok(())
@@ -619,6 +763,53 @@ fn validate_terminal_size(cols: u16, rows: u16) -> Result<(), NativeEngineError>
     {
         return Err(NativeEngineError::invalid(
             "原生终端行列必须在 2 到 1000 之间",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sftp_request_path(path: &str) -> Result<(), NativeEngineError> {
+    if path.is_empty()
+        || path.len() > MAX_PATH_BYTES
+        || !(path == "." || path == "~" || path.starts_with('/'))
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+    {
+        return Err(NativeEngineError::invalid(
+            "原生 SFTP 路径必须是受限绝对路径、~ 或 .",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sftp_canonical_path(path: &str) -> Result<(), NativeEngineError> {
+    if path.is_empty()
+        || path.len() > MAX_PATH_BYTES
+        || !path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+    {
+        return Err(NativeEngineError::new(
+            "native-sftp-invalid-canonical-path",
+            "服务器返回了无效的原生 SFTP 绝对路径",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sftp_entry_name(name: &str) -> Result<(), NativeEngineError> {
+    if name.is_empty()
+        || name.len() > 255
+        || matches!(name, "." | "..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.chars().any(char::is_control)
+    {
+        return Err(NativeEngineError::new(
+            "native-sftp-invalid-entry",
+            "远端目录包含无法安全显示的条目",
+            false,
         ));
     }
     Ok(())
@@ -1078,6 +1269,195 @@ async fn open_native_terminal(
     Ok((session, channel, initial_output))
 }
 
+async fn open_native_sftp_session(
+    session: &client::Handle<PinnedServerKey>,
+    timeout: Duration,
+) -> Result<SftpSession, NativeEngineError> {
+    let channel = session.channel_open_session().await.map_err(|_| {
+        NativeEngineError::new(
+            "native-sftp-channel-failed",
+            "原生 SSH 无法打开长期 SFTP 通道",
+            true,
+        )
+    })?;
+    channel.request_subsystem(true, "sftp").await.map_err(|_| {
+        NativeEngineError::new(
+            "native-sftp-subsystem-failed",
+            "服务器未提供 SFTP 子系统",
+            false,
+        )
+    })?;
+    let sftp = SftpSession::new(channel.into_stream()).await.map_err(|_| {
+        NativeEngineError::new(
+            "native-sftp-init-failed",
+            "长期原生 SFTP 协议初始化失败",
+            true,
+        )
+    })?;
+    sftp.set_timeout(timeout.as_secs());
+    Ok(sftp)
+}
+
+async fn list_native_sftp_directory(
+    session: &client::Handle<PinnedServerKey>,
+    sftp: &mut Option<SftpSession>,
+    path: String,
+    timeout: Duration,
+) -> Result<NativeSftpDirectoryResult, NativeEngineError> {
+    if sftp.is_none() {
+        *sftp = Some(open_native_sftp_session(session, timeout).await?);
+    }
+    let sftp = sftp.as_ref().ok_or_else(|| {
+        NativeEngineError::new(
+            "native-sftp-init-failed",
+            "长期原生 SFTP 协议初始化失败",
+            true,
+        )
+    })?;
+    let requested_path = if path == "~" { ".".to_string() } else { path };
+    let canonical = sftp.canonicalize(requested_path).await.map_err(|_| {
+        NativeEngineError::new(
+            "native-sftp-path-unavailable",
+            "原生 SFTP 路径不存在或不可访问",
+            true,
+        )
+    })?;
+    validate_sftp_canonical_path(&canonical)?;
+    let directory_metadata = sftp.symlink_metadata(canonical.clone()).await.map_err(|_| {
+        NativeEngineError::new(
+            "native-sftp-directory-stat-failed",
+            "无法读取原生 SFTP 目录属性",
+            true,
+        )
+    })?;
+    if directory_metadata.is_symlink() || !directory_metadata.is_dir() {
+        return Err(NativeEngineError::new(
+            "native-sftp-not-directory",
+            "原生 SFTP 浏览目标必须是非符号链接目录",
+            false,
+        ));
+    }
+    let directory = sftp.read_dir(canonical.clone()).await.map_err(|_| {
+        NativeEngineError::new(
+            "native-sftp-list-failed",
+            "无法读取原生 SFTP 目录",
+            true,
+        )
+    })?;
+    let mut entries = Vec::new();
+    for entry in directory {
+        if entries.len() >= MAX_SFTP_DIRECTORY_ENTRIES {
+            return Err(NativeEngineError::new(
+                "native-sftp-directory-limit",
+                "原生 SFTP 目录超过 1000 项上限",
+                false,
+            ));
+        }
+        let name = entry.file_name();
+        validate_sftp_entry_name(&name)?;
+        let metadata = entry.metadata();
+        let kind = if metadata.is_dir() {
+            NativeSftpEntryKind::Directory
+        } else if metadata.is_regular() {
+            NativeSftpEntryKind::File
+        } else if metadata.is_symlink() {
+            NativeSftpEntryKind::Symlink
+        } else {
+            NativeSftpEntryKind::Other
+        };
+        let owner_group = match (metadata.uid, metadata.gid) {
+            (Some(uid), Some(gid)) => Some(format!("{uid}:{gid}")),
+            (Some(uid), None) => Some(uid.to_string()),
+            (None, Some(gid)) => Some(format!(":{gid}")),
+            (None, None) => None,
+        };
+        entries.push(NativeSftpEntry {
+            path: if canonical == "/" {
+                format!("/{name}")
+            } else {
+                format!("{}/{name}", canonical.trim_end_matches('/'))
+            },
+            name,
+            kind,
+            size: metadata.size.unwrap_or(0),
+            modified: metadata.mtime.map(u64::from),
+            permissions: metadata
+                .permissions
+                .map(|mode| format!("{:04o}", mode & 0o7777))
+                .unwrap_or_else(|| "----".to_string()),
+            owner_group,
+        });
+    }
+    entries.sort_by(|left, right| {
+        native_sftp_kind_order(&left.kind)
+            .cmp(&native_sftp_kind_order(&right.kind))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    Ok(NativeSftpDirectoryResult {
+        path: canonical,
+        entries,
+    })
+}
+
+fn native_sftp_kind_order(kind: &NativeSftpEntryKind) -> u8 {
+    match kind {
+        NativeSftpEntryKind::Directory => 0,
+        NativeSftpEntryKind::File => 1,
+        NativeSftpEntryKind::Symlink => 2,
+        NativeSftpEntryKind::Other => 3,
+    }
+}
+
+async fn run_native_sftp_session(
+    session: Arc<client::Handle<PinnedServerKey>>,
+    mut requests: mpsc::Receiver<NativeSftpCommand>,
+    cancellation: CancellationToken,
+    timeout: Duration,
+) {
+    let mut sftp = None;
+    loop {
+        let request = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break,
+            request = requests.recv() => request,
+        };
+        let Some(NativeSftpCommand::List { path, reply }) = request else {
+            break;
+        };
+        if reply.is_closed() {
+            continue;
+        }
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(NativeEngineError::new(
+                "native-sftp-cancelled",
+                "原生 SFTP 浏览已取消",
+                true,
+            )),
+            result = tokio::time::timeout(
+                timeout,
+                list_native_sftp_directory(session.as_ref(), &mut sftp, path, timeout),
+            ) => match result {
+                Ok(outcome) => outcome,
+                Err(_) => Err(NativeEngineError::new(
+                    "native-sftp-timeout",
+                    "原生 SFTP 浏览超时",
+                    true,
+                )),
+            },
+        };
+        if outcome.is_err()
+            && let Some(failed) = sftp.take()
+        {
+            let _ = tokio::time::timeout(Duration::from_secs(1), failed.close()).await;
+        }
+        let _ = reply.send(outcome);
+    }
+    if let Some(sftp) = sftp {
+        let _ = tokio::time::timeout(Duration::from_secs(1), sftp.close()).await;
+    }
+}
+
 async fn await_channel_success(
     channel: &mut Channel<client::Msg>,
     initial_output: &mut Vec<u8>,
@@ -1121,7 +1501,7 @@ async fn run_native_terminal(
     manager: NativeEngineManager,
     session_id: Uuid,
     generation: u64,
-    mut session: client::Handle<PinnedServerKey>,
+    session: Arc<client::Handle<PinnedServerKey>>,
     channel: Channel<client::Msg>,
     initial_output: Vec<u8>,
     mut commands: mpsc::Receiver<NativeTerminalCommand>,
@@ -1335,6 +1715,21 @@ mod tests {
         assert!(validate_terminal_size(1, 32).is_err());
         assert!(validate_terminal_size(120, 1001).is_err());
         assert!(validate_terminal_size(120, 32).is_ok());
+        assert!(validate_sftp_request_path(".").is_ok());
+        assert!(validate_sftp_request_path("~").is_ok());
+        assert!(validate_sftp_request_path("/srv/app").is_ok());
+        assert!(validate_sftp_request_path("srv/app").is_err());
+        assert!(validate_sftp_request_path("/srv\napp").is_err());
+        assert!(validate_sftp_entry_name("release.tar.zst").is_ok());
+        assert!(validate_sftp_entry_name("../release").is_err());
+        assert!(
+            serde_json::from_value::<NativeSftpListRequest>(serde_json::json!({
+                "sessionId": Uuid::new_v4().to_string(),
+                "path": "/",
+                "credentialRef": "ssh-forbidden"
+            }))
+            .is_err()
+        );
 
         let config = native_client_config(Duration::from_secs(15));
         assert!(
@@ -1411,11 +1806,25 @@ mod tests {
         let manager = NativeEngineManager::default();
         let session_id = Uuid::from_u128(201);
         let manager_cancellation = CancellationToken::new();
+        let (sftp_requests, _sftp_receiver) = mpsc::channel(1);
         manager
-            .reserve_terminal(session_id, 9, manager_cancellation.clone())
+            .reserve_terminal(
+                session_id,
+                9,
+                manager_cancellation.clone(),
+                sftp_requests,
+                Duration::from_secs(15),
+            )
             .unwrap();
+        let (replacement_sftp_requests, _replacement_sftp_receiver) = mpsc::channel(1);
         let error = manager
-            .reserve_terminal(session_id, 10, CancellationToken::new())
+            .reserve_terminal(
+                session_id,
+                10,
+                CancellationToken::new(),
+                replacement_sftp_requests,
+                Duration::from_secs(15),
+            )
             .unwrap_err();
         assert_eq!(error.code, "native-terminal-session-conflict");
         let colliding_operation = manager.begin(session_id).unwrap();
@@ -1434,18 +1843,151 @@ mod tests {
         assert!(manager.lock_terminal_sessions().unwrap().is_empty());
 
         for index in 0..MAX_TERMINAL_SESSIONS {
+            let (sftp_requests, _sftp_receiver) = mpsc::channel(1);
             manager
                 .reserve_terminal(
                     Uuid::from_u128(index as u128 + 300),
                     index as u64 + 20,
                     CancellationToken::new(),
+                    sftp_requests,
+                    Duration::from_secs(15),
                 )
                 .unwrap();
         }
+        let (sftp_requests, _sftp_receiver) = mpsc::channel(1);
         let error = manager
-            .reserve_terminal(Uuid::from_u128(999), 99, CancellationToken::new())
+            .reserve_terminal(
+                Uuid::from_u128(999),
+                99,
+                CancellationToken::new(),
+                sftp_requests,
+                Duration::from_secs(15),
+            )
             .unwrap_err();
         assert_eq!(error.code, "native-terminal-capacity");
+    }
+
+    #[tokio::test]
+    async fn native_sftp_requests_are_bounded_cancelled_and_generation_safe() {
+        let manager = NativeEngineManager::default();
+        let session_id = Uuid::from_u128(1201);
+        let cancellation = CancellationToken::new();
+        let (requests, _request_receiver) = mpsc::channel(1);
+        manager
+            .reserve_terminal(
+                session_id,
+                41,
+                cancellation.clone(),
+                requests,
+                Duration::from_secs(15),
+            )
+            .unwrap();
+        let pending_manager = manager.clone();
+        let pending = tokio::spawn(async move {
+            pending_manager
+                .list_sftp_directory(NativeSftpListRequest {
+                    session_id: session_id.to_string(),
+                    path: "/".to_string(),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        let error = manager
+            .list_sftp_directory(NativeSftpListRequest {
+                session_id: session_id.to_string(),
+                path: "/".to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "native-sftp-backpressure");
+        cancellation.cancel();
+        assert_eq!(
+            pending.await.unwrap().unwrap_err().code,
+            "native-sftp-cancelled"
+        );
+        manager.finish_terminal(session_id, 40);
+        assert!(
+            manager
+                .lock_terminal_sessions()
+                .unwrap()
+                .contains_key(&session_id)
+        );
+        manager.finish_terminal(session_id, 41);
+        let error = manager
+            .list_sftp_directory(NativeSftpListRequest {
+                session_id: session_id.to_string(),
+                path: "/".to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "native-sftp-session-not-found");
+
+        let stale_session_id = Uuid::from_u128(1202);
+        let (requests, mut request_receiver) = mpsc::channel(1);
+        manager
+            .reserve_terminal(
+                stale_session_id,
+                42,
+                CancellationToken::new(),
+                requests,
+                Duration::from_secs(15),
+            )
+            .unwrap();
+        let stale_manager = manager.clone();
+        let stale = tokio::spawn(async move {
+            stale_manager
+                .list_sftp_directory(NativeSftpListRequest {
+                    session_id: stale_session_id.to_string(),
+                    path: "/".to_string(),
+                })
+                .await
+        });
+        let Some(NativeSftpCommand::List { reply, .. }) = request_receiver.recv().await else {
+            panic!("queued SFTP request");
+        };
+        manager.finish_terminal(stale_session_id, 42);
+        let (replacement_requests, _replacement_receiver) = mpsc::channel(1);
+        manager
+            .reserve_terminal(
+                stale_session_id,
+                43,
+                CancellationToken::new(),
+                replacement_requests,
+                Duration::from_secs(15),
+            )
+            .unwrap();
+        reply
+            .send(Ok(NativeSftpDirectoryResult {
+                path: "/".to_string(),
+                entries: Vec::new(),
+            }))
+            .unwrap();
+        assert_eq!(
+            stale.await.unwrap().unwrap_err().code,
+            "native-sftp-generation-stale"
+        );
+        manager.finish_terminal(stale_session_id, 43);
+
+        let timeout_session_id = Uuid::from_u128(1203);
+        let (requests, _request_receiver) = mpsc::channel(1);
+        manager
+            .reserve_terminal(
+                timeout_session_id,
+                44,
+                CancellationToken::new(),
+                requests,
+                Duration::from_millis(25),
+            )
+            .unwrap();
+        let error = manager
+            .list_sftp_directory(NativeSftpListRequest {
+                session_id: timeout_session_id.to_string(),
+                path: "/".to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "native-sftp-timeout");
+        manager.finish_terminal(timeout_session_id, 44);
     }
 
     #[tokio::test]
@@ -1589,6 +2131,23 @@ mod tests {
         assert_eq!(launch.result.schema_version, SCHEMA_VERSION);
         assert_eq!(launch.result.engine, ENGINE_NAME);
         assert_eq!(launch.result.session_id, session_id.to_string());
+        let first_listing = manager
+            .list_sftp_directory(NativeSftpListRequest {
+                session_id: session_id.to_string(),
+                path: "~".to_string(),
+            })
+            .await
+            .expect("first shared native SFTP listing");
+        assert!(first_listing.path.starts_with('/'));
+        assert!(first_listing.entries.len() <= MAX_SFTP_DIRECTORY_ENTRIES);
+        let second_listing = manager
+            .list_sftp_directory(NativeSftpListRequest {
+                session_id: session_id.to_string(),
+                path: first_listing.path.clone(),
+            })
+            .await
+            .expect("reused native SFTP listing");
+        assert_eq!(second_listing.path, first_listing.path);
         launch.handle.resize(132, 43).unwrap();
         launch
             .handle

@@ -28,6 +28,7 @@
     "allow-native-engine-probe",
     "allow-cancel-native-engine-operation",
     "allow-start-native-terminal",
+    "allow-native-list-remote-files",
     "allow-ack-native-terminal-output",
     "allow-start-ssh-session",
     "allow-write-terminal",
