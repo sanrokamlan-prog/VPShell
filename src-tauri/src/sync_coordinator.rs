@@ -480,11 +480,9 @@ impl SyncCoordinatorManager {
             if encoded.len() as u64 != metadata.size {
                 return Err("integrity".to_string());
             }
-            let envelope = EncryptedSyncObject::decode(&encoded)
-                .map_err(|_| "integrity".to_string())?;
-            if envelope.vault_id() != vault_id
-                || envelope.object_kind() != &SyncObjectKind::Event
-            {
+            let envelope =
+                EncryptedSyncObject::decode(&encoded).map_err(|_| "integrity".to_string())?;
+            if envelope.vault_id() != vault_id || envelope.object_kind() != &SyncObjectKind::Event {
                 return Err("unsupported-object-kind".to_string());
             }
             let device_id = envelope
@@ -497,9 +495,7 @@ impl SyncCoordinatorManager {
             {
                 return Err("protocol".to_string());
             }
-            let sequence = envelope
-                .sequence()
-                .ok_or_else(|| "protocol".to_string())?;
+            let sequence = envelope.sequence().ok_or_else(|| "protocol".to_string())?;
             candidates.push(RemoteCandidate {
                 metadata,
                 encoded,
@@ -687,11 +683,7 @@ mod tests {
             })
         }
 
-        fn get(
-            &self,
-            _key: &str,
-            _cancellation: &ProviderCancellation,
-        ) -> ProviderResult<Vec<u8>> {
+        fn get(&self, _key: &str, _cancellation: &ProviderCancellation) -> ProviderResult<Vec<u8>> {
             Err(ProviderError::new(
                 ProviderErrorCode::NotFound,
                 "fixture object missing",
@@ -741,15 +733,16 @@ mod tests {
             })
         }
 
-        fn get(
-            &self,
-            key: &str,
-            cancellation: &ProviderCancellation,
-        ) -> ProviderResult<Vec<u8>> {
+        fn get(&self, key: &str, cancellation: &ProviderCancellation) -> ProviderResult<Vec<u8>> {
             cancellation.check()?;
-            self.objects.lock().unwrap().get(key).cloned().ok_or_else(|| {
-                ProviderError::new(ProviderErrorCode::NotFound, "fixture object missing")
-            })
+            self.objects
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+                .ok_or_else(|| {
+                    ProviderError::new(ProviderErrorCode::NotFound, "fixture object missing")
+                })
         }
 
         fn put(
@@ -913,7 +906,13 @@ mod tests {
         assert!(!status.configured);
         assert_eq!(status.pending_objects, 0);
         let encoded = serde_json::to_string(&status).unwrap();
-        for forbidden in ["password", "privateKey", "credentialRef", "vaultKey", "token"] {
+        for forbidden in [
+            "password",
+            "privateKey",
+            "credentialRef",
+            "vaultKey",
+            "token",
+        ] {
             assert!(!encoded.contains(forbidden));
         }
     }
@@ -1023,7 +1022,10 @@ mod tests {
             .unwrap();
         let blocked = coordinator.run_once(2_000).unwrap();
         assert_eq!(blocked.phase, SyncCoordinatorPhase::ReconcileRequired);
-        assert_eq!(blocked.last_error_code.as_deref(), Some("reconcile-required"));
+        assert_eq!(
+            blocked.last_error_code.as_deref(),
+            Some("reconcile-required")
+        );
     }
 
     #[test]

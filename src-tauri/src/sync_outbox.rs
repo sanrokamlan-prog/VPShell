@@ -11,9 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     sync_crypto::{EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object},
-    sync_merge::{
-        MergeError, MergeErrorCode, apply_persisted_operation, load_persisted_state,
-    },
+    sync_merge::{MergeError, MergeErrorCode, apply_persisted_operation, load_persisted_state},
     sync_provider::validate_key,
 };
 
@@ -685,8 +683,7 @@ impl SyncJournal {
 
     pub(crate) fn merge_status(&self) -> JournalResult<MergeJournalStatus> {
         self.transaction(|transaction| {
-            let (revision, state) =
-                load_persisted_state(transaction).map_err(map_merge_error)?;
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
             Ok(MergeJournalStatus {
                 revision,
                 open_conflicts: state.open_conflicts().len(),
@@ -1188,8 +1185,7 @@ impl SyncJournal {
             vault_key,
             now_ms,
             |transaction, plaintext| {
-                let (revision, _) =
-                    load_persisted_state(transaction).map_err(map_merge_error)?;
+                let (revision, _) = load_persisted_state(transaction).map_err(map_merge_error)?;
                 apply_persisted_operation(transaction, plaintext, revision, now_ms)
                     .map_err(map_merge_error)?;
                 Ok(())
