@@ -11,7 +11,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -85,11 +85,7 @@ impl NativeEngineError {
     }
 
     fn cancelled() -> Self {
-        Self::new(
-            "native-engine-cancelled",
-            "原生引擎检查已取消",
-            true,
-        )
+        Self::new("native-engine-cancelled", "原生引擎检查已取消", true)
     }
 }
 
@@ -293,8 +289,8 @@ impl TryFrom<NativeEngineProbeRequest> for ValidatedProbe {
 }
 
 fn parse_operation_id(value: &str) -> Result<Uuid, NativeEngineError> {
-    let parsed = Uuid::parse_str(value)
-        .map_err(|_| NativeEngineError::invalid("原生引擎操作标识无效"))?;
+    let parsed =
+        Uuid::parse_str(value).map_err(|_| NativeEngineError::invalid("原生引擎操作标识无效"))?;
     if value.len() != 36 || parsed.to_string() != value {
         return Err(NativeEngineError::invalid("原生引擎操作标识无效"));
     }
@@ -339,9 +335,7 @@ fn validate_fingerprint(value: &str) -> Result<(), NativeEngineError> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/')
     {
-        return Err(NativeEngineError::invalid(
-            "原生 SSH 主机指纹格式无效",
-        ));
+        return Err(NativeEngineError::invalid("原生 SSH 主机指纹格式无效"));
     }
     Ok(())
 }
@@ -357,23 +351,19 @@ fn resolve_auth(
         )),
         (Some(reference), None) => {
             if identity_passphrase_ref.is_some() {
-                return Err(NativeEngineError::invalid(
-                    "密码认证不能携带私钥口令引用",
-                ));
+                return Err(NativeEngineError::invalid("密码认证不能携带私钥口令引用"));
             }
             crate::file_transfer::validate_optional_reference(Some(reference), "ssh-")
                 .map_err(|_| NativeEngineError::invalid("原生 SSH 凭据引用无效"))?;
-            let password = crate::file_transfer::read_secret(
-                reference,
-                "原生 SSH 密码引用不存在或无法读取",
-            )
-            .map_err(|_| {
-                NativeEngineError::new(
-                    "native-engine-credential-unavailable",
-                    "原生 SSH 凭据不可用",
-                    false,
-                )
-            })?;
+            let password =
+                crate::file_transfer::read_secret(reference, "原生 SSH 密码引用不存在或无法读取")
+                    .map_err(|_| {
+                    NativeEngineError::new(
+                        "native-engine-credential-unavailable",
+                        "原生 SSH 凭据不可用",
+                        false,
+                    )
+                })?;
             Ok(NativeAuth::Password(password))
         }
         (None, Some(identity_file)) => {
@@ -507,10 +497,8 @@ impl Handler for PinnedServerKey {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        let matched = server_public_key
-            .fingerprint(HashAlg::Sha256)
-            .to_string()
-            == self.expected_sha256;
+        let matched =
+            server_public_key.fingerprint(HashAlg::Sha256).to_string() == self.expected_sha256;
         self.state.store(
             if matched {
                 HOST_KEY_MATCHED
@@ -567,31 +555,24 @@ async fn probe_once(
             .authenticate_password(request.username, password.as_str())
             .await
             .map_err(|_| {
-                NativeEngineError::new(
-                    "native-engine-auth-failed",
-                    "原生 SSH 身份验证失败",
-                    false,
-                )
+                NativeEngineError::new("native-engine-auth-failed", "原生 SSH 身份验证失败", false)
             })?
             .success(),
         NativeAuth::PrivateKey {
             private_key,
             passphrase,
         } => {
-            let encoded = std::str::from_utf8(private_key.as_slice()).map_err(|_| {
-                NativeEngineError::invalid("原生 SSH 私钥必须使用 UTF-8 文本格式")
-            })?;
-            let private_key = decode_secret_key(
-                encoded,
-                passphrase.as_ref().map(|value| value.as_str()),
-            )
-            .map_err(|_| {
-                NativeEngineError::new(
-                    "native-engine-key-invalid",
-                    "原生 SSH 私钥或口令无效",
-                    false,
-                )
-            })?;
+            let encoded = std::str::from_utf8(private_key.as_slice())
+                .map_err(|_| NativeEngineError::invalid("原生 SSH 私钥必须使用 UTF-8 文本格式"))?;
+            let private_key =
+                decode_secret_key(encoded, passphrase.as_ref().map(|value| value.as_str()))
+                    .map_err(|_| {
+                        NativeEngineError::new(
+                            "native-engine-key-invalid",
+                            "原生 SSH 私钥或口令无效",
+                            false,
+                        )
+                    })?;
             let hash = if private_key.algorithm().is_rsa() {
                 Some(
                     session
@@ -647,25 +628,20 @@ async fn probe_once(
             true,
         )
     })?;
-    channel
-        .request_subsystem(true, "sftp")
-        .await
-        .map_err(|_| {
-            NativeEngineError::new(
-                "native-engine-sftp-subsystem-failed",
-                "服务器未提供 SFTP 子系统",
-                false,
-            )
-        })?;
-    let sftp = SftpSession::new(channel.into_stream())
-        .await
-        .map_err(|_| {
-            NativeEngineError::new(
-                "native-engine-sftp-init-failed",
-                "原生 SFTP 协议初始化失败",
-                true,
-            )
-        })?;
+    channel.request_subsystem(true, "sftp").await.map_err(|_| {
+        NativeEngineError::new(
+            "native-engine-sftp-subsystem-failed",
+            "服务器未提供 SFTP 子系统",
+            false,
+        )
+    })?;
+    let sftp = SftpSession::new(channel.into_stream()).await.map_err(|_| {
+        NativeEngineError::new(
+            "native-engine-sftp-init-failed",
+            "原生 SFTP 协议初始化失败",
+            true,
+        )
+    })?;
     sftp.set_timeout(u64::from(request.timeout_seconds));
     sftp.canonicalize(".").await.map_err(|_| {
         NativeEngineError::new(
@@ -682,7 +658,11 @@ async fn probe_once(
         )
     })?;
     session
-        .disconnect(Disconnect::ByApplication, "native engine probe complete", "")
+        .disconnect(
+            Disconnect::ByApplication,
+            "native engine probe complete",
+            "",
+        )
         .await
         .map_err(|_| {
             NativeEngineError::new(
@@ -772,11 +752,13 @@ mod tests {
         assert!(read_private_key("relative-key").is_err());
 
         let config = native_client_config(Duration::from_secs(15));
-        assert!(!config
-            .preferred
-            .key
-            .iter()
-            .any(|algorithm| matches!(algorithm, Algorithm::Rsa { hash: None })));
+        assert!(
+            !config
+                .preferred
+                .key
+                .iter()
+                .any(|algorithm| matches!(algorithm, Algorithm::Rsa { hash: None }))
+        );
     }
 
     #[test]
@@ -804,10 +786,7 @@ mod tests {
         drop(old);
         let replacement = manager.begin(reused_id).unwrap();
         manager.finish(reused_id, old_generation);
-        assert!(manager
-            .lock_operations()
-            .unwrap()
-            .contains_key(&reused_id));
+        assert!(manager.lock_operations().unwrap().contains_key(&reused_id));
         drop(replacement);
         assert!(manager.lock_operations().unwrap().is_empty());
     }

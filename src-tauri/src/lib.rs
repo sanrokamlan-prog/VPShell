@@ -23,9 +23,9 @@ mod finalshell;
 mod key_management;
 mod local_assets;
 mod migration;
-mod network_tools;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod native_engine;
+mod network_tools;
 mod remote_file_ops;
 mod remote_monitor;
 mod safe_broadcast;

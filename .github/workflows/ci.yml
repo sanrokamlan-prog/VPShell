@@ -77,15 +77,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Resolve D1 additions against the existing Cargo.lock
-        shell: bash
-        run: cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 > /dev/null
-      - run: cargo check --manifest-path src-tauri/Cargo.toml
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - name: Require the runner-resolved Cargo.lock to be committed
-        if: always()
-        run: git diff --exit-code -- src-tauri/Cargo.lock
+      - run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
   android-preview:
     name: Android Preview (aarch64 debug)
@@ -112,8 +106,8 @@ jobs:
           workspaces: src-tauri
           key: android-aarch64
       - run: npm ci
-      - name: Resolve D1 additions against the existing Cargo.lock
-        run: cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 > /dev/null
+      - name: Validate committed Cargo.lock
+        run: cargo metadata --locked --manifest-path src-tauri/Cargo.toml --format-version 1 > /dev/null
       - name: Build aarch64 debug APK and run Gradle unit gate
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
@@ -130,6 +124,3 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
           npm run tauri -- android build --apk --debug --target aarch64
           src-tauri/gen/android/gradlew --project-dir src-tauri/gen/android testArm64DebugUnitTest
-      - name: Require the runner-resolved Cargo.lock to be committed
-        if: always()
-        run: git diff --exit-code -- src-tauri/Cargo.lock
