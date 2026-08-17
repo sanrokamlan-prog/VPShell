@@ -745,16 +745,14 @@ fn validate_route(request: NativeRouteRequest) -> Result<ValidatedRoute, NativeE
             .map_err(|_| NativeEngineError::invalid("原生 SSH 路由跳数无效"))?;
         let hop_id = parse_hop_id(&hop.hop_id).map_err(|error| error.at_hop(hop_index))?;
         if !hop_ids.insert(hop_id) {
-            return Err(
-                NativeEngineError::invalid("原生 SSH 路由跳标识重复").at_hop(hop_index)
-            );
+            return Err(NativeEngineError::invalid("原生 SSH 路由跳标识重复").at_hop(hop_index));
         }
         let endpoint = (hop.host.to_ascii_lowercase(), hop.port);
         if !endpoints.insert(endpoint) {
             return Err(NativeEngineError::invalid("原生 SSH 路由包含重复端点").at_hop(hop_index));
         }
-        let connection = validate_connection(hop_index, hop)
-            .map_err(|error| error.at_hop(hop_index))?;
+        let connection =
+            validate_connection(hop_index, hop).map_err(|error| error.at_hop(hop_index))?;
         hops.push(connection);
     }
     Ok(ValidatedRoute { hops })
@@ -956,17 +954,15 @@ fn validate_auth_source(
 fn resolve_auth(source: NativeAuthSource) -> Result<NativeAuth, NativeEngineError> {
     match source {
         NativeAuthSource::PasswordReference(reference) => {
-            let password = crate::file_transfer::read_secret(
-                &reference,
-                "原生 SSH 密码引用不存在或无法读取",
-            )
-            .map_err(|_| {
-                NativeEngineError::new(
-                    "native-engine-credential-unavailable",
-                    "原生 SSH 凭据不可用",
-                    false,
-                )
-            })?;
+            let password =
+                crate::file_transfer::read_secret(&reference, "原生 SSH 密码引用不存在或无法读取")
+                    .map_err(|_| {
+                        NativeEngineError::new(
+                            "native-engine-credential-unavailable",
+                            "原生 SSH 凭据不可用",
+                            false,
+                        )
+                    })?;
             Ok(NativeAuth::Password(password))
         }
         NativeAuthSource::PrivateKeyFile {
@@ -975,21 +971,19 @@ fn resolve_auth(source: NativeAuthSource) -> Result<NativeAuth, NativeEngineErro
         } => {
             let private_key = read_private_key(&identity_file)?;
             let passphrase = match passphrase_ref {
-                Some(reference) => {
-                    Some(
-                        crate::file_transfer::read_secret(
-                            &reference,
-                            "原生 SSH 私钥口令引用不存在或无法读取",
-                        )
-                        .map_err(|_| {
-                            NativeEngineError::new(
-                                "native-engine-key-passphrase-unavailable",
-                                "原生 SSH 私钥口令不可用",
-                                false,
-                            )
-                        })?,
+                Some(reference) => Some(
+                    crate::file_transfer::read_secret(
+                        &reference,
+                        "原生 SSH 私钥口令引用不存在或无法读取",
                     )
-                }
+                    .map_err(|_| {
+                        NativeEngineError::new(
+                            "native-engine-key-passphrase-unavailable",
+                            "原生 SSH 私钥口令不可用",
+                            false,
+                        )
+                    })?,
+                ),
                 None => None,
             };
             Ok(NativeAuth::PrivateKey {
@@ -1866,10 +1860,7 @@ mod tests {
         assert_eq!(route.hops.len(), 2);
         assert_eq!(route.hops[0].hop_index, 1);
         assert_eq!(route.hops[1].hop_index, 2);
-        assert_ne!(
-            route.hops[0].host_key_sha256,
-            route.hops[1].host_key_sha256
-        );
+        assert_ne!(route.hops[0].host_key_sha256, route.hops[1].host_key_sha256);
         assert!(matches!(
             &route.hops[0].auth_source,
             NativeAuthSource::PasswordReference(_)
@@ -1950,10 +1941,9 @@ mod tests {
             }))
             .is_err()
         );
-        let encoded = serde_json::to_value(
-            NativeEngineError::invalid("原生 SSH 路由跳标识重复").at_hop(2),
-        )
-        .unwrap();
+        let encoded =
+            serde_json::to_value(NativeEngineError::invalid("原生 SSH 路由跳标识重复").at_hop(2))
+                .unwrap();
         assert_eq!(encoded["hopIndex"], 2);
         assert!(!encoded.to_string().contains("host.example"));
         assert!(!encoded.to_string().contains("credentialRef"));
