@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            73,
+            76,
             "command manifest contains duplicates or changed count"
         );
 
@@ -163,6 +163,9 @@ mod tests {
             "allow-start-native-terminal",
             "allow-native-list-remote-files",
             "allow-ack-native-terminal-output",
+            "allow-start-native-local-forward",
+            "allow-list-native-local-forwards",
+            "allow-stop-native-local-forward",
         ] {
             assert!(!android_permissions.contains(forbidden));
         }
@@ -216,6 +219,20 @@ mod tests {
         assert!(frontend.contains("activeSession.engine !== \"russh\""));
         assert!(frontend.contains("routeHost.identityFile ? undefined : routeHost.credentialRef"));
         assert!(!frontend.contains("nativeDirectRoute"));
+    }
+
+    #[test]
+    fn native_local_forward_is_loopback_only_and_android_denied() {
+        let native = include_str!("native_engine.rs");
+        let frontend = include_str!("../../src/App.tsx");
+        let android = include_str!("../capabilities/android.json");
+        assert!(native.contains("SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port)"));
+        assert!(native.contains("MAX_LOCAL_FORWARDS: usize = 8"));
+        assert!(native.contains("MAX_LOCAL_FORWARD_CONNECTIONS: usize = 32"));
+        assert!(native.contains("copy_bidirectional(&mut local_stream, &mut remote_stream)"));
+        assert!(frontend.contains("<input value=\"127.0.0.1\" readOnly"));
+        assert!(!frontend.contains("name=\"bindHost\""));
+        assert!(!android.contains("native-local-forward"));
     }
 
     #[test]

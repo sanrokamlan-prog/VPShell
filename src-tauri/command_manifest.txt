@@ -3,6 +3,9 @@ cancel_native_engine_operation
 start_native_terminal
 native_list_remote_files
 ack_native_terminal_output
+start_native_local_forward
+list_native_local_forwards
+stop_native_local_forward
 start_ssh_session
 write_terminal
 enable_shell_integration

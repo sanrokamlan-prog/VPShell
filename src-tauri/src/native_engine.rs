@@ -7,6 +7,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::Read,
+    net::{Ipv4Addr, SocketAddrV4},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -22,7 +23,12 @@ use russh::{
 };
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    io::copy_bidirectional,
+    net::{TcpListener, TcpStream},
+    sync::{Semaphore, mpsc, oneshot},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -31,6 +37,8 @@ const SCHEMA_VERSION: u16 = 1;
 const ENGINE_NAME: &str = "russh";
 const MAX_ACTIVE_OPERATIONS: usize = 8;
 const MAX_TERMINAL_SESSIONS: usize = 16;
+const MAX_LOCAL_FORWARDS: usize = 8;
+const MAX_LOCAL_FORWARD_CONNECTIONS: usize = 32;
 const MAX_NATIVE_ROUTE_HOPS: usize = 4;
 const TERMINAL_COMMAND_QUEUE: usize = 64;
 const TERMINAL_EVENT_QUEUE: usize = 64;
@@ -93,6 +101,16 @@ pub(crate) struct NativeSftpListRequest {
     path: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeLocalForwardStartRequest {
+    forward_id: String,
+    route: NativeRouteRequest,
+    bind_port: u16,
+    target_host: String,
+    target_port: u16,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NativeEngineProbeResult {
@@ -136,6 +154,23 @@ struct NativeSftpEntry {
 pub(crate) struct NativeSftpDirectoryResult {
     path: String,
     entries: Vec<NativeSftpEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeLocalForwardSnapshot {
+    schema_version: u16,
+    forward_id: String,
+    state: &'static str,
+    bind_host: &'static str,
+    bind_port: u16,
+    route_host: String,
+    route_hops: u8,
+    target_host: String,
+    target_port: u16,
+    active_connections: u64,
+    accepted_connections: u64,
+    rejected_connections: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -184,6 +219,7 @@ pub(crate) struct NativeEngineManager {
 struct NativeEngineManagerInner {
     operations: Mutex<HashMap<Uuid, ActiveOperation>>,
     terminal_sessions: Mutex<HashMap<Uuid, ActiveTerminalSession>>,
+    local_forwards: Mutex<HashMap<Uuid, ActiveLocalForward>>,
     next_generation: AtomicU64,
 }
 
@@ -197,6 +233,35 @@ struct ActiveTerminalSession {
     cancellation: CancellationToken,
     sftp_requests: mpsc::Sender<NativeSftpCommand>,
     sftp_timeout: Duration,
+}
+
+struct ActiveLocalForward {
+    generation: u64,
+    cancellation: CancellationToken,
+    bind_port: u16,
+    route_host: String,
+    route_hops: u8,
+    target_host: String,
+    target_port: u16,
+    stats: Arc<LocalForwardStats>,
+}
+
+#[derive(Default)]
+struct LocalForwardStats {
+    ready: AtomicU8,
+    active_connections: AtomicU64,
+    accepted_connections: AtomicU64,
+    rejected_connections: AtomicU64,
+}
+
+struct ActiveForwardConnectionGuard {
+    stats: Arc<LocalForwardStats>,
+}
+
+impl Drop for ActiveForwardConnectionGuard {
+    fn drop(&mut self) {
+        self.stats.active_connections.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 enum NativeSftpCommand {
@@ -284,6 +349,7 @@ impl Default for NativeEngineManager {
             inner: Arc::new(NativeEngineManagerInner {
                 operations: Mutex::new(HashMap::new()),
                 terminal_sessions: Mutex::new(HashMap::new()),
+                local_forwards: Mutex::new(HashMap::new()),
                 next_generation: AtomicU64::new(0),
             }),
         }
@@ -495,6 +561,150 @@ impl NativeEngineManager {
         Ok(outcome)
     }
 
+    pub(crate) async fn start_local_forward(
+        &self,
+        request: NativeLocalForwardStartRequest,
+    ) -> Result<NativeLocalForwardSnapshot, NativeEngineError> {
+        let ValidatedLocalForwardStart {
+            forward_id,
+            route,
+            bind_port,
+            target_host,
+            target_port,
+        } = ValidatedLocalForwardStart::try_from(request)?;
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port))
+            .await
+            .map_err(|_| {
+                NativeEngineError::new(
+                    "native-local-forward-bind-failed",
+                    "本地转发无法绑定回环端口",
+                    true,
+                )
+            })?;
+        let bound_port = listener
+            .local_addr()
+            .map_err(|_| {
+                NativeEngineError::new(
+                    "native-local-forward-bind-failed",
+                    "本地转发无法读取绑定端口",
+                    true,
+                )
+            })?
+            .port();
+        let route_host = route
+            .hops
+            .last()
+            .map(|hop| hop.host.clone())
+            .ok_or_else(|| NativeEngineError::invalid("本地转发 SSH 路由为空"))?;
+        let route_hops = u8::try_from(route.hops.len())
+            .map_err(|_| NativeEngineError::invalid("本地转发 SSH 路由跳数无效"))?;
+        let generation = self.next_generation()?;
+        let cancellation = CancellationToken::new();
+        let stats = Arc::new(LocalForwardStats::default());
+        self.reserve_local_forward(
+            forward_id,
+            generation,
+            cancellation.clone(),
+            bound_port,
+            route_host.clone(),
+            route_hops,
+            target_host.clone(),
+            target_port,
+            Arc::clone(&stats),
+        )?;
+
+        let timeout = route.operation_timeout();
+        let hop_index = route.final_hop_index();
+        let connection = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(NativeEngineError::new(
+                "native-local-forward-cancelled",
+                "本地转发连接已取消",
+                true,
+            )),
+            result = tokio::time::timeout(timeout, connect_route(route)) => match result {
+                Ok(outcome) => outcome,
+                Err(_) => Err(NativeEngineError::new(
+                    "native-local-forward-timeout",
+                    "本地转发 SSH 路由连接超时",
+                    true,
+                ).at_hop(hop_index)),
+            },
+        };
+        let connection_chain = match connection {
+            Ok(connection_chain) => Arc::new(connection_chain),
+            Err(error) => {
+                self.finish_local_forward(forward_id, generation);
+                return Err(error);
+            }
+        };
+        stats.ready.store(1, Ordering::SeqCst);
+        let result = local_forward_snapshot(
+            forward_id,
+            bound_port,
+            &route_host,
+            route_hops,
+            &target_host,
+            target_port,
+            &stats,
+        );
+        let manager = self.clone();
+        tokio::spawn(async move {
+            run_native_local_forward(
+                manager,
+                forward_id,
+                generation,
+                listener,
+                connection_chain,
+                target_host,
+                target_port,
+                cancellation,
+                stats,
+            )
+            .await;
+        });
+        Ok(result)
+    }
+
+    pub(crate) fn list_local_forwards(
+        &self,
+    ) -> Result<Vec<NativeLocalForwardSnapshot>, NativeEngineError> {
+        let forwards = self.lock_local_forwards()?;
+        let mut snapshots = forwards
+            .iter()
+            .map(|(forward_id, forward)| {
+                local_forward_snapshot(
+                    *forward_id,
+                    forward.bind_port,
+                    &forward.route_host,
+                    forward.route_hops,
+                    &forward.target_host,
+                    forward.target_port,
+                    &forward.stats,
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|left, right| left.forward_id.cmp(&right.forward_id));
+        Ok(snapshots)
+    }
+
+    pub(crate) fn stop_local_forward(&self, forward_id: &str) -> Result<(), NativeEngineError> {
+        let forward_id = parse_forward_id(forward_id)?;
+        let cancellation = self
+            .lock_local_forwards()?
+            .get(&forward_id)
+            .map(|forward| forward.cancellation.clone())
+            .ok_or_else(|| {
+                NativeEngineError::new(
+                    "native-local-forward-not-found",
+                    "本地转发不存在或已经停止",
+                    false,
+                )
+            })?;
+        cancellation.cancel();
+        Ok(())
+    }
+
     pub(crate) fn cancel(&self, operation_id: &str) -> Result<(), NativeEngineError> {
         let operation_id = parse_operation_id(operation_id)?;
         let operation = self
@@ -590,6 +800,67 @@ impl NativeEngineManager {
         }
     }
 
+    fn finish_local_forward(&self, forward_id: Uuid, generation: u64) {
+        if let Ok(mut forwards) = self.inner.local_forwards.lock()
+            && forwards
+                .get(&forward_id)
+                .is_some_and(|forward| forward.generation == generation)
+        {
+            forwards.remove(&forward_id);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_local_forward(
+        &self,
+        forward_id: Uuid,
+        generation: u64,
+        cancellation: CancellationToken,
+        bind_port: u16,
+        route_host: String,
+        route_hops: u8,
+        target_host: String,
+        target_port: u16,
+        stats: Arc<LocalForwardStats>,
+    ) -> Result<(), NativeEngineError> {
+        let mut forwards = self.lock_local_forwards()?;
+        if forwards.len() >= MAX_LOCAL_FORWARDS {
+            return Err(NativeEngineError::new(
+                "native-local-forward-capacity",
+                "同时运行的本地转发已达到上限",
+                true,
+            ));
+        }
+        if forwards.contains_key(&forward_id) {
+            return Err(NativeEngineError::new(
+                "native-local-forward-conflict",
+                "本地转发标识已经在使用",
+                false,
+            ));
+        }
+        if forwards.values().any(|forward| forward.bind_port == bind_port) {
+            return Err(NativeEngineError::new(
+                "native-local-forward-bind-conflict",
+                "本地转发回环端口已经在使用",
+                false,
+            ));
+        }
+        forwards.insert(
+            forward_id,
+            ActiveLocalForward {
+                generation,
+                cancellation,
+                bind_port,
+                route_host,
+                route_hops,
+                target_host,
+                target_port,
+                stats,
+            },
+        );
+        Ok(())
+    }
+
     fn reserve_terminal(
         &self,
         session_id: Uuid,
@@ -649,6 +920,19 @@ impl NativeEngineManager {
             )
         })
     }
+
+    fn lock_local_forwards(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<Uuid, ActiveLocalForward>>, NativeEngineError>
+    {
+        self.inner.local_forwards.lock().map_err(|_| {
+            NativeEngineError::new(
+                "native-local-forward-state-corrupt",
+                "本地转发状态已损坏",
+                false,
+            )
+        })
+    }
 }
 
 impl Drop for OperationLease {
@@ -672,6 +956,14 @@ struct ValidatedTerminalStart {
     route: ValidatedRoute,
     cols: u16,
     rows: u16,
+}
+
+struct ValidatedLocalForwardStart {
+    forward_id: Uuid,
+    route: ValidatedRoute,
+    bind_port: u16,
+    target_host: String,
+    target_port: u16,
 }
 
 enum NativeAuth {
@@ -740,6 +1032,25 @@ impl TryFrom<NativeTerminalStartRequest> for ValidatedTerminalStart {
             route,
             cols: request.cols,
             rows: request.rows,
+        })
+    }
+}
+
+impl TryFrom<NativeLocalForwardStartRequest> for ValidatedLocalForwardStart {
+    type Error = NativeEngineError;
+
+    fn try_from(request: NativeLocalForwardStartRequest) -> Result<Self, Self::Error> {
+        let forward_id = parse_forward_id(&request.forward_id)?;
+        validate_host(&request.target_host)?;
+        if request.target_port == 0 {
+            return Err(NativeEngineError::invalid("本地转发目标端口无效"));
+        }
+        Ok(Self {
+            forward_id,
+            route: validate_route(request.route)?,
+            bind_port: request.bind_port,
+            target_host: request.target_host,
+            target_port: request.target_port,
         })
     }
 }
@@ -816,6 +1127,15 @@ fn parse_session_id(value: &str) -> Result<Uuid, NativeEngineError> {
         Uuid::parse_str(value).map_err(|_| NativeEngineError::invalid("原生终端会话标识无效"))?;
     if value.len() != 36 || parsed.to_string() != value {
         return Err(NativeEngineError::invalid("原生终端会话标识无效"));
+    }
+    Ok(parsed)
+}
+
+fn parse_forward_id(value: &str) -> Result<Uuid, NativeEngineError> {
+    let parsed =
+        Uuid::parse_str(value).map_err(|_| NativeEngineError::invalid("本地转发标识无效"))?;
+    if value.len() != 36 || parsed.to_string() != value {
+        return Err(NativeEngineError::invalid("本地转发标识无效"));
     }
     Ok(parsed)
 }
@@ -1395,6 +1715,130 @@ async fn disconnect_sessions(
     disconnected
 }
 
+fn local_forward_snapshot(
+    forward_id: Uuid,
+    bind_port: u16,
+    route_host: &str,
+    route_hops: u8,
+    target_host: &str,
+    target_port: u16,
+    stats: &LocalForwardStats,
+) -> NativeLocalForwardSnapshot {
+    NativeLocalForwardSnapshot {
+        schema_version: SCHEMA_VERSION,
+        forward_id: forward_id.to_string(),
+        state: if stats.ready.load(Ordering::SeqCst) == 1 {
+            "active"
+        } else {
+            "starting"
+        },
+        bind_host: "127.0.0.1",
+        bind_port,
+        route_host: route_host.to_string(),
+        route_hops,
+        target_host: target_host.to_string(),
+        target_port,
+        active_connections: stats.active_connections.load(Ordering::SeqCst),
+        accepted_connections: stats.accepted_connections.load(Ordering::SeqCst),
+        rejected_connections: stats.rejected_connections.load(Ordering::SeqCst),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_native_local_forward(
+    manager: NativeEngineManager,
+    forward_id: Uuid,
+    generation: u64,
+    listener: TcpListener,
+    connection_chain: Arc<NativeConnectionChain>,
+    target_host: String,
+    target_port: u16,
+    cancellation: CancellationToken,
+    stats: Arc<LocalForwardStats>,
+) {
+    let capacity = Arc::new(Semaphore::new(MAX_LOCAL_FORWARD_CONNECTIONS));
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break,
+            completed = connections.join_next(), if !connections.is_empty() => {
+                let _ = completed;
+            }
+            accepted = listener.accept() => {
+                let Ok((local_stream, peer)) = accepted else {
+                    break;
+                };
+                let Ok(permit) = Arc::clone(&capacity).try_acquire_owned() else {
+                    stats.rejected_connections.fetch_add(1, Ordering::SeqCst);
+                    continue;
+                };
+                stats.accepted_connections.fetch_add(1, Ordering::SeqCst);
+                stats.active_connections.fetch_add(1, Ordering::SeqCst);
+                let connection_guard = ActiveForwardConnectionGuard {
+                    stats: Arc::clone(&stats),
+                };
+                let connection_chain = Arc::clone(&connection_chain);
+                let target_host = target_host.clone();
+                let cancellation = cancellation.clone();
+                connections.spawn(async move {
+                    let _permit = permit;
+                    let _connection_guard = connection_guard;
+                    forward_local_connection(
+                        connection_chain,
+                        local_stream,
+                        peer.ip().to_string(),
+                        peer.port(),
+                        target_host,
+                        target_port,
+                        cancellation,
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    connection_chain
+        .disconnect_all("native local forward stopped")
+        .await;
+    manager.finish_local_forward(forward_id, generation);
+}
+
+async fn forward_local_connection(
+    connection_chain: Arc<NativeConnectionChain>,
+    mut local_stream: TcpStream,
+    originator_host: String,
+    originator_port: u16,
+    target_host: String,
+    target_port: u16,
+    cancellation: CancellationToken,
+) {
+    let Ok(session) = connection_chain.final_session() else {
+        return;
+    };
+    let channel = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return,
+        result = session.channel_open_direct_tcpip(
+            target_host,
+            u32::from(target_port),
+            originator_host,
+            u32::from(originator_port),
+        ) => match result {
+            Ok(channel) => channel,
+            Err(_) => return,
+        },
+    };
+    let mut remote_stream = channel.into_stream();
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {}
+        _ = copy_bidirectional(&mut local_stream, &mut remote_stream) => {}
+    }
+}
+
 async fn probe_once(request: ValidatedRoute) -> Result<NativeEngineProbeResult, NativeEngineError> {
     let timeout_seconds = request
         .hops
@@ -1927,6 +2371,7 @@ fn native_client_config(timeout: Duration) -> client::Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     fn hop() -> NativeRouteHopRequest {
         NativeRouteHopRequest {
@@ -2128,6 +2573,129 @@ mod tests {
         assert_eq!(encoded["hopIndex"], 2);
         assert!(!encoded.to_string().contains("host.example"));
         assert!(!encoded.to_string().contains("credentialRef"));
+    }
+
+    #[test]
+    fn local_forward_requests_and_lifecycle_are_bounded() {
+        let request = NativeLocalForwardStartRequest {
+            forward_id: Uuid::new_v4().to_string(),
+            route: NativeRouteRequest { hops: vec![hop()] },
+            bind_port: 0,
+            target_host: "127.0.0.1".to_string(),
+            target_port: 5432,
+        };
+        let validated = ValidatedLocalForwardStart::try_from(request).unwrap();
+        assert_eq!(validated.bind_port, 0);
+        assert_eq!(validated.target_host, "127.0.0.1");
+        assert_eq!(validated.target_port, 5432);
+
+        for forbidden in ["bindHost", "credentialRef", "password"] {
+            let mut value = serde_json::json!({
+                "forwardId": Uuid::new_v4().to_string(),
+                "route": {"hops": [{
+                    "hopId": Uuid::new_v4().to_string(),
+                    "host": "host.example",
+                    "port": 22,
+                    "username": "operator",
+                    "hostKeySha256": format!("SHA256:{}", "A".repeat(43)),
+                    "timeoutSeconds": 15,
+                    "credentialRef": "ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212"
+                }]},
+                "bindPort": 0,
+                "targetHost": "127.0.0.1",
+                "targetPort": 5432
+            });
+            value[forbidden] = serde_json::json!("forbidden");
+            assert!(serde_json::from_value::<NativeLocalForwardStartRequest>(value).is_err());
+        }
+        let invalid = NativeLocalForwardStartRequest {
+            forward_id: Uuid::new_v4().to_string(),
+            route: NativeRouteRequest { hops: vec![hop()] },
+            bind_port: 0,
+            target_host: "target host".to_string(),
+            target_port: 0,
+        };
+        assert!(ValidatedLocalForwardStart::try_from(invalid).is_err());
+
+        let manager = NativeEngineManager::default();
+        let mut ids = Vec::new();
+        for index in 0..MAX_LOCAL_FORWARDS {
+            let forward_id = Uuid::from_u128(index as u128 + 500);
+            ids.push(forward_id);
+            manager
+                .reserve_local_forward(
+                    forward_id,
+                    index as u64 + 1,
+                    CancellationToken::new(),
+                    10_000 + index as u16,
+                    "host.example".to_string(),
+                    1,
+                    "database.internal".to_string(),
+                    5432,
+                    Arc::new(LocalForwardStats::default()),
+                )
+                .unwrap();
+        }
+        let error = manager
+            .reserve_local_forward(
+                Uuid::from_u128(999),
+                99,
+                CancellationToken::new(),
+                11_000,
+                "host.example".to_string(),
+                1,
+                "database.internal".to_string(),
+                5432,
+                Arc::new(LocalForwardStats::default()),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "native-local-forward-capacity");
+        let snapshots = manager.list_local_forwards().unwrap();
+        assert_eq!(snapshots.len(), MAX_LOCAL_FORWARDS);
+        assert!(snapshots.iter().all(|snapshot| snapshot.bind_host == "127.0.0.1"));
+        assert!(snapshots.iter().all(|snapshot| snapshot.state == "starting"));
+        manager.stop_local_forward(&ids[0].to_string()).unwrap();
+        assert!(
+            manager
+                .lock_local_forwards()
+                .unwrap()
+                .get(&ids[0])
+                .unwrap()
+                .cancellation
+                .is_cancelled()
+        );
+        for (index, forward_id) in ids.into_iter().enumerate() {
+            manager.finish_local_forward(forward_id, index as u64 + 1);
+        }
+        assert!(manager.list_local_forwards().unwrap().is_empty());
+
+        let reused_id = Uuid::from_u128(1_500);
+        manager
+            .reserve_local_forward(
+                reused_id,
+                100,
+                CancellationToken::new(),
+                12_000,
+                "host.example".to_string(),
+                1,
+                "database.internal".to_string(),
+                5432,
+                Arc::new(LocalForwardStats::default()),
+            )
+            .unwrap();
+        manager.finish_local_forward(reused_id, 99);
+        assert!(manager.lock_local_forwards().unwrap().contains_key(&reused_id));
+        manager.finish_local_forward(reused_id, 100);
+        assert!(manager.list_local_forwards().unwrap().is_empty());
+
+        let stats = Arc::new(LocalForwardStats::default());
+        stats.active_connections.store(1, Ordering::SeqCst);
+        {
+            let _guard = ActiveForwardConnectionGuard {
+                stats: Arc::clone(&stats),
+            };
+        }
+        assert_eq!(stats.active_connections.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2670,6 +3238,47 @@ mod tests {
             .expect("two-hop OpenSSH/SFTP probe");
         assert!(probe.ssh_ready);
         assert!(probe.sftp_ready);
+
+        let forward_id = Uuid::new_v4();
+        let forward = manager
+            .start_local_forward(NativeLocalForwardStartRequest {
+                forward_id: forward_id.to_string(),
+                route: route(target_fingerprint.clone()),
+                bind_port: 0,
+                target_host: "127.0.0.1".to_string(),
+                target_port,
+            })
+            .await
+            .expect("two-hop local forward start");
+        assert_eq!(forward.state, "active");
+        assert_eq!(forward.bind_host, "127.0.0.1");
+        assert_ne!(forward.bind_port, 0);
+        let mut forwarded = TcpStream::connect((Ipv4Addr::LOCALHOST, forward.bind_port))
+            .await
+            .expect("connect local forward");
+        let mut banner = [0_u8; 64];
+        let bytes = tokio::time::timeout(Duration::from_secs(5), forwarded.read(&mut banner))
+            .await
+            .expect("forwarded banner timeout")
+            .expect("read forwarded banner");
+        assert!(banner[..bytes].starts_with(b"SSH-2.0-"));
+        drop(forwarded);
+        let snapshots = manager.list_local_forwards().unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].accepted_connections >= 1);
+        manager
+            .stop_local_forward(&forward_id.to_string())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if manager.list_local_forwards().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("local forward cancellation timeout");
 
         let session_id = Uuid::new_v4();
         let launch = manager

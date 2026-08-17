@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   BookOpenText,
   Braces,
+  Cable,
   Check,
   ChevronDown,
   ChevronRight,
@@ -80,7 +81,7 @@ import type {
 import "./App.css";
 
 type SidebarView = "hosts" | "commands" | "scripts" | "history";
-type DialogKind = "host" | "host-key" | "sync" | "wallpaper" | "settings" | "guide" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | null;
+type DialogKind = "host" | "host-key" | "sync" | "wallpaper" | "settings" | "guide" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | "local-forward" | null;
 
 const RECYCLE_BIN_DAYS = 30;
 
@@ -186,6 +187,21 @@ interface NativeTerminalStartResult {
   schemaVersion: number;
   engine: "russh";
   sessionId: string;
+}
+
+interface NativeLocalForwardSnapshot {
+  schemaVersion: number;
+  forwardId: string;
+  state: "starting" | "active";
+  bindHost: "127.0.0.1";
+  bindPort: number;
+  routeHost: string;
+  routeHops: number;
+  targetHost: string;
+  targetPort: number;
+  activeConnections: number;
+  acceptedConnections: number;
+  rejectedConnections: number;
 }
 
 interface NativeEngineErrorPayload {
@@ -458,6 +474,9 @@ function App() {
   const [nativeProbeInspecting, setNativeProbeInspecting] = useState(false);
   const [nativeProbeOperationId, setNativeProbeOperationId] = useState<string | null>(null);
   const [nativeTerminalStartingIds, setNativeTerminalStartingIds] = useState<string[]>([]);
+  const [nativeLocalForwards, setNativeLocalForwards] = useState<NativeLocalForwardSnapshot[]>([]);
+  const [nativeLocalForwardBusy, setNativeLocalForwardBusy] = useState(false);
+  const [nativeLocalForwardError, setNativeLocalForwardError] = useState<string | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
@@ -529,6 +548,28 @@ function App() {
     const timer = window.setInterval(() => void refreshAndroidSyncStatus(), 15_000);
     return () => window.clearInterval(timer);
   }, [refreshAndroidSyncStatus]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
+    let active = true;
+    const refresh = () => {
+      void invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards")
+        .then((forwards) => {
+          if (!active) return;
+          setNativeLocalForwards(forwards);
+          setNativeLocalForwardError(null);
+        })
+        .catch((error) => {
+          if (active) setNativeLocalForwardError(invokeErrorMessage(error));
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, dialog === "local-forward" ? 1_000 : 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [dialog]);
 
   useEffect(() => {
     if (!appStoreStatus.ready || appState.hosts.length === 0) return;
@@ -1083,6 +1124,71 @@ function App() {
     } finally {
       setNativeProbeInspecting(false);
       setNativeProbeOperationId((current) => current === operationId ? null : current);
+    }
+  }
+
+  async function refreshNativeLocalForwards() {
+    if (!isDesktopRuntime()) return;
+    try {
+      const forwards = await invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards");
+      setNativeLocalForwards(forwards);
+      setNativeLocalForwardError(null);
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    }
+  }
+
+  async function startNativeLocalForward(form: HTMLFormElement) {
+    if (!hasActiveHost || nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    const data = new FormData(form);
+    const bindPort = Number(data.get("bindPort"));
+    const targetHost = String(data.get("targetHost") ?? "").trim();
+    const targetPort = Number(data.get("targetPort"));
+    if (!Number.isInteger(bindPort) || bindPort < 0 || bindPort > 65_535) {
+      setNativeLocalForwardError("本地端口必须在 0 到 65535 之间");
+      return;
+    }
+    if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65_535) {
+      setNativeLocalForwardError("请填写有效的目标地址和端口");
+      return;
+    }
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      const forward = await invoke<NativeLocalForwardSnapshot>("start_native_local_forward", {
+        request: {
+          forwardId: crypto.randomUUID(),
+          route: nativeRoute(activeHost, appState.hosts, appState.sshKeys),
+          bindPort,
+          targetHost,
+          targetPort,
+        },
+      });
+      setNativeLocalForwards((current) => [
+        forward,
+        ...current.filter((item) => item.forwardId !== forward.forwardId),
+      ]);
+      form.reset();
+      showToast(`本地转发已监听 ${forward.bindHost}:${forward.bindPort}`);
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function stopNativeLocalForward(forwardId: string) {
+    if (nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      await invoke("stop_native_local_forward", { forwardId });
+      showToast("正在停止本地转发");
+      await refreshNativeLocalForwards();
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
     }
   }
 
@@ -1655,6 +1761,18 @@ function App() {
             <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
             {isDesktopRuntime() ? (
               <button
+                className={`icon-button ${nativeLocalForwards.length ? "forward-active" : ""}`}
+                type="button"
+                title={`本地端口转发（${nativeLocalForwards.length} 条运行中）`}
+                aria-label={`本地端口转发（${nativeLocalForwards.length} 条运行中）`}
+                disabled={!hasActiveHost}
+                onClick={() => setDialog("local-forward")}
+              >
+                <Cable size={17} />
+              </button>
+            ) : null}
+            {isDesktopRuntime() ? (
+              <button
                 className="icon-button"
                 type="button"
                 title={nativeProbeOperationId ? "取消原生引擎检查" : nativeProbeInspecting ? "正在核验主机指纹" : "检查原生 SSH/SFTP 引擎"}
@@ -2171,6 +2289,48 @@ function App() {
 
       {dialog === "network" ? (
         <NetworkToolsDialog initialMode={networkMode} defaultHost={activeHost.host} onClose={() => setDialog(null)} showToast={showToast} />
+      ) : null}
+
+      {dialog === "local-forward" ? (
+        <Dialog
+          title="本地端口转发"
+          wide
+          onClose={() => setDialog(null)}
+          footer={(
+            <>
+              <button className="secondary-button" type="button" disabled={nativeLocalForwardBusy} onClick={() => void refreshNativeLocalForwards()}><RefreshCw size={14} /> 刷新</button>
+              <button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button>
+            </>
+          )}
+        >
+          <form
+            id="local-forward-form"
+            className="form-grid local-forward-form"
+            onSubmit={(event) => { event.preventDefault(); void startNativeLocalForward(event.currentTarget); }}
+          >
+            <label className="field span-2"><span>本地端口</span><input name="bindPort" type="number" defaultValue="0" min="0" max="65535" required /></label>
+            <label className="field span-2"><span>监听地址</span><input value="127.0.0.1" readOnly /></label>
+            <label className="field span-2"><span>目标地址</span><input name="targetHost" defaultValue="127.0.0.1" maxLength={253} required /></label>
+            <label className="field"><span>目标端口</span><input name="targetPort" type="number" defaultValue="80" min="1" max="65535" required /></label>
+            <button className="primary-button local-forward-start" type="submit" disabled={nativeLocalForwardBusy}><Play size={14} /> 启动</button>
+          </form>
+          <div className="local-forward-heading"><strong>运行中的转发</strong><span>{nativeLocalForwards.length} / 8</span></div>
+          {nativeLocalForwards.length ? (
+            <div className="local-forward-list" aria-live="polite">
+              {nativeLocalForwards.map((forward) => (
+                <div className="local-forward-row" key={forward.forwardId}>
+                  <span className={`session-state ${forward.state === "active" ? "connected" : "connecting"}`} />
+                  <div>
+                    <strong><code>{forward.bindHost}:{forward.bindPort}</code> <ChevronRight size={13} /> <code>{forward.targetHost}:{forward.targetPort}</code></strong>
+                    <small>经 {forward.routeHost}（{forward.routeHops} 跳） · 当前 {forward.activeConnections} · 已接收 {forward.acceptedConnections} · 已拒绝 {forward.rejectedConnections}</small>
+                  </div>
+                  <button className="icon-button compact danger" type="button" title="停止本地转发" aria-label="停止本地转发" disabled={nativeLocalForwardBusy} onClick={() => void stopNativeLocalForward(forward.forwardId)}><Square size={13} /></button>
+                </div>
+              ))}
+            </div>
+          ) : <div className="local-forward-empty"><Cable size={18} /><span>没有运行中的本地转发</span></div>}
+          {nativeLocalForwardError ? <p className="local-forward-error" role="alert"><AlertTriangle size={14} /> {nativeLocalForwardError}</p> : null}
+        </Dialog>
       ) : null}
 
       {dialog === "settings" ? (

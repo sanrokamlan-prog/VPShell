@@ -2301,6 +2301,112 @@ button.sync-status {
   flex: 1;
 }
 
+.icon-button.forward-active {
+  color: #176b45;
+  background: #dcefe4;
+  box-shadow: inset 0 0 0 1px #9fc8af;
+}
+
+.local-forward-form {
+  align-items: end;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.local-forward-start {
+  align-self: end;
+  min-height: 31px;
+}
+
+.local-forward-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 0 8px;
+  font-size: 12px;
+}
+
+.local-forward-heading span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-forward-list {
+  display: grid;
+  border-top: 1px solid var(--border);
+}
+
+.local-forward-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) 28px;
+  min-height: 54px;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 3px;
+  border-bottom: 1px solid var(--border);
+}
+
+.local-forward-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.local-forward-row strong {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  font-size: 11px;
+}
+
+.local-forward-row strong svg {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.local-forward-row code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-forward-row small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.local-forward-empty {
+  display: flex;
+  min-height: 76px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  font-size: 11px;
+}
+
+.local-forward-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 12px 0 0;
+  color: var(--red);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.local-forward-error svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

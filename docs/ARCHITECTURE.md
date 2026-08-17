@@ -22,7 +22,7 @@ v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 | --- | --- | --- |
 | 桌面框架 | Tauri 2、React 19、TypeScript、Vite；Windows/macOS/Linux CI；首个原生 runner Alpha Release 已发布 | 安装与升级仍需扩大实机覆盖；Windows 无 Authenticode，macOS Alpha 使用 ad-hoc 签名且未公证 |
 | 终端 | xterm.js，多标签会话，输入输出、窗口大小调整、断开连接，单终端 250,000 行 scrollback | scrollback 不是持久化的“无限历史” |
-| SSH | Rust 后端通过 `portable-pty` 启动系统 `ssh`；支持端口、`-i` 私钥路径、keepalive 及直连 AskPass | 当前只支持直连；依赖系统 `ssh` 在 PATH 中；主机密钥提示由 OpenSSH 处理；没有原生端口转发和结构化认证状态 |
+| SSH | Rust 后端默认通过 `portable-pty` 启动系统 `ssh`；可选 `russh` route 提供逐跳 pin/认证、PTY/SFTP 与本地回环转发 | 系统路径依赖 `ssh` 在 PATH 中；原生路径仍缺远端/动态转发和广泛服务器兼容验证 |
 | 主机与会话 | 主机分组、环境标签、最近连接、会话切换；OpenSSH 采集 Linux `/proc` 概况；v0.2 工作树可显式启用 bash/zsh 自报上下文栈 | Integration 不支持 fish/PowerShell，也不把远端自报 hostname 当作已验证身份；监控仅支持 Linux |
 | 多终端输入 | v0.2 Compose 广播由 Rust 冻结目标/命令/上下文，所有目标均需预览，生产持续标记，认证和已知危险命令阻止 | 不是完整的原始按键同步；成功只表示 PTY 写入，不能结构化证明远端命令成功 |
 | 历史 | 命令、SFTP 路径和连接尝试历史由 Rust SQLite schema v1 快照/事件元数据管理；首次启动一次性迁移旧 WebView 状态 | SSH 进程启动不代表认证成功；SQLite 本地快照尚未作为同步包，终端内 `cd` 只由显式 Shell Integration 上报 |
@@ -100,7 +100,7 @@ v0.2 工作树把概况调度从 WebView 定时器收归 `remote_monitor.rs`。�
 
 ### 4.2 russh native engine
 
-Phase D 已接通桌面端真实原生路径：锁定版本的 `russh + Tokio` 建立 SSH；用户可对单个未连接标签显式选择 `russh`，建立长期 PTY/Shell 终端，并让文件坞的目录浏览按需打开、持续复用同一已认证连接上的 `russh-sftp` 子系统。应用管理的 route 可通过 `direct-tcpip` 逐跳建立 tunnel；系统 OpenSSH 仍是默认兼容引擎。大传输、外部编辑和远端变更继续使用独立兼容 SFTP 连接，避免共享通道阻塞终端，也保留既有恢复/原子提交语义，但这些独立连接尚未支持跳板。下一步扩展端口转发。
+Phase D 已接通桌面端真实原生路径：锁定版本的 `russh + Tokio` 建立 SSH；用户可对单个未连接标签显式选择 `russh`，建立长期 PTY/Shell 终端，并让文件坞的目录浏览按需打开、持续复用同一已认证连接上的 `russh-sftp` 子系统。应用管理的 route 可通过 `direct-tcpip` 逐跳建立 tunnel；本地端口转发固定监听 `127.0.0.1`，每条 route 连接在最终 SSH 会话上为本地 TCP 连接打开独立 `direct-tcpip` channel。系统 OpenSSH 仍是默认兼容引擎。大传输、外部编辑和远端变更继续使用独立兼容 SFTP 连接，避免共享通道阻塞终端，也保留既有恢复/原子提交语义，但这些独立连接尚未支持跳板。远端和动态转发仍待实现。
 
 就绪检查和终端启动只接受具名、严格反序列化的 `route.hops[]` 请求。route 限制 1–4 跳且禁止重复 hop UUID 或端点；每跳独立携带 host/user/port、5–60 秒超时、已验证的 SHA256 pin，以及密码引用或私钥二选一的认证来源。Rust 先验证整个无秘密 route，再只为即将连接的 hop 解析本机凭据；首跳使用 TCP，后续由上一跳打开只指向下一端点的 `direct-tcpip` channel，并以该 channel stream 发起新的 SSH 握手。每跳分别受超时与 pin 约束，错误只补充 1-based hop 序号，不回显地址、路径或引用；任何中间失败都会逆序关闭已建立的上游会话。
 
@@ -125,7 +125,7 @@ open_forward(session_id, policy) -> lease
 - 终端字节原样传输，不能按行解析或在 UI 跟不上时丢弃字节；
 - FIDO/U2F、PKCS#11、GSSAPI、Pageant 等尚未达到兼容性时，明确回退系统 OpenSSH。
 
-`russh` 仍处于 `0.x` 版本阶段，因此桌面依赖精确锁定。Linux CI 启动具有不同 host key、用户和客户端私钥的回环跳板与目标 OpenSSH：跳板只允许到目标测试端口的 `direct-tcpip`，目标禁止转发；测试经 tunnel 完成第二跳 pin、公钥认证、SFTP、PTY、字节收发和取消。该检查不证明多版本/旧服务器兼容、长时间大流量、两台以上跳板、逐跳换钥或通用转发；这些矩阵完成前不能将原生引擎设为默认，也不能移除系统 OpenSSH 回退。
+`russh` 仍处于 `0.x` 版本阶段，因此桌面依赖精确锁定。Linux CI 启动具有不同 host key、用户和客户端私钥的回环跳板与目标 OpenSSH：跳板只允许到目标测试端口的 `direct-tcpip`；目标仅允许 local forwarding 且 `PermitOpen` 唯一指向自身测试端口。测试经 tunnel 完成第二跳 pin、公钥认证、SFTP、PTY、字节收发和取消，并从 Rust-owned 本地回环监听读取经最终会话转发的 OpenSSH banner。该检查不证明多版本/旧服务器兼容、长时间大流量、两台以上跳板、逐跳换钥、非回环监听或远端/动态转发；这些矩阵完成前不能将原生引擎设为默认，也不能移除系统 OpenSSH 回退。
 
 ### 4.3 凭据边界
 
@@ -346,7 +346,7 @@ SSH 参数调优、压缩或连接复用不能等同于海外线路加速。真�
 
 中继只能承载到目标的 SSH 密文字节，不能终止最终 SSH、读取凭据或替代目标主机密钥验证。客户端持续测量 DNS、TCP/隧道建立、SSH 握手 RTT、丢包/重传和吞吐，按策略选择路线；自动切换必须显示原因，并允许锁定直连或指定中继。
 
-没有部署和实测中继时，界面只能称“直连”“代理”“跳板”或“连接优化”，不能宣称“海外智能加速”。v0.1.0 当前只支持系统 OpenSSH 直连，没有 ProxyJump、测速选路或加速服务。
+没有部署和实测中继时，界面只能称“直连”“代理”“跳板”或“连接优化”，不能宣称“海外智能加速”。当前已有系统 OpenSSH 直连、用户显式配置的原生逐跳 route 与本地回环转发；没有 SOCKS/HTTP 代理、自建中继、测速选路或加速服务。
 
 ## 12. 跨模块安全基线
 
