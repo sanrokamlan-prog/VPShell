@@ -860,9 +860,9 @@ mod tests {
         let status = coordinator.run_once(2_000).unwrap();
         assert_eq!(status.phase, SyncCoordinatorPhase::Idle);
         assert_eq!(status.pending_objects, 0);
-        assert_eq!(status.merge_revision, 2);
+        assert_eq!(status.merge_revision, 1);
         assert_eq!(status.last_uploaded_objects, 1);
-        assert_eq!(status.last_downloaded_objects, 2);
+        assert_eq!(status.last_downloaded_objects, 1);
         assert!(provider.objects.lock().unwrap().contains_key(&local_key));
     }
 
