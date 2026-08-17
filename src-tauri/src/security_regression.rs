@@ -166,7 +166,11 @@ mod tests {
         assert!(android_permissions.contains("allow-android-unlock"));
         assert!(android_permissions.contains("allow-android-enter-background"));
         assert!(!android_permissions.contains("allow-android-set-lifecycle"));
-        assert!(!android_permissions.iter().any(|permission| permission.starts_with("biometric:")));
+        assert!(
+            !android_permissions
+                .iter()
+                .any(|permission| permission.starts_with("biometric:"))
+        );
     }
 
     #[test]

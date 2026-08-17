@@ -73,5 +73,15 @@ jobs:
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
         run: |
+          NDK_BIN="$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          ln -sf llvm-ar "$NDK_BIN/aarch64-linux-android-ar"
+          ln -sf llvm-ranlib "$NDK_BIN/aarch64-linux-android-ranlib"
+          ln -sf llvm-nm "$NDK_BIN/aarch64-linux-android-nm"
+          export PATH="$NDK_BIN:$PATH"
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang"
+          export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang++"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          export RANLIB_aarch64_linux_android="$NDK_BIN/llvm-ranlib"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
           npm run tauri -- android build --apk --debug --target aarch64
           src-tauri/gen/android/gradlew --project-dir src-tauri/gen/android testArm64DebugUnitTest
