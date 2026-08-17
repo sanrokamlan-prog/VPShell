@@ -4,7 +4,7 @@
 //! terminal I/O is bounded, and no result can serialize credential material.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::Read,
     path::{Component, Path, PathBuf},
@@ -31,6 +31,7 @@ const SCHEMA_VERSION: u16 = 1;
 const ENGINE_NAME: &str = "russh";
 const MAX_ACTIVE_OPERATIONS: usize = 8;
 const MAX_TERMINAL_SESSIONS: usize = 16;
+const MAX_NATIVE_ROUTE_HOPS: usize = 4;
 const TERMINAL_COMMAND_QUEUE: usize = 64;
 const TERMINAL_EVENT_QUEUE: usize = 64;
 const SFTP_REQUEST_QUEUE: usize = 16;
@@ -53,6 +54,19 @@ const HOST_KEY_MISMATCHED: u8 = 2;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct NativeEngineProbeRequest {
     operation_id: String,
+    route: NativeRouteRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeRouteRequest {
+    hops: Vec<NativeRouteHopRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeRouteHopRequest {
+    hop_id: String,
     host: String,
     port: u16,
     username: String,
@@ -67,14 +81,7 @@ pub(crate) struct NativeEngineProbeRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct NativeTerminalStartRequest {
     session_id: String,
-    host: String,
-    port: u16,
-    username: String,
-    host_key_sha256: String,
-    timeout_seconds: u16,
-    credential_ref: Option<String>,
-    identity_file: Option<String>,
-    identity_passphrase_ref: Option<String>,
+    route: NativeRouteRequest,
     cols: u16,
     rows: u16,
 }
@@ -137,6 +144,8 @@ pub(crate) struct NativeEngineError {
     code: &'static str,
     message: &'static str,
     retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hop_index: Option<u8>,
 }
 
 impl NativeEngineError {
@@ -145,6 +154,7 @@ impl NativeEngineError {
             code,
             message,
             retryable,
+            hop_index: None,
         }
     }
 
@@ -154,6 +164,11 @@ impl NativeEngineError {
 
     fn cancelled() -> Self {
         Self::new("native-engine-cancelled", "原生引擎检查已取消", true)
+    }
+
+    fn at_hop(mut self, hop_index: u8) -> Self {
+        self.hop_index = Some(hop_index);
+        self
     }
 
     pub(crate) fn user_message(&self) -> &'static str {
@@ -284,6 +299,7 @@ impl NativeEngineManager {
         let lease = self.begin(operation_id)?;
         let validated = ValidatedConnection::try_from(request)?;
         let timeout = Duration::from_secs(u64::from(validated.timeout_seconds));
+        let hop_index = validated.hop_index;
         let cancellation = lease.cancellation.clone();
         let outcome = tokio::select! {
             biased;
@@ -295,7 +311,7 @@ impl NativeEngineManager {
                         "native-engine-timeout",
                         "原生 SSH/SFTP 检查超时",
                         true,
-                    )),
+                    ).at_hop(hop_index)),
                 }
             }
         };
@@ -310,6 +326,7 @@ impl NativeEngineManager {
         let session_id = parse_session_id(&request.session_id)?;
         let validated = ValidatedTerminalStart::try_from(request)?;
         let timeout = Duration::from_secs(u64::from(validated.connection.timeout_seconds));
+        let hop_index = validated.connection.hop_index;
         let generation = self.next_generation()?;
         let cancellation = CancellationToken::new();
         let (sftp_requests, sftp_request_receiver) = mpsc::channel(SFTP_REQUEST_QUEUE);
@@ -341,7 +358,7 @@ impl NativeEngineManager {
                         "native-terminal-timeout",
                         "原生终端连接超时",
                         true,
-                    )),
+                    ).at_hop(hop_index)),
                 }
             }
         };
@@ -640,12 +657,13 @@ impl Drop for OperationLease {
 }
 
 struct ValidatedConnection {
+    hop_index: u8,
     host: String,
     port: u16,
     username: String,
     host_key_sha256: String,
     timeout_seconds: u16,
-    auth: NativeAuth,
+    auth_source: NativeAuthSource,
 }
 
 struct ValidatedTerminalStart {
@@ -663,21 +681,37 @@ enum NativeAuth {
     },
 }
 
+enum NativeAuthSource {
+    PasswordReference(String),
+    PrivateKeyFile {
+        identity_file: String,
+        passphrase_ref: Option<String>,
+    },
+}
+
+struct ValidatedRoute {
+    hops: Vec<ValidatedConnection>,
+}
+
+impl ValidatedRoute {
+    fn into_direct(mut self) -> Result<ValidatedConnection, NativeEngineError> {
+        if self.hops.len() != 1 {
+            return Err(NativeEngineError::new(
+                "native-engine-multi-hop-unavailable",
+                "原生多跳连接尚未启用，请继续使用系统 OpenSSH",
+                false,
+            ));
+        }
+        Ok(self.hops.remove(0))
+    }
+}
+
 impl TryFrom<NativeEngineProbeRequest> for ValidatedConnection {
     type Error = NativeEngineError;
 
     fn try_from(request: NativeEngineProbeRequest) -> Result<Self, Self::Error> {
         parse_operation_id(&request.operation_id)?;
-        validate_connection(
-            request.host,
-            request.port,
-            request.username,
-            request.host_key_sha256,
-            request.timeout_seconds,
-            request.credential_ref.as_deref(),
-            request.identity_file.as_deref(),
-            request.identity_passphrase_ref.as_deref(),
-        )
+        validate_route(request.route)?.into_direct()
     }
 }
 
@@ -687,16 +721,7 @@ impl TryFrom<NativeTerminalStartRequest> for ValidatedTerminalStart {
     fn try_from(request: NativeTerminalStartRequest) -> Result<Self, Self::Error> {
         let session_id = parse_session_id(&request.session_id)?;
         validate_terminal_size(request.cols, request.rows)?;
-        let connection = validate_connection(
-            request.host,
-            request.port,
-            request.username,
-            request.host_key_sha256,
-            request.timeout_seconds,
-            request.credential_ref.as_deref(),
-            request.identity_file.as_deref(),
-            request.identity_passphrase_ref.as_deref(),
-        )?;
+        let connection = validate_route(request.route)?.into_direct()?;
         Ok(Self {
             session_id,
             connection,
@@ -706,36 +731,63 @@ impl TryFrom<NativeTerminalStartRequest> for ValidatedTerminalStart {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn validate_route(request: NativeRouteRequest) -> Result<ValidatedRoute, NativeEngineError> {
+    if request.hops.is_empty() || request.hops.len() > MAX_NATIVE_ROUTE_HOPS {
+        return Err(NativeEngineError::invalid(
+            "原生 SSH 路由必须包含 1 到 4 跳",
+        ));
+    }
+    let mut hop_ids = HashSet::with_capacity(request.hops.len());
+    let mut endpoints = HashSet::with_capacity(request.hops.len());
+    let mut hops = Vec::with_capacity(request.hops.len());
+    for (index, hop) in request.hops.into_iter().enumerate() {
+        let hop_index = u8::try_from(index + 1)
+            .map_err(|_| NativeEngineError::invalid("原生 SSH 路由跳数无效"))?;
+        let hop_id = parse_hop_id(&hop.hop_id).map_err(|error| error.at_hop(hop_index))?;
+        if !hop_ids.insert(hop_id) {
+            return Err(
+                NativeEngineError::invalid("原生 SSH 路由跳标识重复").at_hop(hop_index)
+            );
+        }
+        let endpoint = (hop.host.to_ascii_lowercase(), hop.port);
+        if !endpoints.insert(endpoint) {
+            return Err(NativeEngineError::invalid("原生 SSH 路由包含重复端点").at_hop(hop_index));
+        }
+        let connection = validate_connection(hop_index, hop)
+            .map_err(|error| error.at_hop(hop_index))?;
+        hops.push(connection);
+    }
+    Ok(ValidatedRoute { hops })
+}
+
 fn validate_connection(
-    host: String,
-    port: u16,
-    username: String,
-    host_key_sha256: String,
-    timeout_seconds: u16,
-    credential_ref: Option<&str>,
-    identity_file: Option<&str>,
-    identity_passphrase_ref: Option<&str>,
+    hop_index: u8,
+    request: NativeRouteHopRequest,
 ) -> Result<ValidatedConnection, NativeEngineError> {
-    validate_host(&host)?;
-    validate_username(&username)?;
-    if port == 0 {
+    validate_host(&request.host)?;
+    validate_username(&request.username)?;
+    if request.port == 0 {
         return Err(NativeEngineError::invalid("原生 SSH 端口无效"));
     }
-    if !(MIN_TIMEOUT_SECONDS..=MAX_TIMEOUT_SECONDS).contains(&timeout_seconds) {
+    if !(MIN_TIMEOUT_SECONDS..=MAX_TIMEOUT_SECONDS).contains(&request.timeout_seconds) {
         return Err(NativeEngineError::invalid(
             "原生 SSH 超时必须在 5 到 60 秒之间",
         ));
     }
-    validate_fingerprint(&host_key_sha256)?;
-    let auth = resolve_auth(credential_ref, identity_file, identity_passphrase_ref)?;
+    validate_fingerprint(&request.host_key_sha256)?;
+    let auth_source = validate_auth_source(
+        request.credential_ref,
+        request.identity_file,
+        request.identity_passphrase_ref,
+    )?;
     Ok(ValidatedConnection {
-        host,
-        port,
-        username,
-        host_key_sha256,
-        timeout_seconds,
-        auth,
+        hop_index,
+        host: request.host,
+        port: request.port,
+        username: request.username,
+        host_key_sha256: request.host_key_sha256,
+        timeout_seconds: request.timeout_seconds,
+        auth_source,
     })
 }
 
@@ -753,6 +805,15 @@ fn parse_session_id(value: &str) -> Result<Uuid, NativeEngineError> {
         Uuid::parse_str(value).map_err(|_| NativeEngineError::invalid("原生终端会话标识无效"))?;
     if value.len() != 36 || parsed.to_string() != value {
         return Err(NativeEngineError::invalid("原生终端会话标识无效"));
+    }
+    Ok(parsed)
+}
+
+fn parse_hop_id(value: &str) -> Result<Uuid, NativeEngineError> {
+    let parsed =
+        Uuid::parse_str(value).map_err(|_| NativeEngineError::invalid("原生 SSH 跳标识无效"))?;
+    if value.len() != 36 || parsed.to_string() != value {
+        return Err(NativeEngineError::invalid("原生 SSH 跳标识无效"));
     }
     Ok(parsed)
 }
@@ -858,11 +919,11 @@ fn validate_fingerprint(value: &str) -> Result<(), NativeEngineError> {
     Ok(())
 }
 
-fn resolve_auth(
-    credential_ref: Option<&str>,
-    identity_file: Option<&str>,
-    identity_passphrase_ref: Option<&str>,
-) -> Result<NativeAuth, NativeEngineError> {
+fn validate_auth_source(
+    credential_ref: Option<String>,
+    identity_file: Option<String>,
+    identity_passphrase_ref: Option<String>,
+) -> Result<NativeAuthSource, NativeEngineError> {
     match (credential_ref, identity_file) {
         (Some(_), Some(_)) => Err(NativeEngineError::invalid(
             "原生引擎检查每次只允许一种认证方式",
@@ -871,28 +932,53 @@ fn resolve_auth(
             if identity_passphrase_ref.is_some() {
                 return Err(NativeEngineError::invalid("密码认证不能携带私钥口令引用"));
             }
-            crate::file_transfer::validate_optional_reference(Some(reference), "ssh-")
+            crate::file_transfer::validate_optional_reference(Some(&reference), "ssh-")
                 .map_err(|_| NativeEngineError::invalid("原生 SSH 凭据引用无效"))?;
-            let password =
-                crate::file_transfer::read_secret(reference, "原生 SSH 密码引用不存在或无法读取")
-                    .map_err(|_| {
-                    NativeEngineError::new(
-                        "native-engine-credential-unavailable",
-                        "原生 SSH 凭据不可用",
-                        false,
-                    )
-                })?;
-            Ok(NativeAuth::Password(password))
+            Ok(NativeAuthSource::PasswordReference(reference))
         }
         (None, Some(identity_file)) => {
-            let private_key = read_private_key(identity_file)?;
-            let passphrase = match identity_passphrase_ref {
+            validate_private_key_path_shape(&identity_file)?;
+            if let Some(reference) = identity_passphrase_ref.as_deref() {
+                crate::file_transfer::validate_optional_reference(Some(reference), "key-")
+                    .map_err(|_| NativeEngineError::invalid("原生 SSH 私钥口令引用无效"))?;
+            }
+            Ok(NativeAuthSource::PrivateKeyFile {
+                identity_file,
+                passphrase_ref: identity_passphrase_ref,
+            })
+        }
+        (None, None) => Err(NativeEngineError::invalid(
+            "原生引擎检查需要凭据引用或私钥文件",
+        )),
+    }
+}
+
+fn resolve_auth(source: NativeAuthSource) -> Result<NativeAuth, NativeEngineError> {
+    match source {
+        NativeAuthSource::PasswordReference(reference) => {
+            let password = crate::file_transfer::read_secret(
+                &reference,
+                "原生 SSH 密码引用不存在或无法读取",
+            )
+            .map_err(|_| {
+                NativeEngineError::new(
+                    "native-engine-credential-unavailable",
+                    "原生 SSH 凭据不可用",
+                    false,
+                )
+            })?;
+            Ok(NativeAuth::Password(password))
+        }
+        NativeAuthSource::PrivateKeyFile {
+            identity_file,
+            passphrase_ref,
+        } => {
+            let private_key = read_private_key(&identity_file)?;
+            let passphrase = match passphrase_ref {
                 Some(reference) => {
-                    crate::file_transfer::validate_optional_reference(Some(reference), "key-")
-                        .map_err(|_| NativeEngineError::invalid("原生 SSH 私钥口令引用无效"))?;
                     Some(
                         crate::file_transfer::read_secret(
-                            reference,
+                            &reference,
                             "原生 SSH 私钥口令引用不存在或无法读取",
                         )
                         .map_err(|_| {
@@ -911,13 +997,10 @@ fn resolve_auth(
                 passphrase,
             })
         }
-        (None, None) => Err(NativeEngineError::invalid(
-            "原生引擎检查需要凭据引用或私钥文件",
-        )),
     }
 }
 
-fn read_private_key(value: &str) -> Result<Zeroizing<Vec<u8>>, NativeEngineError> {
+fn validate_private_key_path_shape(value: &str) -> Result<(), NativeEngineError> {
     if value.is_empty() || value.len() > MAX_PATH_BYTES {
         return Err(NativeEngineError::invalid("原生 SSH 私钥路径无效"));
     }
@@ -927,6 +1010,20 @@ fn read_private_key(value: &str) -> Result<Zeroizing<Vec<u8>>, NativeEngineError
             "原生 SSH 私钥路径必须是绝对路径",
         ));
     }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(NativeEngineError::invalid(
+            "原生 SSH 私钥路径不能包含 . 或 ..",
+        ));
+    }
+    Ok(())
+}
+
+fn read_private_key(value: &str) -> Result<Zeroizing<Vec<u8>>, NativeEngineError> {
+    validate_private_key_path_shape(value)?;
+    let path = Path::new(value);
     reject_symlink_components(path)?;
     let mut file = File::open(path).map_err(|_| {
         NativeEngineError::new(
@@ -1030,8 +1127,18 @@ impl Handler for PinnedServerKey {
 }
 
 async fn connect_authenticated(
-    mut request: ValidatedConnection,
+    request: ValidatedConnection,
 ) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
+    let hop_index = request.hop_index;
+    connect_authenticated_hop(request)
+        .await
+        .map_err(|error| error.at_hop(hop_index))
+}
+
+async fn connect_authenticated_hop(
+    request: ValidatedConnection,
+) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
+    let mut auth = resolve_auth(request.auth_source)?;
     let host_key_state = Arc::new(AtomicU8::new(HOST_KEY_UNSEEN));
     let handler = PinnedServerKey {
         expected_sha256: request.host_key_sha256,
@@ -1068,7 +1175,7 @@ async fn connect_authenticated(
         ));
     }
 
-    let authenticated = match &mut request.auth {
+    let authenticated = match &mut auth {
         NativeAuth::Password(password) => session
             .authenticate_password(request.username, password.as_str())
             .await
@@ -1649,9 +1756,9 @@ fn native_client_config(timeout: Duration) -> client::Config {
 mod tests {
     use super::*;
 
-    fn request() -> NativeEngineProbeRequest {
-        NativeEngineProbeRequest {
-            operation_id: "018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string(),
+    fn hop() -> NativeRouteHopRequest {
+        NativeRouteHopRequest {
+            hop_id: "018f1f55-26f8-7a9f-9cd8-4d7558482213".to_string(),
             host: "host.example".to_string(),
             port: 22,
             username: "operator".to_string(),
@@ -1660,6 +1767,13 @@ mod tests {
             credential_ref: Some("ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212".to_string()),
             identity_file: None,
             identity_passphrase_ref: None,
+        }
+    }
+
+    fn request() -> NativeEngineProbeRequest {
+        NativeEngineProbeRequest {
+            operation_id: "018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string(),
+            route: NativeRouteRequest { hops: vec![hop()] },
         }
     }
 
@@ -1673,15 +1787,16 @@ mod tests {
         assert!(validate_fingerprint("ssh-ed25519 AAAA").is_err());
 
         let mut invalid = request();
-        invalid.timeout_seconds = 4;
+        invalid.route.hops[0].timeout_seconds = 4;
         let error = match ValidatedConnection::try_from(invalid) {
             Ok(_) => panic!("invalid timeout accepted"),
             Err(error) => error,
         };
         assert_eq!(error.code, "native-engine-invalid-request");
+        assert_eq!(error.hop_index, Some(1));
 
         let mut conflicting_auth = request();
-        conflicting_auth.identity_file = Some("/tmp/private-key".to_string());
+        conflicting_auth.route.hops[0].identity_file = Some("/tmp/private-key".to_string());
         let error = match ValidatedConnection::try_from(conflicting_auth) {
             Ok(_) => panic!("multiple authentication sources accepted"),
             Err(error) => error,
@@ -1689,7 +1804,7 @@ mod tests {
         assert_eq!(error.code, "native-engine-invalid-request");
 
         let mut missing_auth = request();
-        missing_auth.credential_ref = None;
+        missing_auth.route.hops[0].credential_ref = None;
         let error = match ValidatedConnection::try_from(missing_auth) {
             Ok(_) => panic!("missing authentication source accepted"),
             Err(error) => error,
@@ -1699,14 +1814,7 @@ mod tests {
 
         let invalid_terminal = NativeTerminalStartRequest {
             session_id: "not-a-uuid".to_string(),
-            host: "host.example".to_string(),
-            port: 22,
-            username: "operator".to_string(),
-            host_key_sha256: format!("SHA256:{}", "A".repeat(43)),
-            timeout_seconds: 15,
-            credential_ref: None,
-            identity_file: None,
-            identity_passphrase_ref: None,
+            route: NativeRouteRequest { hops: vec![hop()] },
             cols: 120,
             rows: 32,
         };
@@ -1738,6 +1846,117 @@ mod tests {
                 .iter()
                 .any(|algorithm| matches!(algorithm, Algorithm::Rsa { hash: None }))
         );
+    }
+
+    #[test]
+    fn route_hops_bind_independent_authentication_and_host_keys() {
+        let password_hop = hop();
+        let mut key_hop = hop();
+        key_hop.hop_id = "018f1f55-26f8-7a9f-9cd8-4d7558482214".to_string();
+        key_hop.host = "target.example".to_string();
+        key_hop.host_key_sha256 = format!("SHA256:{}", "B".repeat(43));
+        key_hop.credential_ref = None;
+        key_hop.identity_file = Some("/tmp/target-key".to_string());
+        key_hop.identity_passphrase_ref =
+            Some("key-018f1f55-26f8-7a9f-9cd8-4d7558482215".to_string());
+        let route = validate_route(NativeRouteRequest {
+            hops: vec![password_hop, key_hop],
+        })
+        .expect("independent hop route");
+        assert_eq!(route.hops.len(), 2);
+        assert_eq!(route.hops[0].hop_index, 1);
+        assert_eq!(route.hops[1].hop_index, 2);
+        assert_ne!(
+            route.hops[0].host_key_sha256,
+            route.hops[1].host_key_sha256
+        );
+        assert!(matches!(
+            &route.hops[0].auth_source,
+            NativeAuthSource::PasswordReference(_)
+        ));
+        assert!(matches!(
+            &route.hops[1].auth_source,
+            NativeAuthSource::PrivateKeyFile { .. }
+        ));
+        let error = match route.into_direct() {
+            Ok(_) => panic!("multi-hop route accepted by direct connector"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "native-engine-multi-hop-unavailable");
+
+        let first = hop();
+        let mut duplicate_id = hop();
+        duplicate_id.host = "other.example".to_string();
+        let error = match validate_route(NativeRouteRequest {
+            hops: vec![first, duplicate_id],
+        }) {
+            Ok(_) => panic!("duplicate hop id accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.hop_index, Some(2));
+
+        let first = hop();
+        let mut duplicate_endpoint = hop();
+        duplicate_endpoint.hop_id = "018f1f55-26f8-7a9f-9cd8-4d7558482216".to_string();
+        duplicate_endpoint.username = "different-user".to_string();
+        let error = match validate_route(NativeRouteRequest {
+            hops: vec![first, duplicate_endpoint],
+        }) {
+            Ok(_) => panic!("duplicate endpoint accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.hop_index, Some(2));
+
+        let mut too_many = Vec::new();
+        for index in 0..=MAX_NATIVE_ROUTE_HOPS {
+            let mut route_hop = hop();
+            route_hop.hop_id = Uuid::from_u128(index as u128 + 100).to_string();
+            route_hop.host = format!("hop-{index}.example");
+            too_many.push(route_hop);
+        }
+        assert!(validate_route(NativeRouteRequest { hops: too_many }).is_err());
+    }
+
+    #[test]
+    fn route_request_rejects_legacy_flat_and_secret_fields() {
+        let operation_id = Uuid::new_v4().to_string();
+        let hop_id = Uuid::new_v4().to_string();
+        let fingerprint = format!("SHA256:{}", "A".repeat(43));
+        assert!(
+            serde_json::from_value::<NativeEngineProbeRequest>(serde_json::json!({
+                "operationId": operation_id,
+                "host": "host.example",
+                "port": 22,
+                "username": "operator",
+                "hostKeySha256": fingerprint,
+                "timeoutSeconds": 15,
+                "credentialRef": "ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NativeEngineProbeRequest>(serde_json::json!({
+                "operationId": Uuid::new_v4().to_string(),
+                "route": {"hops": [{
+                    "hopId": hop_id,
+                    "host": "host.example",
+                    "port": 22,
+                    "username": "operator",
+                    "hostKeySha256": format!("SHA256:{}", "A".repeat(43)),
+                    "timeoutSeconds": 15,
+                    "credentialRef": "ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212",
+                    "password": "forbidden"
+                }]}
+            }))
+            .is_err()
+        );
+        let encoded = serde_json::to_value(
+            NativeEngineError::invalid("原生 SSH 路由跳标识重复").at_hop(2),
+        )
+        .unwrap();
+        assert_eq!(encoded["hopIndex"], 2);
+        assert!(!encoded.to_string().contains("host.example"));
+        assert!(!encoded.to_string().contains("credentialRef"));
     }
 
     #[test]
@@ -2064,29 +2283,40 @@ mod tests {
         let mismatch = manager
             .probe(NativeEngineProbeRequest {
                 operation_id: Uuid::new_v4().to_string(),
-                host: host.clone(),
-                port,
-                username: username.clone(),
-                host_key_sha256: format!("SHA256:{}", "A".repeat(43)),
-                timeout_seconds: 15,
-                credential_ref: None,
-                identity_file: Some(identity_file.clone()),
-                identity_passphrase_ref: None,
+                route: NativeRouteRequest {
+                    hops: vec![NativeRouteHopRequest {
+                        hop_id: Uuid::new_v4().to_string(),
+                        host: host.clone(),
+                        port,
+                        username: username.clone(),
+                        host_key_sha256: format!("SHA256:{}", "A".repeat(43)),
+                        timeout_seconds: 15,
+                        credential_ref: None,
+                        identity_file: Some(identity_file.clone()),
+                        identity_passphrase_ref: None,
+                    }],
+                },
             })
             .await
             .expect_err("mismatched host key must fail before authentication");
         assert_eq!(mismatch.code, "native-engine-host-key-mismatch");
+        assert_eq!(mismatch.hop_index, Some(1));
         let result = manager
             .probe(NativeEngineProbeRequest {
                 operation_id: Uuid::new_v4().to_string(),
-                host,
-                port,
-                username,
-                host_key_sha256: fingerprint,
-                timeout_seconds: 15,
-                credential_ref: None,
-                identity_file: Some(identity_file),
-                identity_passphrase_ref: None,
+                route: NativeRouteRequest {
+                    hops: vec![NativeRouteHopRequest {
+                        hop_id: Uuid::new_v4().to_string(),
+                        host,
+                        port,
+                        username,
+                        host_key_sha256: fingerprint,
+                        timeout_seconds: 15,
+                        credential_ref: None,
+                        identity_file: Some(identity_file),
+                        identity_passphrase_ref: None,
+                    }],
+                },
             })
             .await
             .expect("real OpenSSH/SFTP probe");
@@ -2114,14 +2344,19 @@ mod tests {
         let launch = manager
             .start_terminal(NativeTerminalStartRequest {
                 session_id: session_id.to_string(),
-                host,
-                port,
-                username,
-                host_key_sha256: fingerprint,
-                timeout_seconds: 15,
-                credential_ref: None,
-                identity_file: Some(identity_file),
-                identity_passphrase_ref: None,
+                route: NativeRouteRequest {
+                    hops: vec![NativeRouteHopRequest {
+                        hop_id: Uuid::new_v4().to_string(),
+                        host,
+                        port,
+                        username,
+                        host_key_sha256: fingerprint,
+                        timeout_seconds: 15,
+                        credential_ref: None,
+                        identity_file: Some(identity_file),
+                        identity_passphrase_ref: None,
+                    }],
+                },
                 cols: 120,
                 rows: 32,
             })

@@ -191,13 +191,15 @@ interface NativeEngineErrorPayload {
   code?: string;
   message?: string;
   retryable?: boolean;
+  hopIndex?: number;
 }
 
 function invokeErrorMessage(error: unknown) {
   if (error && typeof error === "object") {
     const payload = error as NativeEngineErrorPayload;
     if (typeof payload.message === "string") {
-      return payload.code ? `${payload.message}（${payload.code}）` : payload.message;
+      const hop = typeof payload.hopIndex === "number" ? `第 ${payload.hopIndex} 跳：` : "";
+      return payload.code ? `${hop}${payload.message}（${payload.code}）` : `${hop}${payload.message}`;
     }
   }
   return String(error);
@@ -326,6 +328,26 @@ function encodeUtf8Base64(value: string) {
 function hostCredentialReferences(host: HostProfile) {
   return [host.credentialRef, host.androidKeyRef, host.androidKeyPassphraseRef]
     .filter((reference): reference is string => Boolean(reference));
+}
+
+function nativeDirectRoute(
+  host: HostProfile,
+  hostKeySha256: string,
+  identityPassphraseRef?: string,
+) {
+  return {
+    hops: [{
+      hopId: crypto.randomUUID(),
+      host: host.host,
+      port: host.port,
+      username: host.username,
+      hostKeySha256,
+      timeoutSeconds: 15,
+      credentialRef: host.identityFile ? undefined : host.credentialRef,
+      identityFile: host.identityFile,
+      identityPassphraseRef,
+    }],
+  };
 }
 
 function scoreIntent(query: string, fields: string[]) {
@@ -851,14 +873,7 @@ function App() {
         result = await invoke<NativeTerminalStartResult>("start_native_terminal", {
           request: {
             sessionId: session.id,
-            host: host.host,
-            port: host.port,
-            username: host.username,
-            hostKeySha256,
-            timeoutSeconds: 15,
-            credentialRef: host.identityFile ? undefined : host.credentialRef,
-            identityFile: host.identityFile,
-            identityPassphraseRef,
+            route: nativeDirectRoute(host, hostKeySha256, identityPassphraseRef),
             cols: 120,
             rows: 32,
           },
@@ -1003,14 +1018,7 @@ function App() {
       const result = await invoke<NativeEngineProbeResult>("native_engine_probe", {
         request: {
           operationId,
-          host: activeHost.host,
-          port: activeHost.port,
-          username: activeHost.username,
-          hostKeySha256: inspection.fingerprint,
-          timeoutSeconds: 15,
-          credentialRef: activeHost.identityFile ? undefined : activeHost.credentialRef,
-          identityFile: activeHost.identityFile,
-          identityPassphraseRef: activeIdentityPassphraseRef,
+          route: nativeDirectRoute(activeHost, inspection.fingerprint, activeIdentityPassphraseRef),
         },
       });
       if (result.schemaVersion !== 1 || result.engine !== "russh" || !result.sshReady || !result.sftpReady) {

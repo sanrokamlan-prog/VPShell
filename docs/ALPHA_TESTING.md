@@ -143,6 +143,12 @@
 - Linux VPS 可记录 aarch64 debug APK/AAB 的路径、大小、SHA-256 与 debug 签名结构，但不能替代 Android Keystore/生物识别、emulator/instrumentation、arm64 真机、休眠/网络切换、软键盘、截图或剪贴板人工验收。
 - `android_native_transport::tests` 还应验证固定 SHA-256 host-key、5--60 秒超时、清零密码/内存私钥载荷、绝对远端路径与 1,000 条 list 上限；它只能证明 Rust API 边界，不证明真实 SSH 算法、SFTP 权限或 Android arm64 链接。
 
+### M. Phase D 原生 route 契约
+
+- 原生 probe 与终端的 IPC 必须只接受 `route.hops[]`；空 route、超过 4 跳、重复 hop UUID、重复 host/port、无效端点/指纹/超时、同跳多认证来源、旧的扁平请求和 `password` 等未知秘密字段都应拒绝。
+- 两跳夹具应使用不同 host-key 与不同认证来源，并确认错误只显示第几跳而不含 host、credentialRef、私钥路径或底层库文本。当前两跳以上必须稳定返回“多跳尚未启用”；该测试只验收逐跳信任边界，不能替代下一阶段真实跳板 tunnel。
+- 单跳 Linux 回环 fixture 必须继续实际完成 pin、公钥认证、两次共享 SFTP 浏览、PTY resize/字节收发和取消，证明 route 重构没有把现有直连退化为 mock。
+
 ### J. v0.2 工作区恢复验收（仅源码构建）
 
 - 启动一个大文件或目录传输，确认关闭应用后再次启动不会自动继续、覆盖或提交；打开同一主机的文件面板后应显示“需要恢复决定”。
