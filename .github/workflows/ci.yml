@@ -33,16 +33,59 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev openssh-server patchelf
+      - name: Set up real OpenSSH/SFTP native-engine fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_KEY="$RUNNER_TEMP/vpshell-native-test-key"
+          ssh-keygen -q -t ed25519 -N '' -f "$TEST_KEY"
+          sudo useradd --create-home --shell /bin/sh vpshell-ci
+          sudo passwd -d vpshell-ci
+          sudo install -d -m 700 -o vpshell-ci -g vpshell-ci /home/vpshell-ci/.ssh
+          sudo install -m 600 -o vpshell-ci -g vpshell-ci "$TEST_KEY.pub" /home/vpshell-ci/.ssh/authorized_keys
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd \
+            -p 22222 \
+            -o ListenAddress=127.0.0.1 \
+            -o HostKey=/etc/ssh/ssh_host_ed25519_key \
+            -o PasswordAuthentication=no \
+            -o KbdInteractiveAuthentication=no \
+            -o PubkeyAuthentication=yes \
+            -o PermitRootLogin=no \
+            -o AllowUsers=vpshell-ci \
+            -o UsePAM=no \
+            -o PidFile="$RUNNER_TEMP/vpshell-native-sshd.pid"
+          for attempt in {1..20}; do
+            if ssh-keyscan -T 1 -p 22222 -t ed25519 127.0.0.1 >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "VPSHELL_NATIVE_TEST_HOST=127.0.0.1" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_PORT=22222" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_USER=vpshell-ci" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_IDENTITY_FILE=$TEST_KEY" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_HOST_KEY_SHA256=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 | awk '{print $2}')" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Resolve D1 additions against the existing Cargo.lock
+        shell: bash
+        run: cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 > /dev/null
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: cargo check --locked --manifest-path src-tauri/Cargo.toml
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Require the runner-resolved Cargo.lock to be committed
+        if: always()
+        run: git diff --exit-code -- src-tauri/Cargo.lock
 
   android-preview:
     name: Android Preview (aarch64 debug)
@@ -69,6 +112,8 @@ jobs:
           workspaces: src-tauri
           key: android-aarch64
       - run: npm ci
+      - name: Resolve D1 additions against the existing Cargo.lock
+        run: cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 > /dev/null
       - name: Build aarch64 debug APK and run Gradle unit gate
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
@@ -85,3 +130,6 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
           npm run tauri -- android build --apk --debug --target aarch64
           src-tauri/gen/android/gradlew --project-dir src-tauri/gen/android testArm64DebugUnitTest
+      - name: Require the runner-resolved Cargo.lock to be committed
+        if: always()
+        run: git diff --exit-code -- src-tauri/Cargo.lock

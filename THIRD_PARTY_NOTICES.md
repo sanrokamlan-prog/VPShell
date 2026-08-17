@@ -64,6 +64,16 @@ claim a strong-biometric guarantee. It can be removed together with the optional
 without changing stored SSH credential formats. No plugin or AndroidX source or asset was copied
 into VPShell.
 
+## russh desktop native readiness path
+
+VPShell uses `russh` 0.62.7 and `russh-sftp` 2.4.0 through their public Rust APIs on Linux, macOS
+and Windows. Both are distributed under Apache-2.0. `russh` default features are disabled; only the
+`ring` cryptographic backend and RSA compatibility feature are enabled. The dependencies add no
+telemetry, external process or Tauri permission and receive network access only for the SSH target
+selected by the user. No upstream source was copied. The initial integration performs a bounded,
+explicit SSH/SFTP readiness check and does not replace the default system OpenSSH session engine;
+both crates remain removable with that isolated module and its desktop-only capabilities.
+
 Projects reviewed only for behavior or architecture are not third-party code dependencies. Their
 license boundaries and the decisions derived from that review are recorded in
 [`docs/OPEN_SOURCE_REFERENCES.md`](docs/OPEN_SOURCE_REFERENCES.md).

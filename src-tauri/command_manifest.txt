@@ -1,3 +1,5 @@
+native_engine_probe
+cancel_native_engine_operation
 start_ssh_session
 write_terminal
 enable_shell_integration

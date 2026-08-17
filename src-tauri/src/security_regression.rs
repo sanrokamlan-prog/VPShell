@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            68,
+            70,
             "command manifest contains duplicates or changed count"
         );
 
@@ -158,6 +158,8 @@ mod tests {
             "allow-sync-run-once",
             "allow-sync-attach-session",
             "allow-sync-acknowledge-reconciliation",
+            "allow-native-engine-probe",
+            "allow-cancel-native-engine-operation",
         ] {
             assert!(!android_permissions.contains(forbidden));
         }

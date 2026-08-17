@@ -174,6 +174,29 @@ interface HostKeyInspection {
   fingerprint: string;
 }
 
+interface NativeEngineProbeResult {
+  schemaVersion: number;
+  engine: "russh";
+  sshReady: boolean;
+  sftpReady: boolean;
+}
+
+interface NativeEngineErrorPayload {
+  code?: string;
+  message?: string;
+  retryable?: boolean;
+}
+
+function invokeErrorMessage(error: unknown) {
+  if (error && typeof error === "object") {
+    const payload = error as NativeEngineErrorPayload;
+    if (typeof payload.message === "string") {
+      return payload.code ? `${payload.message}（${payload.code}）` : payload.message;
+    }
+  }
+  return String(error);
+}
+
 type SyncCoordinatorPhase = "notConfigured" | "idle" | "uploading" | "downloading" | "merging" | "waitingRetry" | "conflicts" | "reconcileRequired" | "suspended" | "cancelled";
 
 interface SyncCoordinatorStatus {
@@ -375,6 +398,8 @@ function App() {
   const [androidSyncStatus, setAndroidSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
   const [androidSyncError, setAndroidSyncError] = useState<string | null>(null);
   const [androidSecurityStatus, setAndroidSecurityStatus] = useState<AndroidSecurityStatus | null>(null);
+  const [nativeProbeInspecting, setNativeProbeInspecting] = useState(false);
+  const [nativeProbeOperationId, setNativeProbeOperationId] = useState<string | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
@@ -880,6 +905,64 @@ function App() {
       await invoke("stop_terminal", { sessionId: activeSession.id }).catch((error) => showToast(String(error)));
     }
     updateSession(activeSession.id, { state: "closed" });
+  }
+
+  async function probeNativeEngine() {
+    if (nativeProbeOperationId) {
+      const operationId = nativeProbeOperationId;
+      try {
+        await invoke("cancel_native_engine_operation", { operationId });
+        showToast("正在取消原生引擎检查");
+      } catch (error) {
+        showToast(invokeErrorMessage(error));
+      }
+      return;
+    }
+    if (nativeProbeInspecting || !hasActiveHost || !isDesktopRuntime()) return;
+    if (!activeHost.identityFile && !activeHost.credentialRef) {
+      showToast("原生引擎检查目前需要已保存的密码或显式私钥；该主机继续使用系统 OpenSSH");
+      return;
+    }
+    const operationId = crypto.randomUUID();
+    setNativeProbeInspecting(true);
+    try {
+      const inspection = await invoke<HostKeyInspection>("inspect_host_key", {
+        request: { host: activeHost.host, port: activeHost.port },
+      });
+      if (inspection.status === "unknown") {
+        throw new Error("请先通过正常连接流程核验并保存主机指纹");
+      }
+      if (inspection.status === "changed") {
+        throw new Error(`主机指纹与本机记录不一致，原生检查已拒绝：${inspection.fingerprint}`);
+      }
+      if (inspection.status !== "verified") {
+        throw new Error("无法验证 SSH 主机指纹，原生检查已拒绝");
+      }
+      setNativeProbeInspecting(false);
+      setNativeProbeOperationId(operationId);
+      const result = await invoke<NativeEngineProbeResult>("native_engine_probe", {
+        request: {
+          operationId,
+          host: activeHost.host,
+          port: activeHost.port,
+          username: activeHost.username,
+          hostKeySha256: inspection.fingerprint,
+          timeoutSeconds: 15,
+          credentialRef: activeHost.identityFile ? undefined : activeHost.credentialRef,
+          identityFile: activeHost.identityFile,
+          identityPassphraseRef: activeIdentityPassphraseRef,
+        },
+      });
+      if (result.schemaVersion !== 1 || result.engine !== "russh" || !result.sshReady || !result.sftpReady) {
+        throw new Error("原生引擎返回了不受支持的检查结果");
+      }
+      showToast(`${activeHost.name} 的原生 SSH/SFTP 检查通过`);
+    } catch (error) {
+      showToast(invokeErrorMessage(error));
+    } finally {
+      setNativeProbeInspecting(false);
+      setNativeProbeOperationId((current) => current === operationId ? null : current);
+    }
   }
 
   async function trustPendingHostKey() {
@@ -1425,6 +1508,18 @@ function App() {
             </button>
             <span className="route-status"><Route size={15} /> 路线：直连</span>
             <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
+            {isDesktopRuntime() ? (
+              <button
+                className="icon-button"
+                type="button"
+                title={nativeProbeOperationId ? "取消原生引擎检查" : nativeProbeInspecting ? "正在核验主机指纹" : "检查原生 SSH/SFTP 引擎"}
+                aria-label={nativeProbeOperationId ? "取消原生引擎检查" : nativeProbeInspecting ? "正在核验主机指纹" : "检查原生 SSH/SFTP 引擎"}
+                disabled={!hasActiveHost || nativeProbeInspecting}
+                onClick={() => void probeNativeEngine()}
+              >
+                {nativeProbeOperationId ? <X size={17} /> : <ShieldCheck size={17} />}
+              </button>
+            ) : null}
             <button className="icon-button" type="button" title="SSH 密钥" aria-label="SSH 密钥" onClick={() => setDialog("key-manager")}><KeyRound size={17} /></button>
             <button className="icon-button" type="button" title="终端外观" aria-label="终端外观" onClick={() => setDialog("wallpaper")}><Image size={17} /></button>
             <button className="icon-button" type="button" title="使用指南" aria-label="使用指南" onClick={() => setDialog("guide")}><CircleHelp size={17} /></button>

@@ -24,6 +24,8 @@ mod key_management;
 mod local_assets;
 mod migration;
 mod network_tools;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod native_engine;
 mod remote_file_ops;
 mod remote_monitor;
 mod safe_broadcast;
@@ -228,6 +230,36 @@ pub fn run_ssh_askpass(prompt: Option<&str>) -> i32 {
         return 6;
     }
     0
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+async fn native_engine_probe(
+    manager: State<'_, native_engine::NativeEngineManager>,
+    request: native_engine::NativeEngineProbeRequest,
+) -> Result<native_engine::NativeEngineProbeResult, native_engine::NativeEngineError> {
+    manager.probe(request).await
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn native_engine_probe(_request: serde_json::Value) -> Result<serde_json::Value, String> {
+    Err("原生桌面引擎检查在移动端预览中不可用".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+fn cancel_native_engine_operation(
+    manager: State<'_, native_engine::NativeEngineManager>,
+    operation_id: String,
+) -> Result<(), native_engine::NativeEngineError> {
+    manager.cancel(&operation_id)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn cancel_native_engine_operation(_operation_id: String) -> Result<(), String> {
+    Err("原生桌面引擎检查在移动端预览中不可用".to_string())
 }
 
 #[tauri::command]
@@ -748,6 +780,8 @@ pub fn run() {
         .manage(safe_broadcast::SafeBroadcastManager::default())
         .manage(migration::MigrationManager::default())
         .setup(|app| {
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+            app.manage(native_engine::NativeEngineManager::default());
             #[cfg(target_os = "android")]
             {
                 initialize_android_keyring()?;
@@ -789,6 +823,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            native_engine_probe,
+            cancel_native_engine_operation,
             start_ssh_session,
             write_terminal,
             enable_shell_integration,
