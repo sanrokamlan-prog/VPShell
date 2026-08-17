@@ -39,13 +39,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TEST_KEY="$RUNNER_TEMP/vpshell-native-test-key"
-          ssh-keygen -q -t ed25519 -N '' -f "$TEST_KEY"
+          JUMP_KEY="$RUNNER_TEMP/vpshell-native-jump-key"
+          TARGET_KEY="$RUNNER_TEMP/vpshell-native-target-key"
+          TARGET_HOST_KEY="$RUNNER_TEMP/vpshell-native-target-host-key"
+          ssh-keygen -q -t ed25519 -N '' -f "$JUMP_KEY"
+          ssh-keygen -q -t ed25519 -N '' -f "$TARGET_KEY"
+          ssh-keygen -q -t ed25519 -N '' -f "$TARGET_HOST_KEY"
+          sudo chown root:root "$TARGET_HOST_KEY"
+          sudo useradd --create-home --shell /bin/sh vpshell-jump-ci
           sudo useradd --create-home --shell /bin/sh vpshell-ci
+          sudo passwd -d vpshell-jump-ci
           sudo passwd -d vpshell-ci
+          sudo install -d -m 700 -o vpshell-jump-ci -g vpshell-jump-ci /home/vpshell-jump-ci/.ssh
+          sudo install -m 600 -o vpshell-jump-ci -g vpshell-jump-ci "$JUMP_KEY.pub" /home/vpshell-jump-ci/.ssh/authorized_keys
           sudo install -d -m 700 -o vpshell-ci -g vpshell-ci /home/vpshell-ci/.ssh
-          sudo install -m 600 -o vpshell-ci -g vpshell-ci "$TEST_KEY.pub" /home/vpshell-ci/.ssh/authorized_keys
+          sudo install -m 600 -o vpshell-ci -g vpshell-ci "$TARGET_KEY.pub" /home/vpshell-ci/.ssh/authorized_keys
           sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd \
+            -p 22223 \
+            -o ListenAddress=127.0.0.1 \
+            -o HostKey="$TARGET_HOST_KEY" \
+            -o PasswordAuthentication=no \
+            -o KbdInteractiveAuthentication=no \
+            -o PubkeyAuthentication=yes \
+            -o PermitRootLogin=no \
+            -o AllowUsers=vpshell-ci \
+            -o AllowTcpForwarding=no \
+            -o AllowAgentForwarding=no \
+            -o X11Forwarding=no \
+            -o UsePAM=no \
+            -o PidFile="$RUNNER_TEMP/vpshell-native-target-sshd.pid"
           sudo /usr/sbin/sshd \
             -p 22222 \
             -o ListenAddress=127.0.0.1 \
@@ -54,11 +77,16 @@ jobs:
             -o KbdInteractiveAuthentication=no \
             -o PubkeyAuthentication=yes \
             -o PermitRootLogin=no \
-            -o AllowUsers=vpshell-ci \
+            -o AllowUsers=vpshell-jump-ci \
+            -o AllowTcpForwarding=yes \
+            -o PermitOpen=127.0.0.1:22223 \
+            -o AllowAgentForwarding=no \
+            -o X11Forwarding=no \
             -o UsePAM=no \
-            -o PidFile="$RUNNER_TEMP/vpshell-native-sshd.pid"
+            -o PidFile="$RUNNER_TEMP/vpshell-native-jump-sshd.pid"
           for attempt in {1..20}; do
-            if ssh-keyscan -T 1 -p 22222 -t ed25519 127.0.0.1 >/dev/null 2>&1; then
+            if ssh-keyscan -T 1 -p 22222 -t ed25519 127.0.0.1 >/dev/null 2>&1 \
+              && ssh-keyscan -T 1 -p 22223 -t ed25519 127.0.0.1 >/dev/null 2>&1; then
               break
             fi
             if [[ "$attempt" == 20 ]]; then
@@ -66,11 +94,18 @@ jobs:
             fi
             sleep 1
           done
+          TARGET_HOST_KEY_SHA256="$(ssh-keygen -lf "$TARGET_HOST_KEY.pub" -E sha256 | awk '{print $2}')"
+          JUMP_HOST_KEY_SHA256="$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 | awk '{print $2}')"
           echo "VPSHELL_NATIVE_TEST_HOST=127.0.0.1" >> "$GITHUB_ENV"
-          echo "VPSHELL_NATIVE_TEST_PORT=22222" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_PORT=22223" >> "$GITHUB_ENV"
           echo "VPSHELL_NATIVE_TEST_USER=vpshell-ci" >> "$GITHUB_ENV"
-          echo "VPSHELL_NATIVE_TEST_IDENTITY_FILE=$TEST_KEY" >> "$GITHUB_ENV"
-          echo "VPSHELL_NATIVE_TEST_HOST_KEY_SHA256=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 | awk '{print $2}')" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_IDENTITY_FILE=$TARGET_KEY" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_HOST_KEY_SHA256=$TARGET_HOST_KEY_SHA256" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_JUMP_HOST=127.0.0.1" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_JUMP_PORT=22222" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_JUMP_USER=vpshell-jump-ci" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_JUMP_IDENTITY_FILE=$JUMP_KEY" >> "$GITHUB_ENV"
+          echo "VPSHELL_NATIVE_TEST_JUMP_HOST_KEY_SHA256=$JUMP_HOST_KEY_SHA256" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

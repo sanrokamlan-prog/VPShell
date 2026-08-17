@@ -297,9 +297,9 @@ impl NativeEngineManager {
     ) -> Result<NativeEngineProbeResult, NativeEngineError> {
         let operation_id = parse_operation_id(&request.operation_id)?;
         let lease = self.begin(operation_id)?;
-        let validated = ValidatedConnection::try_from(request)?;
-        let timeout = Duration::from_secs(u64::from(validated.timeout_seconds));
-        let hop_index = validated.hop_index;
+        let validated = ValidatedRoute::try_from(request)?;
+        let timeout = validated.operation_timeout();
+        let hop_index = validated.final_hop_index();
         let cancellation = lease.cancellation.clone();
         let outcome = tokio::select! {
             biased;
@@ -325,8 +325,9 @@ impl NativeEngineManager {
     ) -> Result<NativeTerminalLaunch, NativeEngineError> {
         let session_id = parse_session_id(&request.session_id)?;
         let validated = ValidatedTerminalStart::try_from(request)?;
-        let timeout = Duration::from_secs(u64::from(validated.connection.timeout_seconds));
-        let hop_index = validated.connection.hop_index;
+        let timeout = validated.route.operation_timeout();
+        let sftp_timeout = validated.route.final_timeout();
+        let hop_index = validated.route.final_hop_index();
         let generation = self.next_generation()?;
         let cancellation = CancellationToken::new();
         let (sftp_requests, sftp_request_receiver) = mpsc::channel(SFTP_REQUEST_QUEUE);
@@ -335,7 +336,7 @@ impl NativeEngineManager {
             generation,
             cancellation.clone(),
             sftp_requests,
-            timeout,
+            sftp_timeout,
         )?;
         let (commands, command_receiver) = mpsc::channel(TERMINAL_COMMAND_QUEUE);
         let (events, event_receiver) = mpsc::channel(TERMINAL_EVENT_QUEUE);
@@ -351,7 +352,7 @@ impl NativeEngineManager {
                 "原生终端连接已取消",
                 true,
             )),
-            result = tokio::time::timeout(timeout, open_native_terminal(validated.connection, cols, rows)) => {
+            result = tokio::time::timeout(timeout, open_native_terminal(validated.route, cols, rows)) => {
                 match result {
                     Ok(outcome) => outcome,
                     Err(_) => Err(NativeEngineError::new(
@@ -362,7 +363,7 @@ impl NativeEngineManager {
                 }
             }
         };
-        let (session, channel, initial_output) = match connection {
+        let (connection_chain, channel, initial_output) = match connection {
             Ok(connection) => connection,
             Err(error) => {
                 self.finish_terminal(session_id, generation);
@@ -370,15 +371,15 @@ impl NativeEngineManager {
             }
         };
 
-        let session = Arc::new(session);
-        let sftp_session = Arc::clone(&session);
+        let connection_chain = Arc::new(connection_chain);
+        let sftp_connection_chain = Arc::clone(&connection_chain);
         let sftp_cancellation = cancellation.clone();
         tokio::spawn(async move {
             run_native_sftp_session(
-                sftp_session,
+                sftp_connection_chain,
                 sftp_request_receiver,
                 sftp_cancellation,
-                timeout,
+                sftp_timeout,
             )
             .await;
         });
@@ -389,7 +390,7 @@ impl NativeEngineManager {
                 manager,
                 session_id,
                 generation,
-                session,
+                connection_chain,
                 channel,
                 initial_output,
                 command_receiver,
@@ -668,7 +669,7 @@ struct ValidatedConnection {
 
 struct ValidatedTerminalStart {
     session_id: Uuid,
-    connection: ValidatedConnection,
+    route: ValidatedRoute,
     cols: u16,
     rows: u16,
 }
@@ -694,24 +695,36 @@ struct ValidatedRoute {
 }
 
 impl ValidatedRoute {
-    fn into_direct(mut self) -> Result<ValidatedConnection, NativeEngineError> {
-        if self.hops.len() != 1 {
-            return Err(NativeEngineError::new(
-                "native-engine-multi-hop-unavailable",
-                "原生多跳连接尚未启用，请继续使用系统 OpenSSH",
-                false,
-            ));
-        }
-        Ok(self.hops.remove(0))
+    fn final_hop_index(&self) -> u8 {
+        self.hops.last().map_or(1, |hop| hop.hop_index)
+    }
+
+    fn final_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.hops
+                .last()
+                .map_or(u64::from(MIN_TIMEOUT_SECONDS), |hop| {
+                    u64::from(hop.timeout_seconds)
+                }),
+        )
+    }
+
+    fn operation_timeout(&self) -> Duration {
+        let connection_seconds = self
+            .hops
+            .iter()
+            .map(|hop| u64::from(hop.timeout_seconds))
+            .sum::<u64>();
+        self.final_timeout() + Duration::from_secs(connection_seconds)
     }
 }
 
-impl TryFrom<NativeEngineProbeRequest> for ValidatedConnection {
+impl TryFrom<NativeEngineProbeRequest> for ValidatedRoute {
     type Error = NativeEngineError;
 
     fn try_from(request: NativeEngineProbeRequest) -> Result<Self, Self::Error> {
         parse_operation_id(&request.operation_id)?;
-        validate_route(request.route)?.into_direct()
+        validate_route(request.route)
     }
 }
 
@@ -721,10 +734,10 @@ impl TryFrom<NativeTerminalStartRequest> for ValidatedTerminalStart {
     fn try_from(request: NativeTerminalStartRequest) -> Result<Self, Self::Error> {
         let session_id = parse_session_id(&request.session_id)?;
         validate_terminal_size(request.cols, request.rows)?;
-        let connection = validate_route(request.route)?.into_direct()?;
+        let route = validate_route(request.route)?;
         Ok(Self {
             session_id,
-            connection,
+            route,
             cols: request.cols,
             rows: request.rows,
         })
@@ -1120,47 +1133,179 @@ impl Handler for PinnedServerKey {
     }
 }
 
-async fn connect_authenticated(
-    request: ValidatedConnection,
-) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
-    let hop_index = request.hop_index;
-    connect_authenticated_hop(request)
-        .await
-        .map_err(|error| error.at_hop(hop_index))
+struct NativeConnectionChain {
+    sessions: Vec<client::Handle<PinnedServerKey>>,
 }
 
-async fn connect_authenticated_hop(
-    request: ValidatedConnection,
-) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
-    let mut auth = resolve_auth(request.auth_source)?;
-    let host_key_state = Arc::new(AtomicU8::new(HOST_KEY_UNSEEN));
-    let handler = PinnedServerKey {
-        expected_sha256: request.host_key_sha256,
-        state: Arc::clone(&host_key_state),
-    };
-    let timeout = Duration::from_secs(u64::from(request.timeout_seconds));
-    let config = native_client_config(timeout);
-    let mut session = client::connect(
-        Arc::new(config),
-        (request.host.as_str(), request.port),
-        handler,
-    )
-    .await
-    .map_err(|_| {
-        if host_key_state.load(Ordering::SeqCst) == HOST_KEY_MISMATCHED {
+impl NativeConnectionChain {
+    fn final_session(&self) -> Result<&client::Handle<PinnedServerKey>, NativeEngineError> {
+        self.sessions.last().ok_or_else(|| {
             NativeEngineError::new(
-                "native-engine-host-key-mismatch",
-                "原生 SSH 主机指纹不匹配，已在认证前拒绝连接",
+                "native-engine-route-empty",
+                "原生 SSH 路由没有可用连接",
                 false,
             )
-        } else {
-            NativeEngineError::new(
-                "native-engine-connect-failed",
-                "原生 SSH 连接或握手失败",
+        })
+    }
+
+    async fn disconnect_all(&self, description: &'static str) -> bool {
+        disconnect_sessions(&self.sessions, description).await
+    }
+}
+
+async fn connect_route(
+    route: ValidatedRoute,
+) -> Result<NativeConnectionChain, NativeEngineError> {
+    let mut hops = route.hops.into_iter();
+    let first = hops.next().ok_or_else(|| {
+        NativeEngineError::new(
+            "native-engine-route-empty",
+            "原生 SSH 路由没有可用连接",
+            false,
+        )
+    })?;
+    let first_hop_index = first.hop_index;
+    let first_timeout = Duration::from_secs(u64::from(first.timeout_seconds));
+    let first_session = match tokio::time::timeout(
+        first_timeout,
+        connect_authenticated_direct_hop(first),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|error| error.at_hop(first_hop_index))?,
+        Err(_) => {
+            return Err(NativeEngineError::new(
+                "native-engine-hop-timeout",
+                "原生 SSH 路由连接超时",
                 true,
             )
+            .at_hop(first_hop_index));
         }
-    })?;
+    };
+    let mut sessions = vec![first_session];
+
+    for hop in hops {
+        let hop_index = hop.hop_index;
+        let timeout = Duration::from_secs(u64::from(hop.timeout_seconds));
+        let previous = sessions.last().ok_or_else(|| {
+            NativeEngineError::new(
+                "native-engine-route-empty",
+                "原生 SSH 路由没有可用连接",
+                false,
+            )
+        })?;
+        let outcome = tokio::time::timeout(
+            timeout,
+            connect_authenticated_tunneled_hop(previous, hop),
+        )
+        .await;
+        let session = match outcome {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => {
+                disconnect_sessions(&sessions, "native route failed").await;
+                return Err(error.at_hop(hop_index));
+            }
+            Err(_) => {
+                disconnect_sessions(&sessions, "native route timed out").await;
+                return Err(NativeEngineError::new(
+                    "native-engine-hop-timeout",
+                    "原生 SSH 路由连接超时",
+                    true,
+                )
+                .at_hop(hop_index));
+            }
+        };
+        sessions.push(session);
+    }
+
+    Ok(NativeConnectionChain { sessions })
+}
+
+async fn connect_authenticated_direct_hop(
+    request: ValidatedConnection,
+) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
+    let ValidatedConnection {
+        host,
+        port,
+        username,
+        host_key_sha256,
+        timeout_seconds,
+        auth_source,
+        ..
+    } = request;
+    let auth = resolve_auth(auth_source)?;
+    let host_key_state = Arc::new(AtomicU8::new(HOST_KEY_UNSEEN));
+    let handler = PinnedServerKey {
+        expected_sha256: host_key_sha256,
+        state: Arc::clone(&host_key_state),
+    };
+    let timeout = Duration::from_secs(u64::from(timeout_seconds));
+    let config = native_client_config(timeout);
+    let session = client::connect(Arc::new(config), (host.as_str(), port), handler)
+        .await
+        .map_err(|_| connection_error(&host_key_state))?;
+    authenticate_connected_hop(session, username, auth, host_key_state).await
+}
+
+async fn connect_authenticated_tunneled_hop(
+    previous: &client::Handle<PinnedServerKey>,
+    request: ValidatedConnection,
+) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
+    let ValidatedConnection {
+        host,
+        port,
+        username,
+        host_key_sha256,
+        timeout_seconds,
+        auth_source,
+        ..
+    } = request;
+    let channel = previous
+        .channel_open_direct_tcpip(host.clone(), u32::from(port), "127.0.0.1", 0)
+        .await
+        .map_err(|_| {
+            NativeEngineError::new(
+                "native-engine-jump-tunnel-failed",
+                "跳板机无法建立到下一跳的 SSH tunnel",
+                true,
+            )
+        })?;
+    let auth = resolve_auth(auth_source)?;
+    let host_key_state = Arc::new(AtomicU8::new(HOST_KEY_UNSEEN));
+    let handler = PinnedServerKey {
+        expected_sha256: host_key_sha256,
+        state: Arc::clone(&host_key_state),
+    };
+    let timeout = Duration::from_secs(u64::from(timeout_seconds));
+    let config = native_client_config(timeout);
+    let session = client::connect_stream(Arc::new(config), channel.into_stream(), handler)
+        .await
+        .map_err(|_| connection_error(&host_key_state))?;
+    authenticate_connected_hop(session, username, auth, host_key_state).await
+}
+
+fn connection_error(host_key_state: &AtomicU8) -> NativeEngineError {
+    if host_key_state.load(Ordering::SeqCst) == HOST_KEY_MISMATCHED {
+        NativeEngineError::new(
+            "native-engine-host-key-mismatch",
+            "原生 SSH 主机指纹不匹配，已在认证前拒绝连接",
+            false,
+        )
+    } else {
+        NativeEngineError::new(
+            "native-engine-connect-failed",
+            "原生 SSH 连接或握手失败",
+            true,
+        )
+    }
+}
+
+async fn authenticate_connected_hop(
+    mut session: client::Handle<PinnedServerKey>,
+    username: String,
+    mut auth: NativeAuth,
+    host_key_state: Arc<AtomicU8>,
+) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
     if host_key_state.load(Ordering::SeqCst) != HOST_KEY_MATCHED {
         return Err(NativeEngineError::new(
             "native-engine-host-key-unverified",
@@ -1171,7 +1316,7 @@ async fn connect_authenticated_hop(
 
     let authenticated = match &mut auth {
         NativeAuth::Password(password) => session
-            .authenticate_password(request.username, password.as_str())
+            .authenticate_password(username, password.as_str())
             .await
             .map_err(|_| {
                 NativeEngineError::new("native-engine-auth-failed", "原生 SSH 身份验证失败", false)
@@ -1218,7 +1363,7 @@ async fn connect_authenticated_hop(
             };
             session
                 .authenticate_publickey(
-                    request.username,
+                    username,
                     PrivateKeyWithHashAlg::new(Arc::new(private_key), hash),
                 )
                 .await
@@ -1242,62 +1387,84 @@ async fn connect_authenticated_hop(
     Ok(session)
 }
 
-async fn probe_once(
-    request: ValidatedConnection,
-) -> Result<NativeEngineProbeResult, NativeEngineError> {
-    let timeout_seconds = request.timeout_seconds;
-    let mut session = connect_authenticated(request).await?;
+async fn disconnect_sessions(
+    sessions: &[client::Handle<PinnedServerKey>],
+    description: &'static str,
+) -> bool {
+    let mut disconnected = true;
+    for session in sessions.iter().rev() {
+        if session
+            .disconnect(Disconnect::ByApplication, description, "")
+            .await
+            .is_err()
+        {
+            disconnected = false;
+        }
+    }
+    disconnected
+}
 
-    let channel = session.channel_open_session().await.map_err(|_| {
-        NativeEngineError::new(
-            "native-engine-sftp-channel-failed",
-            "原生 SSH 无法打开 SFTP 通道",
-            true,
-        )
-    })?;
-    channel.request_subsystem(true, "sftp").await.map_err(|_| {
-        NativeEngineError::new(
-            "native-engine-sftp-subsystem-failed",
-            "服务器未提供 SFTP 子系统",
-            false,
-        )
-    })?;
-    let sftp = SftpSession::new(channel.into_stream()).await.map_err(|_| {
-        NativeEngineError::new(
-            "native-engine-sftp-init-failed",
-            "原生 SFTP 协议初始化失败",
-            true,
-        )
-    })?;
-    sftp.set_timeout(u64::from(timeout_seconds));
-    sftp.canonicalize(".").await.map_err(|_| {
-        NativeEngineError::new(
-            "native-engine-sftp-probe-failed",
-            "原生 SFTP 无法读取远端工作目录",
-            true,
-        )
-    })?;
-    sftp.close().await.map_err(|_| {
-        NativeEngineError::new(
-            "native-engine-sftp-close-failed",
-            "原生 SFTP 检查已完成但通道关闭失败",
-            true,
-        )
-    })?;
-    session
-        .disconnect(
-            Disconnect::ByApplication,
-            "native engine probe complete",
-            "",
-        )
-        .await
-        .map_err(|_| {
+async fn probe_once(
+    request: ValidatedRoute,
+) -> Result<NativeEngineProbeResult, NativeEngineError> {
+    let timeout_seconds = request
+        .hops
+        .last()
+        .map_or(MIN_TIMEOUT_SECONDS, |hop| hop.timeout_seconds);
+    let connection_chain = connect_route(request).await?;
+    let session = connection_chain.final_session()?;
+    let probe = async {
+        let channel = session.channel_open_session().await.map_err(|_| {
+            NativeEngineError::new(
+                "native-engine-sftp-channel-failed",
+                "原生 SSH 无法打开 SFTP 通道",
+                true,
+            )
+        })?;
+        channel.request_subsystem(true, "sftp").await.map_err(|_| {
+            NativeEngineError::new(
+                "native-engine-sftp-subsystem-failed",
+                "服务器未提供 SFTP 子系统",
+                false,
+            )
+        })?;
+        let sftp = SftpSession::new(channel.into_stream()).await.map_err(|_| {
+            NativeEngineError::new(
+                "native-engine-sftp-init-failed",
+                "原生 SFTP 协议初始化失败",
+                true,
+            )
+        })?;
+        sftp.set_timeout(u64::from(timeout_seconds));
+        sftp.canonicalize(".").await.map_err(|_| {
+            NativeEngineError::new(
+                "native-engine-sftp-probe-failed",
+                "原生 SFTP 无法读取远端工作目录",
+                true,
+            )
+        })?;
+        sftp.close().await.map_err(|_| {
+            NativeEngineError::new(
+                "native-engine-sftp-close-failed",
+                "原生 SFTP 检查已完成但通道关闭失败",
+                true,
+            )
+        })
+    }
+    .await;
+    let disconnected = connection_chain
+        .disconnect_all("native engine probe complete")
+        .await;
+    probe?;
+    if !disconnected {
+        return Err(
             NativeEngineError::new(
                 "native-engine-disconnect-failed",
                 "原生 SSH 检查已完成但连接关闭失败",
                 true,
-            )
-        })?;
+            ),
+        );
+    }
 
     Ok(NativeEngineProbeResult {
         schema_version: SCHEMA_VERSION,
@@ -1308,66 +1475,85 @@ async fn probe_once(
 }
 
 async fn open_native_terminal(
-    request: ValidatedConnection,
+    request: ValidatedRoute,
     cols: u16,
     rows: u16,
 ) -> Result<
     (
-        client::Handle<PinnedServerKey>,
+        NativeConnectionChain,
         Channel<client::Msg>,
         Vec<u8>,
     ),
     NativeEngineError,
 > {
-    let mut session = connect_authenticated(request).await?;
-    let mut channel = session.channel_open_session().await.map_err(|_| {
-        NativeEngineError::new(
-            "native-terminal-channel-failed",
-            "原生 SSH 无法打开终端通道",
-            true,
-        )
-    })?;
-    let mut initial_output = Vec::new();
-    channel
-        .request_pty(
-            true,
-            "xterm-256color",
-            u32::from(cols),
-            u32::from(rows),
-            0,
-            0,
-            &[],
-        )
-        .await
-        .map_err(|_| {
+    let final_hop_index = request.final_hop_index();
+    let connection_chain = connect_route(request).await?;
+    let session = connection_chain.final_session()?;
+    let terminal = async {
+        let mut channel = session.channel_open_session().await.map_err(|_| {
             NativeEngineError::new(
-                "native-terminal-pty-request-failed",
-                "原生 SSH 无法请求 PTY",
+                "native-terminal-channel-failed",
+                "原生 SSH 无法打开终端通道",
                 true,
             )
+            .at_hop(final_hop_index)
         })?;
-    await_channel_success(
-        &mut channel,
-        &mut initial_output,
-        "native-terminal-pty-rejected",
-        "服务器拒绝原生终端 PTY 请求",
-    )
-    .await?;
-    channel.request_shell(true).await.map_err(|_| {
-        NativeEngineError::new(
-            "native-terminal-shell-request-failed",
-            "原生 SSH 无法请求交互式 Shell",
-            true,
+        let mut initial_output = Vec::new();
+        channel
+            .request_pty(
+                true,
+                "xterm-256color",
+                u32::from(cols),
+                u32::from(rows),
+                0,
+                0,
+                &[],
+            )
+            .await
+            .map_err(|_| {
+                NativeEngineError::new(
+                    "native-terminal-pty-request-failed",
+                    "原生 SSH 无法请求 PTY",
+                    true,
+                )
+                .at_hop(final_hop_index)
+            })?;
+        await_channel_success(
+            &mut channel,
+            &mut initial_output,
+            "native-terminal-pty-rejected",
+            "服务器拒绝原生终端 PTY 请求",
         )
-    })?;
-    await_channel_success(
-        &mut channel,
-        &mut initial_output,
-        "native-terminal-shell-rejected",
-        "服务器拒绝原生交互式 Shell",
-    )
-    .await?;
-    Ok((session, channel, initial_output))
+        .await
+        .map_err(|error| error.at_hop(final_hop_index))?;
+        channel.request_shell(true).await.map_err(|_| {
+            NativeEngineError::new(
+                "native-terminal-shell-request-failed",
+                "原生 SSH 无法请求交互式 Shell",
+                true,
+            )
+            .at_hop(final_hop_index)
+        })?;
+        await_channel_success(
+            &mut channel,
+            &mut initial_output,
+            "native-terminal-shell-rejected",
+            "服务器拒绝原生交互式 Shell",
+        )
+        .await
+        .map_err(|error| error.at_hop(final_hop_index))?;
+        Ok::<_, NativeEngineError>((channel, initial_output))
+    }
+    .await;
+    match terminal {
+        Ok((channel, initial_output)) => Ok((connection_chain, channel, initial_output)),
+        Err(error) => {
+            connection_chain
+                .disconnect_all("native terminal start failed")
+                .await;
+            Err(error)
+        }
+    }
 }
 
 async fn open_native_sftp_session(
@@ -1509,7 +1695,7 @@ fn native_sftp_kind_order(kind: &NativeSftpEntryKind) -> u8 {
 }
 
 async fn run_native_sftp_session(
-    session: Arc<client::Handle<PinnedServerKey>>,
+    connection_chain: Arc<NativeConnectionChain>,
     mut requests: mpsc::Receiver<NativeSftpCommand>,
     cancellation: CancellationToken,
     timeout: Duration,
@@ -1527,6 +1713,13 @@ async fn run_native_sftp_session(
         if reply.is_closed() {
             continue;
         }
+        let final_session = match connection_chain.final_session() {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                break;
+            }
+        };
         let outcome = tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(NativeEngineError::new(
@@ -1536,7 +1729,12 @@ async fn run_native_sftp_session(
             )),
             result = tokio::time::timeout(
                 timeout,
-                list_native_sftp_directory(session.as_ref(), &mut sftp, path, timeout),
+                list_native_sftp_directory(
+                    final_session,
+                    &mut sftp,
+                    path,
+                    timeout,
+                ),
             ) => match result {
                 Ok(outcome) => outcome,
                 Err(_) => Err(NativeEngineError::new(
@@ -1601,7 +1799,7 @@ async fn run_native_terminal(
     manager: NativeEngineManager,
     session_id: Uuid,
     generation: u64,
-    session: Arc<client::Handle<PinnedServerKey>>,
+    connection_chain: Arc<NativeConnectionChain>,
     channel: Channel<client::Msg>,
     initial_output: Vec<u8>,
     mut commands: mpsc::Receiver<NativeTerminalCommand>,
@@ -1704,8 +1902,8 @@ async fn run_native_terminal(
         Err(_) if exit_message.is_none() => exit_message = Some("原生终端写入任务异常结束"),
         _ => {}
     }
-    let _ = session
-        .disconnect(Disconnect::ByApplication, "native terminal closed", "")
+    connection_chain
+        .disconnect_all("native terminal closed")
         .await;
     manager.finish_terminal(session_id, generation);
     let _ = events
@@ -1782,7 +1980,7 @@ mod tests {
 
         let mut invalid = request();
         invalid.route.hops[0].timeout_seconds = 4;
-        let error = match ValidatedConnection::try_from(invalid) {
+        let error = match ValidatedRoute::try_from(invalid) {
             Ok(_) => panic!("invalid timeout accepted"),
             Err(error) => error,
         };
@@ -1791,7 +1989,7 @@ mod tests {
 
         let mut conflicting_auth = request();
         conflicting_auth.route.hops[0].identity_file = Some("/tmp/private-key".to_string());
-        let error = match ValidatedConnection::try_from(conflicting_auth) {
+        let error = match ValidatedRoute::try_from(conflicting_auth) {
             Ok(_) => panic!("multiple authentication sources accepted"),
             Err(error) => error,
         };
@@ -1799,7 +1997,7 @@ mod tests {
 
         let mut missing_auth = request();
         missing_auth.route.hops[0].credential_ref = None;
-        let error = match ValidatedConnection::try_from(missing_auth) {
+        let error = match ValidatedRoute::try_from(missing_auth) {
             Ok(_) => panic!("missing authentication source accepted"),
             Err(error) => error,
         };
@@ -1874,11 +2072,9 @@ mod tests {
             &route.hops[1].auth_source,
             NativeAuthSource::PrivateKeyFile { .. }
         ));
-        let error = match route.into_direct() {
-            Ok(_) => panic!("multi-hop route accepted by direct connector"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code, "native-engine-multi-hop-unavailable");
+        assert_eq!(route.final_hop_index(), 2);
+        assert_eq!(route.final_timeout(), Duration::from_secs(15));
+        assert_eq!(route.operation_timeout(), Duration::from_secs(45));
 
         let first = hop();
         let mut duplicate_id = hop();
@@ -2257,6 +2453,9 @@ mod tests {
         assert!(production.contains("check_server_key"));
         assert!(production.contains("HOST_KEY_MISMATCHED"));
         assert!(production.contains("SftpSession::new"));
+        assert!(production.contains("channel_open_direct_tcpip"));
+        assert!(production.contains("client::connect_stream"));
+        assert!(!production.contains("native-engine-multi-hop-unavailable"));
         assert!(!production.contains("Command::new(\"ssh\")"));
     }
 
@@ -2418,6 +2617,139 @@ mod tests {
         })
         .await
         .expect("terminal cancellation timeout");
+        assert!(manager.lock_terminal_sessions().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_openssh_jump_tunnel_when_configured() {
+        let Ok(jump_host) = std::env::var("VPSHELL_NATIVE_TEST_JUMP_HOST") else {
+            return;
+        };
+        let jump_port = std::env::var("VPSHELL_NATIVE_TEST_JUMP_PORT")
+            .expect("jump test port")
+            .parse()
+            .expect("numeric jump test port");
+        let jump_username =
+            std::env::var("VPSHELL_NATIVE_TEST_JUMP_USER").expect("jump test user");
+        let jump_fingerprint = std::env::var("VPSHELL_NATIVE_TEST_JUMP_HOST_KEY_SHA256")
+            .expect("jump test host key");
+        let jump_identity_file = std::env::var("VPSHELL_NATIVE_TEST_JUMP_IDENTITY_FILE")
+            .expect("jump test identity file");
+        let target_host = std::env::var("VPSHELL_NATIVE_TEST_HOST").expect("target test host");
+        let target_port = std::env::var("VPSHELL_NATIVE_TEST_PORT")
+            .expect("target test port")
+            .parse()
+            .expect("numeric target test port");
+        let target_username =
+            std::env::var("VPSHELL_NATIVE_TEST_USER").expect("target test user");
+        let target_fingerprint = std::env::var("VPSHELL_NATIVE_TEST_HOST_KEY_SHA256")
+            .expect("target test host key");
+        let target_identity_file = std::env::var("VPSHELL_NATIVE_TEST_IDENTITY_FILE")
+            .expect("target test identity file");
+        let route = |target_host_key_sha256: String| NativeRouteRequest {
+            hops: vec![
+                NativeRouteHopRequest {
+                    hop_id: Uuid::new_v4().to_string(),
+                    host: jump_host.clone(),
+                    port: jump_port,
+                    username: jump_username.clone(),
+                    host_key_sha256: jump_fingerprint.clone(),
+                    timeout_seconds: 15,
+                    credential_ref: None,
+                    identity_file: Some(jump_identity_file.clone()),
+                    identity_passphrase_ref: None,
+                },
+                NativeRouteHopRequest {
+                    hop_id: Uuid::new_v4().to_string(),
+                    host: target_host.clone(),
+                    port: target_port,
+                    username: target_username.clone(),
+                    host_key_sha256: target_host_key_sha256,
+                    timeout_seconds: 15,
+                    credential_ref: None,
+                    identity_file: Some(target_identity_file.clone()),
+                    identity_passphrase_ref: None,
+                },
+            ],
+        };
+        let manager = NativeEngineManager::default();
+        let mismatch = manager
+            .probe(NativeEngineProbeRequest {
+                operation_id: Uuid::new_v4().to_string(),
+                route: route(format!("SHA256:{}", "A".repeat(43))),
+            })
+            .await
+            .expect_err("target pin mismatch must fail inside jump tunnel");
+        assert_eq!(mismatch.code, "native-engine-host-key-mismatch");
+        assert_eq!(mismatch.hop_index, Some(2));
+
+        let probe = manager
+            .probe(NativeEngineProbeRequest {
+                operation_id: Uuid::new_v4().to_string(),
+                route: route(target_fingerprint.clone()),
+            })
+            .await
+            .expect("two-hop OpenSSH/SFTP probe");
+        assert!(probe.ssh_ready);
+        assert!(probe.sftp_ready);
+
+        let session_id = Uuid::new_v4();
+        let launch = manager
+            .start_terminal(NativeTerminalStartRequest {
+                session_id: session_id.to_string(),
+                route: route(target_fingerprint),
+                cols: 120,
+                rows: 32,
+            })
+            .await
+            .expect("two-hop OpenSSH terminal start");
+        let listing = manager
+            .list_sftp_directory(NativeSftpListRequest {
+                session_id: session_id.to_string(),
+                path: "~".to_string(),
+            })
+            .await
+            .expect("two-hop shared native SFTP listing");
+        assert!(listing.path.starts_with('/'));
+        launch
+            .handle
+            .write(b"printf 'VPSHELL_NATIVE_JUMP_OK\\n'\r")
+            .unwrap();
+        let mut events = launch.events;
+        let mut output = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await.expect("jump terminal event stream") {
+                    NativeTerminalEvent::Data(data) => {
+                        output.extend_from_slice(&data);
+                        if output
+                            .windows(b"VPSHELL_NATIVE_JUMP_OK".len())
+                            .any(|window| window == b"VPSHELL_NATIVE_JUMP_OK")
+                        {
+                            break;
+                        }
+                    }
+                    NativeTerminalEvent::Exit { message } => {
+                        panic!("jump terminal exited before output: {message:?}")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("jump terminal output timeout");
+        launch.handle.stop();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    events.recv().await.expect("jump terminal exit event"),
+                    NativeTerminalEvent::Exit { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("jump terminal cancellation timeout");
         assert!(manager.lock_terminal_sessions().unwrap().is_empty());
     }
 }

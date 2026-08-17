@@ -17,6 +17,7 @@ export interface HostProfile {
   androidKeyRef?: string;
   androidKeyPassphraseRef?: string;
   hostKeySha256?: string;
+  jumpRoute?: string[];
   source?: "manual" | "finalshell" | "openssh" | "putty" | "xshell" | "securecrt" | "mobaxterm" | "tabby" | "termius";
   lastPath?: string;
   latency?: number;

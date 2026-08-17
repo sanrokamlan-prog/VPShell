@@ -341,6 +341,43 @@ fn validate_host_records(root: &serde_json::Map<String, Value>) -> Result<(), St
             }
         }
     }
+    let hosts = ensure_array(
+        root.get("hosts")
+            .ok_or_else(|| "本地状态缺少 hosts".to_string())?,
+        "hosts",
+        2000,
+    )?;
+    let host_ids = hosts
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|host| host.get("id"))
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    if host_ids.len() != hosts.len() {
+        return Err("本地状态 hosts 包含重复主机标识".to_string());
+    }
+    for value in hosts {
+        let host = ensure_object(value, "host")?;
+        let host_id = required_string(host, "id", 128)?;
+        let Some(route) = host.get("jumpRoute") else {
+            continue;
+        };
+        let route = ensure_array(route, "jumpRoute", 3)?;
+        let mut route_ids = HashSet::with_capacity(route.len());
+        for jump_id in route {
+            let jump_id = jump_id
+                .as_str()
+                .ok_or_else(|| "本地状态 jumpRoute 必须只包含主机标识".to_string())?;
+            if jump_id.is_empty()
+                || jump_id.len() > 128
+                || jump_id == host_id
+                || !route_ids.insert(jump_id)
+                || !host_ids.contains(jump_id)
+            {
+                return Err("本地状态 jumpRoute 引用无效、重复或形成循环".to_string());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -850,6 +887,21 @@ mod tests {
         android_refs["hosts"][0]["hostKeySha256"] =
             Value::String("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string());
         assert!(validate_state_json(&android_refs.to_string()).is_ok());
+
+        let mut jump_route: Value = serde_json::from_str(&fixture()).expect("fixture JSON");
+        jump_route["hosts"]
+            .as_array_mut()
+            .expect("hosts")
+            .push(serde_json::json!({
+                "id": "host-2", "name": "Target", "group": "Test", "host": "192.0.2.2",
+                "port": 22, "username": "dev", "environment": "development", "tags": [],
+                "credentialRef": "ssh-target-reference", "jumpRoute": ["host-1"]
+            }));
+        assert!(validate_state_json(&jump_route.to_string()).is_ok());
+        jump_route["hosts"][1]["jumpRoute"] = serde_json::json!(["host-1", "host-1"]);
+        assert!(validate_state_json(&jump_route.to_string()).is_err());
+        jump_route["hosts"][1]["jumpRoute"] = serde_json::json!(["missing-host"]);
+        assert!(validate_state_json(&jump_route.to_string()).is_err());
 
         let mut secret: Value = serde_json::from_str(&fixture()).expect("fixture JSON");
         secret["settings"]["password"] = Value::String("must-not-persist".to_string());

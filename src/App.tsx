@@ -73,6 +73,7 @@ import type {
   EnvironmentKind,
   HostProfile,
   ScriptRecipe,
+  SshKeyProfile,
   SyncProviderKind,
   TerminalSession,
 } from "./types";
@@ -279,7 +280,7 @@ function makeSession(host: HostProfile): TerminalSession {
     hostId: host.id,
     title: host.name,
     state: "idle",
-    engine: "openssh",
+    engine: host.jumpRoute?.length ? "russh" : "openssh",
     currentPath: host.lastPath ?? "~",
     contextSource: "profile",
     contextStack: [],
@@ -330,23 +331,50 @@ function hostCredentialReferences(host: HostProfile) {
     .filter((reference): reference is string => Boolean(reference));
 }
 
-function nativeDirectRoute(
+function nativeRouteHosts(host: HostProfile, hosts: HostProfile[]) {
+  const jumpRoute = host.jumpRoute ?? [];
+  if (jumpRoute.length > 3) throw new Error("原生 SSH 路线最多允许三台跳板机");
+  const routeIds = [...jumpRoute, host.id];
+  if (new Set(routeIds).size !== routeIds.length) {
+    throw new Error("原生 SSH 路线不能重复或形成循环");
+  }
+  return routeIds.map((hostId) => {
+    const routeHost = hosts.find((candidate) => candidate.id === hostId);
+    if (!routeHost) throw new Error("原生 SSH 路线引用了不存在的主机资料");
+    return routeHost;
+  });
+}
+
+function nativeRoute(
   host: HostProfile,
-  hostKeySha256: string,
-  identityPassphraseRef?: string,
+  hosts: HostProfile[],
+  sshKeys: SshKeyProfile[],
+  targetHostKeySha256?: string,
 ) {
   return {
-    hops: [{
-      hopId: crypto.randomUUID(),
-      host: host.host,
-      port: host.port,
-      username: host.username,
-      hostKeySha256,
-      timeoutSeconds: 15,
-      credentialRef: host.identityFile ? undefined : host.credentialRef,
-      identityFile: host.identityFile,
-      identityPassphraseRef,
-    }],
+    hops: nativeRouteHosts(host, hosts).map((routeHost) => {
+      const hostKeySha256 = routeHost.id === host.id
+        ? targetHostKeySha256 ?? routeHost.hostKeySha256
+        : routeHost.hostKeySha256;
+      if (!hostKeySha256) throw new Error(`请先为“${routeHost.name}”保存 SHA256 主机指纹`);
+      if (!routeHost.identityFile && !routeHost.credentialRef) {
+        throw new Error(`“${routeHost.name}”缺少原生引擎可用的认证来源`);
+      }
+      const identityPassphraseRef = sshKeys.find(
+        (key) => key.privateKeyPath === routeHost.identityFile,
+      )?.passphraseRef;
+      return {
+        hopId: crypto.randomUUID(),
+        host: routeHost.host,
+        port: routeHost.port,
+        username: routeHost.username,
+        hostKeySha256,
+        timeoutSeconds: 15,
+        credentialRef: routeHost.identityFile ? undefined : routeHost.credentialRef,
+        identityFile: routeHost.identityFile,
+        identityPassphraseRef,
+      };
+    }),
   };
 }
 
@@ -873,7 +901,7 @@ function App() {
         result = await invoke<NativeTerminalStartResult>("start_native_terminal", {
           request: {
             sessionId: session.id,
-            route: nativeDirectRoute(host, hostKeySha256, identityPassphraseRef),
+            route: nativeRoute(host, appState.hosts, appState.sshKeys, hostKeySha256),
             cols: 120,
             rows: 32,
           },
@@ -925,6 +953,16 @@ function App() {
     }
     updateSession(activeSession.id, { state: "connecting" });
     try {
+      if (!isAndroidRuntime() && activeHost.jumpRoute?.length) {
+        if (activeSession.engine !== "russh") {
+          throw new Error("已配置的跳板路线只能通过原生 russh 引擎连接");
+        }
+        if (!activeHost.hostKeySha256) {
+          throw new Error("跳板路线的目标主机需要预先保存 SHA256 主机指纹");
+        }
+        await startSshSession(activeSession, activeHost, activeHost.hostKeySha256);
+        return;
+      }
       const inspection: HostKeyInspection = isAndroidRuntime()
         ? await invoke<HostKeyInspection>("android_inspect_host_key", {
           host: activeHost.host,
@@ -950,6 +988,14 @@ function App() {
       }
       if (inspection.status !== "verified") {
         throw new Error("无法验证 SSH 主机指纹，已拒绝连接");
+      }
+      if (!isAndroidRuntime() && activeHost.hostKeySha256 !== inspection.fingerprint) {
+        setAppState((current) => ({
+          ...current,
+          hosts: current.hosts.map((host) => host.id === activeHost.id
+            ? { ...host, hostKeySha256: inspection.fingerprint }
+            : host),
+        }));
       }
       await startSshSession(activeSession, activeHost, inspection.fingerprint);
     } catch (error) {
@@ -1001,24 +1047,31 @@ function App() {
     const operationId = crypto.randomUUID();
     setNativeProbeInspecting(true);
     try {
-      const inspection = await invoke<HostKeyInspection>("inspect_host_key", {
-        request: { host: activeHost.host, port: activeHost.port },
-      });
-      if (inspection.status === "unknown") {
-        throw new Error("请先通过正常连接流程核验并保存主机指纹");
+      let targetHostKeySha256 = activeHost.hostKeySha256;
+      if (!activeHost.jumpRoute?.length) {
+        const inspection = await invoke<HostKeyInspection>("inspect_host_key", {
+          request: { host: activeHost.host, port: activeHost.port },
+        });
+        if (inspection.status === "unknown") {
+          throw new Error("请先通过正常连接流程核验并保存主机指纹");
+        }
+        if (inspection.status === "changed") {
+          throw new Error(`主机指纹与本机记录不一致，原生检查已拒绝：${inspection.fingerprint}`);
+        }
+        if (inspection.status !== "verified") {
+          throw new Error("无法验证 SSH 主机指纹，原生检查已拒绝");
+        }
+        targetHostKeySha256 = inspection.fingerprint;
       }
-      if (inspection.status === "changed") {
-        throw new Error(`主机指纹与本机记录不一致，原生检查已拒绝：${inspection.fingerprint}`);
-      }
-      if (inspection.status !== "verified") {
-        throw new Error("无法验证 SSH 主机指纹，原生检查已拒绝");
+      if (!targetHostKeySha256) {
+        throw new Error("跳板路线的目标主机需要预先保存 SHA256 主机指纹");
       }
       setNativeProbeInspecting(false);
       setNativeProbeOperationId(operationId);
       const result = await invoke<NativeEngineProbeResult>("native_engine_probe", {
         request: {
           operationId,
-          route: nativeDirectRoute(activeHost, inspection.fingerprint, activeIdentityPassphraseRef),
+          route: nativeRoute(activeHost, appState.hosts, appState.sshKeys, targetHostKeySha256),
         },
       });
       if (result.schemaVersion !== 1 || result.engine !== "russh" || !result.sshReady || !result.sftpReady) {
@@ -1052,6 +1105,12 @@ function App() {
           request: { host: pending.host, port: pending.port },
           expectedFingerprint: pending.fingerprint,
         });
+        setAppState((current) => ({
+          ...current,
+          hosts: current.hosts.map((host) => host.id === pending.hostId
+            ? { ...host, hostKeySha256: pending.fingerprint }
+            : host),
+        }));
       }
       setPendingHostKey(null);
       setDialog(null);
@@ -1064,7 +1123,7 @@ function App() {
       showToast("主机指纹已保存，正在连接");
       await startSshSession(
         session,
-        isAndroidRuntime() ? { ...host, hostKeySha256: pending.fingerprint } : host,
+        { ...host, hostKeySha256: pending.fingerprint },
         pending.fingerprint,
       );
     } catch (error) {
@@ -1322,6 +1381,10 @@ function App() {
       credentialRef,
       androidKeyRef,
       androidKeyPassphraseRef,
+      hostKeySha256: String(data.get("hostKeySha256") || "") || undefined,
+      jumpRoute: String(data.get("jumpHostId") || "")
+        ? [String(data.get("jumpHostId"))]
+        : undefined,
       tags: [],
       lastPath: "~",
     };
@@ -1332,6 +1395,13 @@ function App() {
   }
 
   async function deleteHost(host: HostProfile) {
+    const routeDependents = appState.hosts.filter(
+      (candidate) => candidate.id !== host.id && candidate.jumpRoute?.includes(host.id),
+    );
+    if (routeDependents.length) {
+      showToast(`该主机仍被 ${routeDependents.length} 条跳板路线引用，不能删除`);
+      return;
+    }
     const confirmed = window.confirm(
       `确定将主机“${host.name}”（${host.username}@${host.host}:${host.port}）移到回收站吗？\n\n相关连接记录和命令/路径历史将一并保留 30 天，可在回收站恢复。`,
     );
@@ -1552,6 +1622,12 @@ function App() {
   }
 
   const currentPathHistory = appState.pathHistory[activeHost.id] ?? [];
+  const activeJumpHosts = (activeHost.jumpRoute ?? [])
+    .map((hostId) => appState.hosts.find((host) => host.id === hostId))
+    .filter((host): host is HostProfile => Boolean(host));
+  const activeRouteLabel = activeJumpHosts.length
+    ? activeJumpHosts.map((host) => host.name).join(" > ")
+    : "直连";
 
   return (
     <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
@@ -1575,7 +1651,7 @@ function App() {
                 ? androidSyncError ? "同步状态不可用" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取同步状态"
                 : appState.sync.enabled ? relativeTime(appState.sync.lastSyncedAt) : appState.sync.endpoint ? "同步后端未启用" : "同步未配置"}</span>
             </button>
-            <span className="route-status"><Route size={15} /> 路线：直连</span>
+            <span className="route-status"><Route size={15} /> 路线：{activeRouteLabel}</span>
             <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
             {isDesktopRuntime() ? (
               <button
@@ -1818,6 +1894,13 @@ function App() {
             <span className="route-node local">本机</span>
             {hasActiveHost ? (
               <>
+                {activeJumpHosts.map((jumpHost) => (
+                  <span className="identity-breadcrumb-segment" key={jumpHost.id}>
+                    <ChevronRight size={14} />
+                    <strong className="route-node jump">{jumpHost.name}</strong>
+                    <code>{jumpHost.username}@{jumpHost.host}</code>
+                  </span>
+                ))}
                 <ChevronRight size={14} />
                 <strong className={`route-node current ${activeHost.environment}`}>{activeHost.name}</strong>
                 <code>{activeHost.username}@{activeHost.host}</code>
@@ -1844,8 +1927,8 @@ function App() {
                 <button
                   className={activeSession.engine === "openssh" ? "active" : ""}
                   type="button"
-                  title="系统 OpenSSH 兼容引擎"
-                  disabled={activeSession.state === "connecting"}
+                  title={activeJumpHosts.length ? "当前跳板路线使用原生引擎" : "系统 OpenSSH 兼容引擎"}
+                  disabled={activeSession.state === "connecting" || activeJumpHosts.length > 0}
                   onClick={() => updateSession(activeSession.id, { engine: "openssh" })}
                 >
                   <SquareTerminal size={12} /> OpenSSH
@@ -2127,6 +2210,10 @@ function App() {
             <label className="field"><span>环境</span><select name="environment" defaultValue="development"><option value="production">生产</option><option value="staging">基础设施</option><option value="development">测试</option></select></label>
             <label className="field"><span>分组</span><input name="group" defaultValue="我的主机" /></label>
             {!isAndroidRuntime() ? <label className="field full"><span>私钥路径</span><input name="identityFile" placeholder="使用系统 OpenSSH 路径（可选）" /></label> : null}
+            {!isAndroidRuntime() ? <label className="field full"><span>SHA256 主机指纹</span><input name="hostKeySha256" placeholder="SHA256:..." pattern="SHA256:[A-Za-z0-9+/]{43}" spellCheck={false} /></label> : null}
+            {!isAndroidRuntime() && appState.hosts.length ? (
+              <label className="field full"><span>跳板机</span><select name="jumpHostId" defaultValue=""><option value="">直连</option>{appState.hosts.map((host) => <option value={host.id} key={host.id}>{host.name} ({host.username}@{host.host})</option>)}</select></label>
+            ) : null}
             {isAndroidRuntime() ? (
               <>
                 <label className="field full"><span>Android 认证方式</span><select value={androidCredentialKind} onChange={(event) => setAndroidCredentialKind(event.target.value as "password" | "privateKey")}><option value="password">密码</option><option value="privateKey">OpenSSH 私钥</option></select></label>

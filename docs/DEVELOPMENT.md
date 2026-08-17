@@ -70,7 +70,7 @@ transfer-finished       -> { taskId, outcome, warnings, cleanupStatus }
 - 主机资料只保存 `credentialRef`，短凭据进入 Windows Credential Manager、macOS Keychain 或 Linux Secret Service。
 - 私钥默认保留在用户选择的 OpenSSH 文件中；生成时默认加密，口令不写日志、`localStorage`、命令历史或错误报告。
 - Rust 读取秘密后使用可清零内存，并尽量缩短生命周期；不得克隆到长期任务状态或通过终端输出事件回显。
-- 当前直连 OpenSSH 会话可通过受限 AskPass 助手读取当前主机的钥匙串凭据；未知提示、主机密钥确认和广播层永远不能取得密码。多跳路线恢复前必须为每一跳建立独立凭据绑定，禁止把目标凭据猜测性地发送给跳板提示。
+- 当前兼容 OpenSSH 会话可通过受限 AskPass 助手读取当前主机的钥匙串凭据；未知提示、主机密钥确认和广播层永远不能取得密码。原生多跳 route 必须为每一跳建立独立凭据绑定，只在对应 SSH 握手开始时解析该跳秘密，禁止把目标凭据发送给跳板认证。
 - 凭据同步默认关闭。当前内部凭据 vault 原语使用独立密钥和逐设备授权，但尚无 UI/协调器；同步 provider 凭据不能依赖同一个尚未解锁的远端仓库自举。
 - 测试使用公开固定样例或临时生成的凭据，禁止把真实 IP、用户名、密码、私钥、Token 和生产日志提交到仓库、fixture 或截图。
 - 迁移测试中的 `password`、`token` 和私钥字段只能使用明显的固定占位符，并断言其状态为 skipped；不得验证、破解或记录其他客户端的真实秘密。
@@ -259,7 +259,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - 桌面目标精确锁定 `russh = 0.62.7`（上游 tag commit `a3766cca2223f851df786e88f823ea08dabfbdea`，crates.io SHA-256 `9decb68e4e44e1079700e54f17c8f23806ec53d7e0db73ab1c71d9dabc666812`）和 `russh-sftp = 2.4.0`（上游 2.4 版本线 commit `e145c1f7ece99f41f558949ef59731f2cd1a9dfe`，crates.io SHA-256 `9de67aace74530a29086db0671fa200c470a58eb380081f28ad512ffb0c5356b`）；两者均为 Apache-2.0。只使用公开 API，没有复制上游源码。
 - `russh` 关闭默认 feature，只启用 `ring` 加密后端和 RSA 密钥支持；不引入默认 `aws-lc-rs` 或压缩面。client config 从默认 host-key 列表删除 `ssh-rsa`，RSA 用户认证也只有服务器明确报告 RSA SHA-2 时才继续，禁止构造器退回 SHA-1。选择 0.62.7 是为了包含 0.62.4 起的全零 Curve25519 共享秘密修复、0.60.3 起的恶意数据包分配修复和 0.62.7 的解压边界修复。Tokio/tokio-util 精确对齐现有锁图的 1.53.1/0.7.19，新增能力只在 Linux/macOS/Windows 编译。
 - 运行权限只有目标 SSH 网络、本机只读私钥和既有系统凭据引用；没有遥测、shell 子进程、任意命令或新增 Android capability。具名请求不可序列化/调试，私钥/密码使用可清零容器，错误和结果不携带底层库文本、credential reference 或秘密值。
-- probe 与长期终端共用 `route.hops[]`：必须有 1–4 个有序 hop，hop UUID 与 host/port 端点不可重复；每跳分别验证 host/user/port、SHA256 pin、5–60 秒超时及唯一认证来源。route 结构验证不能读取秘密，连接到某跳时才解析该跳引用；稳定错误只允许附带 `hopIndex`。在真正的 direct-tcpip tunnel 接线前，执行器必须拒绝多于一跳并提示使用系统 OpenSSH，测试中的多跳结构不得描述为可连接。
+- probe 与长期终端共用 `route.hops[]`：必须有 1–4 个有序 hop，hop UUID 与 host/port 端点不可重复；每跳分别验证 host/user/port、SHA256 pin、5–60 秒超时及唯一认证来源。route 结构验证不能读取秘密，连接到某跳时才解析该跳引用；首跳 TCP、后续 `direct-tcpip` channel stream 上的新 SSH 会话必须分别完成 pin 和认证。稳定错误只允许附带 `hopIndex`，失败或取消必须关闭整条已建立连接链。
 - 长期终端最多 16 个，PTY 行列限制 2–1000，单次输入最多 64 KiB；读写任务分离，各使用 64 项有界队列。每批原生输出必须携带非零单调 `deliveryId`，xterm 解析回调再调用 `ack_native_terminal_output`；Rust 在回执前暂停事件桥，并以同一编号重投直到确认或 30 秒 fail closed。前端必须去重，同一连接重启时清空编号状态；各标签的终端实例在后台保持挂载，只用 `visibility` 隐藏，不能因切换标签卸载消费者。这样队列和 SSH window 才能对慢消费者形成背压而不丢弃终端字节。该确认 command 只在桌面 capability 中，不能携带输出或秘密。连接中可按 session UUID 取消，PTY/Shell 明确确认后才登记成功；输出、退出、取消和异常事件只按匹配代际处理，复用标签不会被迟到任务移除或误报退出。
 - 原生文件坞浏览只接受 `sessionId` 和受限绝对路径/`~`/`.`，不得再次接收 host、凭据引用或私钥路径。每个长期连接只有 16 项 SFTP 请求队列，单目录最多返回 1,000 项；首次浏览懒启动一个持续子系统，失败后关闭并在下次请求重建，终端取消时统一清理。浏览之外的上传下载、外部编辑和文件变更继续使用独立兼容连接，以免大流量阻塞交互终端，并保留 TransferManager/预览令牌的现有安全边界。
 - Linux CI 启动仅监听回环的临时 OpenSSH，禁用密码、交互认证和 root，使用一次性 Ed25519 用户密钥，实际完成 host-key pin、公钥认证、同一连接两次 SFTP 目录读取，并打开 PTY、调整尺寸、验证双向终端字节和取消。其他平台负责编译/单测；真实多版本服务器、长时间流控、网络故障和性能仍是后续兼容矩阵。

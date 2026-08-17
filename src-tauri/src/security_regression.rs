@@ -205,6 +205,20 @@ mod tests {
     }
 
     #[test]
+    fn native_jump_route_is_explicit_and_fail_closed_in_frontend() {
+        let frontend = include_str!("../../src/App.tsx");
+        let types = include_str!("../../src/types.ts");
+        assert!(types.contains("jumpRoute?: string[]"));
+        assert!(frontend.contains("nativeRouteHosts(host, hosts)"));
+        assert!(frontend.contains("jumpRoute.length > 3"));
+        assert!(frontend.contains("new Set(routeIds).size !== routeIds.length"));
+        assert!(frontend.contains("targetHostKeySha256 ?? routeHost.hostKeySha256"));
+        assert!(frontend.contains("activeSession.engine !== \"russh\""));
+        assert!(frontend.contains("routeHost.identityFile ? undefined : routeHost.credentialRef"));
+        assert!(!frontend.contains("nativeDirectRoute"));
+    }
+
+    #[test]
     fn credential_sync_has_no_ipc_event_or_logging_surface() {
         let source = include_str!("sync_credential_vault.rs");
         for forbidden in [
