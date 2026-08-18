@@ -1067,10 +1067,9 @@ pub(crate) fn build_local_conflict_resolution_operation(
     validate_uuid(operation_id, "operation")?;
     validate_uuid(device_id, "device")?;
     validate_hash(conflict_id, "conflict")?;
-    let conflict = state
-        .conflicts
-        .get(conflict_id)
-        .ok_or_else(|| MergeError::new(MergeErrorCode::ConflictMissing, "要解决的同步冲突不存在"))?;
+    let conflict = state.conflicts.get(conflict_id).ok_or_else(|| {
+        MergeError::new(MergeErrorCode::ConflictMissing, "要解决的同步冲突不存在")
+    })?;
     if conflict.resolution_stamp.is_some() {
         return Err(MergeError::new(
             MergeErrorCode::StaleResolution,
@@ -1831,8 +1830,7 @@ mod tests {
         assert!(conflicts[0].alternatives[0].truncated);
         assert!(conflicts[0].alternatives[0].preview.as_ref().unwrap().len() <= 2_048);
         assert_eq!(
-            conflicts[0]
-                .alternatives[0]
+            conflicts[0].alternatives[0]
                 .content_hash
                 .as_ref()
                 .unwrap()
