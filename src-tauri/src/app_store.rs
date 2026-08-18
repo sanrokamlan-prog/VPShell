@@ -3190,10 +3190,7 @@ mod tests {
         };
         assert_eq!(
             fields,
-            &BTreeMap::from([(
-                "onboardingCompleted".to_string(),
-                FieldValue::Flag(true)
-            )])
+            &BTreeMap::from([("onboardingCompleted".to_string(), FieldValue::Flag(true))])
         );
         store
             .acknowledge_entity_sync_change(&vault_id, &changes[0].operation_id)
