@@ -1410,10 +1410,7 @@ mod tests {
         let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
         let state: serde_json::Value =
             serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            state["terminalAppearance"]["fontFamily"],
-            "JetBrains Mono"
-        );
+        assert_eq!(state["terminalAppearance"]["fontFamily"], "JetBrains Mono");
         assert_eq!(state["terminalAppearance"]["fontSize"], 20);
         assert_eq!(state["terminalAppearance"]["lineHeight"], 1.4);
         assert_eq!(

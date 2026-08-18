@@ -1112,9 +1112,7 @@ fn queue_script_sync_changes(
     Ok(())
 }
 
-fn terminal_appearance_sync_fields(
-    value: &Value,
-) -> Result<BTreeMap<String, FieldValue>, String> {
+fn terminal_appearance_sync_fields(value: &Value) -> Result<BTreeMap<String, FieldValue>, String> {
     let root = ensure_object(value, "root")?;
     let appearance = ensure_object(
         root.get("terminalAppearance")
@@ -1142,10 +1140,7 @@ fn terminal_appearance_sync_fields(
             FieldValue::Text(font_family.to_string()),
         ),
         ("fontSize".to_string(), FieldValue::Integer(font_size)),
-        (
-            "lineHeight".to_string(),
-            FieldValue::Integer(line_height),
-        ),
+        ("lineHeight".to_string(), FieldValue::Integer(line_height)),
     ]);
     if !entity_fields_are_syncable(&EntityKind::Setting, &fields) {
         return Err("本地状态 terminalAppearance 未通过同步字段验证".to_string());
@@ -1165,8 +1160,8 @@ fn default_terminal_appearance_sync_fields() -> BTreeMap<String, FieldValue> {
 }
 
 fn sync_fields_hash(fields: &BTreeMap<String, FieldValue>) -> Result<String, String> {
-    let encoded = serde_json::to_vec(fields)
-        .map_err(|error| format!("无法编码本地同步字段指纹: {error}"))?;
+    let encoded =
+        serde_json::to_vec(fields).map_err(|error| format!("无法编码本地同步字段指纹: {error}"))?;
     let digest = Sha256::digest(encoded);
     let mut output = String::with_capacity(64);
     for byte in digest {
@@ -1208,7 +1203,9 @@ fn queue_setting_sync_change(
         return Ok(());
     }
     let pending: i64 = transaction
-        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+            row.get(0)
+        })
         .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
     if pending >= MAX_PENDING_SYNC_CHANGES {
         if previous.is_none() {
@@ -2381,7 +2378,9 @@ impl AppStore {
             }
         }
         let pending: i64 = transaction
-            .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+                row.get(0)
+            })
             .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
         if pending != 0 {
             return Ok(ProjectionOutcome::Deferred);
@@ -2410,14 +2409,9 @@ impl AppStore {
             .and_then(|setting| setting.fields.as_ref())
             .map(|fields| {
                 if fields.len() != 3
-                    || !fields
-                        .keys()
-                        .all(|field| {
-                            matches!(
-                                field.as_str(),
-                                "fontFamily" | "fontSize" | "lineHeight"
-                            )
-                        })
+                    || !fields.keys().all(|field| {
+                        matches!(field.as_str(), "fontFamily" | "fontSize" | "lineHeight")
+                    })
                     || !entity_fields_are_syncable(&EntityKind::Setting, fields)
                 {
                     return Err("远端设置同步投影字段未通过协议验证".to_string());
@@ -2445,10 +2439,7 @@ impl AppStore {
                 .and_then(Value::as_object_mut)
                 .ok_or_else(|| "AppState terminalAppearance 损坏".to_string())?;
             appearance.insert("fontFamily".to_string(), Value::String(font_family));
-            appearance.insert(
-                "fontSize".to_string(),
-                Value::Number(font_size.into()),
-            );
+            appearance.insert("fontSize".to_string(), Value::Number(font_size.into()));
             appearance.insert("lineHeight".to_string(), Value::Number(line_height));
         }
         validate_state_json(
@@ -2872,7 +2863,11 @@ mod tests {
         );
         assert_eq!(fields["fontSize"], FieldValue::Integer(16));
         assert_eq!(fields["lineHeight"], FieldValue::Integer(140));
-        assert!(!serde_json::to_string(fields).unwrap().contains("device-only"));
+        assert!(
+            !serde_json::to_string(fields)
+                .unwrap()
+                .contains("device-only")
+        );
         store
             .acknowledge_entity_sync_change(&vault_id, &changes[0].operation_id)
             .unwrap();
@@ -2929,7 +2924,10 @@ mod tests {
 
         let connection = open_connection(&database_path(&root.0)).unwrap();
         connection
-            .execute("DELETE FROM app_sync_changes WHERE entity_kind = 'setting'", [])
+            .execute(
+                "DELETE FROM app_sync_changes WHERE entity_kind = 'setting'",
+                [],
+            )
             .unwrap();
         connection
             .execute("DELETE FROM app_sync_setting_state", [])
