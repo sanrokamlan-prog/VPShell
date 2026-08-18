@@ -69,12 +69,7 @@ impl AutomaticSyncPolicy {
         now_ms >= self.next_run_at_ms || change_due
     }
 
-    fn complete(
-        &mut self,
-        now_ms: i64,
-        pending_objects: u64,
-        disposition: CycleDisposition,
-    ) {
+    fn complete(&mut self, now_ms: i64, pending_objects: u64, disposition: CycleDisposition) {
         self.last_observed_at_ms = now_ms.max(self.last_observed_at_ms);
         self.observed_pending = pending_objects;
         self.pending_changed_at_ms = None;
