@@ -271,9 +271,9 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 
 - Relay proof 复用锁图中已有的 RustCrypto `hmac = 0.12.1` 并提升为关闭默认 feature 的精确直接依赖；MIT OR Apache-2.0，无网络、文件、遥测或原生构建脚本权限。标准库没有 HMAC，不能用裸 `SHA256(token || message)` 替代。删除 Relay binary/module 后可从根依赖移除，现有同步密文格式不依赖它。
 - `src-tauri/src/relay.rs` 与 `src-tauri/src/bin/vpshell-relay.rs` 是 desktop-only 的独立服务/loopback client；不加入 Tauri command、capability、Android 或 WebView 状态。协议版本、服务端随机挑战、客户端随机 nonce、精确目标和 token key id 均进入 HMAC-SHA256 proof，服务端 response proof 在最终 SSH 字节开始前验证；单次 challenge 使旧 request 不能重放。
-- 服务端只打开 operator allowlist 中的目标 TCP，不接受 wildcard/CIDR/任意目标；不会解析或终止 SSH，也不接收凭据。token 是 32-byte base64url 文件，必须为 regular non-symlink、Unix `0600`，生成器 create-only 且不打印 token。控制面不加密，部署者必须自行提供 ACL 或外层 TLS/VPN 以保护目标元数据。
+- 服务端只打开 operator allowlist 中的目标 TCP，不接受 wildcard/CIDR/任意目标；不会解析或终止 SSH，也不接收凭据。token 是 32-byte base64url 文件，必须为 regular non-symlink、Unix `0600`，生成器 create-only 且不打印 token。`RelayTokenSet` 只允许 1–4 个不同 key id，`serve --token-file` 可重复用于有界重叠轮换；删除文件不改变内存，撤销必须重启。控制面不加密，部署者必须自行提供 ACL 或外层 TLS/VPN 以保护目标元数据。
 - 总连接、单源 IP 连接、认证尝试、会话字节、握手/目标连接/空闲/总时长均有硬上限，source bucket 有数量和 TTL 上限。JSONL audit 只记录 schema/阶段、随机 request id、盐哈希 source/target、稳定 outcome、字节和时长；无 token、key id、原始地址、主机名、凭据、SSH 字节或底层错误。audit sink 出错后新会话拒绝。
-- `relay::tests` 必须覆盖成功回环 opaque bytes、错误 token、allowlist 拒绝、挑战篡改/重放、认证速率/连接容量、字节/空闲/总时长、token/audit 文件权限与审计脱敏。真实多区域部署、firewall、日志轮换、外层 TLS/VPN、长时间丢包和多版本 SSH 服务器仍是外部验收。
+- `relay::tests` 必须覆盖成功回环 opaque bytes、错误 token、allowlist 拒绝、挑战篡改/重放、认证速率/连接容量、字节/空闲/总时长、token/audit 文件权限、审计脱敏、双 token 重叠、撤销后拒绝和未知版本不降级。`deploy/relay` 的 systemd/logrotate 基线必须保持无 capability、只读配置、私有审计和受限地址族，并持续不进入 Tauri/Android/WebView。真实多区域部署、firewall、日志轮换执行、外层 TLS/VPN、长时间丢包和多版本 SSH 服务器仍是外部验收。
 
 ### 10.13 原生 route 持续评估（Phase D）
 

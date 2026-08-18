@@ -344,7 +344,7 @@ SSH 参数调优、压缩或连接复用不能等同于海外线路加速。真�
 5. 可选托管中继和自动测速选路；
 6. Mosh 作为独立交互模式，要求远端 `mosh-server` 和 UDP，不替代 SFTP/转发。
 
-Phase D 现在包含一个独立的 `vpshell-relay` Rust 参考服务和同一模块的 loopback client。服务端只接受版本化挑战/HMAC-SHA256 认证、精确 allowlist 目标和有界 TCP 会话；它只承载到目标的 SSH 密文字节，不能终止最终 SSH、读取凭据或替代目标主机密钥验证。客户端在收到服务端 proof 后才把本地字节交给最终 SSH 引擎。服务端强制总量/单 IP/认证速率/握手/连接/空闲/总时长上限，并将来源/目标盐哈希和稳定结果码写入无敏感值 JSONL 审计；审计失败时新会话 fail closed。协议控制面本身不加密，目标元数据仍需管理员 ACL 或外层 TLS/VPN 保护。
+Phase D 现在包含一个独立的 `vpshell-relay` Rust 参考服务和同一模块的 loopback client。服务端只接受版本化挑战/HMAC-SHA256 认证、精确 allowlist 目标和有界 TCP 会话；它只承载到目标的 SSH 密文字节，不能终止最终 SSH、读取凭据或替代目标主机密钥验证。客户端在收到服务端 proof 后才把本地字节交给最终 SSH 引擎。服务端强制总量/单 IP/认证速率/握手/连接/空闲/总时长上限，并将来源/目标盐哈希和稳定结果码写入无敏感值 JSONL 审计；审计失败时新会话 fail closed。服务端可按公开 key id 从 1–4 个内存 token 中有界选择，支持重叠轮换；重复/超限集合、已撤销 token 和未知协议版本 fail closed，撤销必须重启以清除内存状态。systemd/logrotate 基线和升级、回退、撤销、恢复演练属于独立部署面，不增加 Tauri、Android 或 WebView 能力。协议控制面本身不加密，目标元数据仍需管理员 ACL 或外层 TLS/VPN 保护。
 
 当前 `route_measurement` 在用户显式启动后，复用原生引擎对同一目标的直连和已配置跳板候选执行完整逐跳认证、host-key pin 与最终 SFTP readiness probe。单个内存 campaign 最多 4 个候选、30–300 秒间隔、3–20 轮滚动窗口和 120 轮；Rust 记录成功率、中位数、P95 和失败惩罚，低于 80% 成功率的候选不进入推荐，并以 15% 滞后避免小差异反复切换。快照只包含候选 ID、统计量、推荐 reason code 和稳定错误/跳序号；停止、窗口关闭和代际变化都会取消，端点、用户名、credential reference、私钥路径和底层错误不进入结果或日志。
 

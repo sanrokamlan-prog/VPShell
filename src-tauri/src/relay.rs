@@ -3,7 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     net::{IpAddr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -38,6 +38,7 @@ const REQUEST_PREFIX_BYTES: usize = 4 + 2 + NONCE_BYTES + KEY_ID_BYTES + 2;
 const RESPONSE_BYTES: usize = 4 + 2 + 1 + SESSION_ID_BYTES + MAC_BYTES;
 const MAX_HOST_BYTES: usize = 253;
 const MAX_TOKEN_FILE_BYTES: u64 = 128;
+const MAX_ACTIVE_TOKENS: usize = 4;
 const SOURCE_BUCKET_TTL: Duration = Duration::from_secs(300);
 const MAX_SOURCE_BUCKETS: usize = 4096;
 const CLIENT_DOMAIN: &[u8] = b"vpshell-relay-v1-client";
@@ -201,6 +202,44 @@ impl RelayToken {
 
     fn bytes(&self) -> &[u8] {
         self.0.as_slice()
+    }
+}
+
+pub struct RelayTokenSet {
+    tokens: Vec<RelayToken>,
+}
+
+impl RelayTokenSet {
+    pub fn from_tokens(tokens: Vec<RelayToken>) -> Result<Self, &'static str> {
+        if tokens.is_empty() || tokens.len() > MAX_ACTIVE_TOKENS {
+            return Err("relay-token-set-invalid");
+        }
+        let key_ids = tokens.iter().map(RelayToken::key_id).collect::<HashSet<_>>();
+        if key_ids.len() != tokens.len() {
+            return Err("relay-token-set-invalid");
+        }
+        Ok(Self { tokens })
+    }
+
+    pub fn load_files(paths: &[PathBuf]) -> Result<Self, &'static str> {
+        if paths.is_empty() || paths.len() > MAX_ACTIVE_TOKENS {
+            return Err("relay-token-set-invalid");
+        }
+        let tokens = paths
+            .iter()
+            .map(|path| RelayToken::load(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_tokens(tokens)
+    }
+
+    fn resolve(&self, key_id: &[u8; KEY_ID_BYTES]) -> Option<&RelayToken> {
+        self.tokens.iter().find(|token| token.key_id() == *key_id)
+    }
+
+    fn primary(&self) -> &RelayToken {
+        self.tokens
+            .first()
+            .expect("validated Relay token set is non-empty")
     }
 }
 
@@ -370,7 +409,7 @@ struct SourceBucket {
 
 struct RelayServerState {
     config: RelayServerConfig,
-    token: Arc<RelayToken>,
+    tokens: Arc<RelayTokenSet>,
     audit: Arc<dyn RelayAuditSink>,
     audit_healthy: AtomicBool,
     audit_salt: [u8; 32],
@@ -460,7 +499,7 @@ impl RelayServerState {
 pub async fn serve(
     listener: TcpListener,
     config: RelayServerConfig,
-    token: Arc<RelayToken>,
+    tokens: Arc<RelayTokenSet>,
     audit: Arc<dyn RelayAuditSink>,
     cancellation: CancellationToken,
 ) -> Result<(), &'static str> {
@@ -471,7 +510,7 @@ pub async fn serve(
     let global = Arc::new(Semaphore::new(config.limits.max_connections));
     let state = Arc::new(RelayServerState {
         config,
-        token,
+        tokens,
         audit,
         audit_healthy: AtomicBool::new(true),
         audit_salt,
@@ -570,17 +609,20 @@ async fn handle_connection(
             return;
         }
     };
-    let authenticated = request.key_id == state.token.key_id()
-        && verify_client_mac(
-            &state.token,
+    let selected_token = state.tokens.resolve(&request.key_id);
+    let authenticated = selected_token.is_some_and(|token| {
+        verify_client_mac(
+            token,
             &server_nonce,
             &request.authenticated_bytes,
             &request.mac,
-        );
+        )
+    });
     if !authenticated {
+        let response_token = selected_token.unwrap_or_else(|| state.tokens.primary());
         let _ = send_response(
             &mut client,
-            &state.token,
+            response_token,
             &server_nonce,
             &request,
             ResponseStatus::AuthenticationFailed,
@@ -596,10 +638,11 @@ async fn handle_connection(
         );
         return;
     }
+    let token = selected_token.expect("authenticated token was selected by key id");
     if !state.allowed_targets.contains(&request.target) {
         let _ = send_response(
             &mut client,
-            &state.token,
+            token,
             &server_nonce,
             &request,
             ResponseStatus::TargetDenied,
@@ -629,7 +672,7 @@ async fn handle_connection(
     if !state.audit(&accepted_event) {
         let _ = send_response(
             &mut client,
-            &state.token,
+            token,
             &server_nonce,
             &request,
             ResponseStatus::AuditUnavailable,
@@ -651,7 +694,7 @@ async fn handle_connection(
             _ => {
                 let _ = send_response(
                     &mut client,
-                    &state.token,
+                    token,
                     &server_nonce,
                     &request,
                     ResponseStatus::TargetUnavailable,
@@ -681,7 +724,7 @@ async fn handle_connection(
     }
     if send_response(
         &mut client,
-        &state.token,
+        token,
         &server_nonce,
         &request,
         ResponseStatus::Ready,
@@ -1280,6 +1323,18 @@ mod tests {
         Arc::new(RelayToken(Zeroizing::new([byte; 32])))
     }
 
+    fn token_set(bytes: &[u8]) -> Arc<RelayTokenSet> {
+        Arc::new(
+            RelayTokenSet::from_tokens(
+                bytes
+                    .iter()
+                    .map(|byte| RelayToken(Zeroizing::new([*byte; 32])))
+                    .collect(),
+            )
+            .unwrap(),
+        )
+    }
+
     async fn echo_target() -> (RelayTarget, CancellationToken) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1307,7 +1362,7 @@ mod tests {
 
     async fn start_relay(
         target: RelayTarget,
-        token: Arc<RelayToken>,
+        tokens: Arc<RelayTokenSet>,
         limits: RelayLimits,
         audit: Arc<MemoryAudit>,
     ) -> (String, CancellationToken) {
@@ -1322,7 +1377,7 @@ mod tests {
                     allowed_targets: vec![target],
                     limits,
                 },
-                token,
+                tokens,
                 audit,
                 task_cancellation,
             )
@@ -1355,7 +1410,7 @@ mod tests {
         let relay_token = token(7);
         let (endpoint, relay_cancel) = start_relay(
             target.clone(),
-            Arc::clone(&relay_token),
+            token_set(&[7]),
             RelayLimits::default(),
             Arc::clone(&audit),
         )
@@ -1385,7 +1440,7 @@ mod tests {
         let relay_token = token(9);
         let (endpoint, relay_cancel) = start_relay(
             target.clone(),
-            Arc::clone(&relay_token),
+            token_set(&[9]),
             RelayLimits::default(),
             Arc::clone(&audit),
         )
@@ -1415,7 +1470,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audit_failure_rejects_an_authenticated_session_before_relaying() {
+    async fn token_rotation_overlap_and_revocation_are_fail_closed() {
+        let (target, target_cancel) = echo_target().await;
+        let old_token = token(21);
+        let new_token = token(22);
+        let (overlap_endpoint, overlap_cancel) = start_relay(
+            target.clone(),
+            token_set(&[21, 22]),
+            RelayLimits::default(),
+            Arc::new(MemoryAudit::default()),
+        )
+        .await;
+
+        for credential in [&old_token, &new_token] {
+            let tunnel = connect_via_relay(
+                &client_config(overlap_endpoint.clone(), target.clone()),
+                credential,
+            )
+            .await
+            .unwrap();
+            drop(tunnel);
+        }
+        overlap_cancel.cancel();
+        tokio::task::yield_now().await;
+
+        let (revoked_endpoint, revoked_cancel) = start_relay(
+            target.clone(),
+            token_set(&[22]),
+            RelayLimits::default(),
+            Arc::new(MemoryAudit::default()),
+        )
+        .await;
+        let old_error = connect_via_relay(
+            &client_config(revoked_endpoint.clone(), target.clone()),
+            &old_token,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(old_error.code(), "relay-server-proof-invalid");
+        let current = connect_via_relay(
+            &client_config(revoked_endpoint, target),
+            &new_token,
+        )
+        .await
+        .unwrap();
+        drop(current);
+
+        revoked_cancel.cancel();
+        target_cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn audit_failure_requires_fresh_server_state_to_recover() {
         let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_address = target_listener.local_addr().unwrap();
         let target = RelayTarget::parse(&target_address.to_string()).unwrap();
@@ -1424,7 +1530,6 @@ mod tests {
         let relay_token = token(15);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
-        let task_token = Arc::clone(&relay_token);
         tokio::spawn(async move {
             serve(
                 relay_listener,
@@ -1432,7 +1537,7 @@ mod tests {
                     allowed_targets: vec![target],
                     limits: RelayLimits::default(),
                 },
-                task_token,
+                token_set(&[15]),
                 Arc::new(FailingAudit),
                 task_cancellation,
             )
@@ -1455,6 +1560,28 @@ mod tests {
                 .is_err()
         );
         cancellation.cancel();
+        tokio::task::yield_now().await;
+
+        let recovered_target = RelayTarget::parse(&target_address.to_string()).unwrap();
+        let (recovered_endpoint, recovered_cancel) = start_relay(
+            recovered_target.clone(),
+            token_set(&[15]),
+            RelayLimits::default(),
+            Arc::new(MemoryAudit::default()),
+        )
+        .await;
+        let recovered = connect_via_relay(
+            &client_config(recovered_endpoint, recovered_target),
+            &relay_token,
+        )
+        .await
+        .unwrap();
+        drop(recovered);
+        timeout(Duration::from_secs(1), target_listener.accept())
+            .await
+            .expect("recovered target connect timeout")
+            .expect("recovered target connect");
+        recovered_cancel.cancel();
     }
 
     #[test]
@@ -1490,6 +1617,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_protocol_version_fails_before_authentication() {
+        let (mut client, mut server) = tcp_pair().await;
+        let mut prefix = [0_u8; REQUEST_PREFIX_BYTES];
+        prefix[..4].copy_from_slice(MAGIC);
+        prefix[4..6].copy_from_slice(&(RELAY_PROTOCOL_VERSION + 1).to_be_bytes());
+        client.write_all(&prefix).await.unwrap();
+        assert_eq!(
+            read_request(&mut server).await.err(),
+            Some("relay-version-unsupported")
+        );
+    }
+
+    #[test]
+    fn token_set_is_non_empty_unique_and_bounded() {
+        assert_eq!(
+            RelayTokenSet::from_tokens(Vec::new()).err(),
+            Some("relay-token-set-invalid")
+        );
+        assert_eq!(
+            RelayTokenSet::from_tokens(vec![
+                RelayToken(Zeroizing::new([1_u8; 32])),
+                RelayToken(Zeroizing::new([1_u8; 32])),
+            ])
+            .err(),
+            Some("relay-token-set-invalid")
+        );
+        assert_eq!(
+            RelayTokenSet::from_tokens(
+                (1_u8..=5)
+                    .map(|byte| RelayToken(Zeroizing::new([byte; 32])))
+                    .collect(),
+            )
+            .err(),
+            Some("relay-token-set-invalid")
+        );
+        assert!(
+            RelayTokenSet::from_tokens(vec![
+                RelayToken(Zeroizing::new([1_u8; 32])),
+                RelayToken(Zeroizing::new([2_u8; 32])),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn authentication_rate_limit_is_enforced_before_target_connect() {
         let (target, target_cancel) = echo_target().await;
         let audit = Arc::new(MemoryAudit::default());
@@ -1500,7 +1672,7 @@ mod tests {
         };
         let (endpoint, relay_cancel) = start_relay(
             target.clone(),
-            Arc::clone(&relay_token),
+            token_set(&[12]),
             limits,
             Arc::clone(&audit),
         )
@@ -1540,7 +1712,7 @@ mod tests {
         };
         let (endpoint, relay_cancel) = start_relay(
             target.clone(),
-            Arc::clone(&relay_token),
+            token_set(&[14]),
             limits,
             Arc::clone(&audit),
         )

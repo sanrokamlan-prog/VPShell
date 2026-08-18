@@ -6,12 +6,12 @@
 
 ## 不可变约束
 
-- 基线与最终 HEAD：`a1ab733b7bb52fbc0bd8362b204963f7e6ab750e`。
-- 所有改动保持未提交；禁止 GitHub 写入、tag、release、包发布、artifact 上传和 remote 修改。
+- 执行基线为 `main` / `v0.1.0-alpha.9`；实现提交由固定 supervisor 推送到 `codex/vpshell-roadmap-continuation-20260818` 并持续更新 Draft PR #1，Codex 不写 `.git`。
+- 禁止直接写入/合并 `main`、tag、release 或发布安装包；每个独立项只在前一提交 Actions 全绿后继续。
 - Rust/Tauri 拥有网络、文件、进程、凭据、归档和加密信任边界；前端只展示状态并发起具名结构化请求。
 - 不记录、同步、打印或返回密码、私钥、credential ref、Token、原始连接秘密或敏感文件内容。
 - Linux VPS 结果不能替代 Windows、macOS、Android arm64 真机或正式安装器验收。
-- `/root/reports/vpshell-roadmap-full.complete` 只能在全部可实现项完成后原子创建。
+- 仓库内 `.codex-roadmap-complete` 只能在全部可实现项、PR Actions 与最终报告完成后原子创建；当前不得创建。
 
 状态定义：`完成` 表示已有代码与聚焦测试；`进行中` 表示当前唯一工作项；`待实现` 表示没有完成；`外部验收` 表示必须在当前 VPS 之外验证，不能在本机勾选完成。
 
@@ -128,8 +128,8 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 完成 | 系统 OpenSSH 兼容回退及跨引擎行为/安全测试：单跳终端仅对 Rust 标记的密钥格式/RSA SHA-2 协商错误回退；host-key、认证、取消、超时、无效请求与多跳 route fail closed；严格系统请求/实际引擎响应、生产参数单测及 Linux 真实 OpenSSH fixture 已实现；PR #1 run `32092154480` 全绿 |
 | 完成 | 用户自建 Relay 参考实现、认证协议、限流、审计和安全测试：desktop-only 可运行 serve/loopback connect、challenge-bound HMAC-SHA256 双向 proof、精确目标 allowlist、token/audit 私有文件、全局/单 IP/认证/字节/空闲/总时长硬上限、盐哈希 JSONL 审计和真实回环 TCP 测试已实现；PR #1 run `32095165679` 全绿，真实部署与 TLS/VPN 为外部验收 |
 | 完成 | Rust-owned 持续 route readiness 测量与可解释选路建议：真实比较同一目标直连/已配置跳板的逐跳认证、host-key pin 和最终 SFTP readiness，滚动成功率/中位数/P95/失败惩罚、可靠性门槛、切换滞后、取消/代际及脱敏快照已接线；PR #1 run `32098321338` 全绿；不自动改写 route，不称“加速” |
-| 进行中 | 可选 Mosh 独立交互模式：桌面直连显式选择、Rust 固定 SSH bootstrap/server/UDP 参数、复用 PTY 生命周期且不替代 SSH/SFTP/转发；首轮 Actions 仅格式失败，已修复并等待完整矩阵 |
-| 待实现 | 自建部署文档、协议版本/升级/撤销和故障恢复演练 |
+| 完成 | 可选 Mosh 独立交互模式：桌面直连显式选择、Rust 固定 SSH bootstrap/server/UDP 参数、复用 PTY 生命周期且不替代 SSH/SFTP/转发；PR #1 run `32101043636` 全绿，真实网络行为保持外部验收 |
+| 进行中 | 自建部署、协议版本/升级/撤销和故障恢复演练：1–4 token 有界重叠轮换与撤销、未知版本拒绝、真实回环测试、hardened systemd/logrotate 基线及部署/升级/回退/恢复 runbook 已实现，等待 Actions |
 | 外部验收 | 多区域真实部署、长时间网络测试和各桌面/移动平台兼容性 |
 
 托管中继、团队协作和企业支持不在没有服务边界与真实部署的情况下伪装为已实现生产服务。
@@ -193,7 +193,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | D2 Mosh 本机轻量门禁 | `git diff --check`、Tauri/package/capability 严格 JSON、86-command manifest/handler 与 desktop+Android capability 完整对齐、桌面 Mosh 单授权/Android 零暴露、3 个 Mosh 模块测试与安全回归静态契约、固定 server/predict/UDP、安全 target/identity/bootstrap 字符、无 `MOSH_KEY` 处理、Linux 真实 marker fixture 和 workflow 安装项检查通过；无 `node_modules`/`target`，根分区 48%。VPS 无 Cargo/rustfmt/本地 TypeScript 依赖，未下载工具链、SDK、Mosh 或项目依赖；frontend、四平台 locked fmt/check/test、Linux 真实 SSH bootstrap/Mosh UDP fixture 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | D2 Mosh 首轮 Actions 与格式修复 | 提交 `c4f7f9b` 的 PR #1 run `32099974893` 已进入终态：frontend 生产构建和 Android aarch64 debug APK/Gradle unit gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告相同 6 处 `lib.rs` 排版差异后失败，locked check/test 与 Linux 真实 SSH bootstrap/Mosh UDP fixture 因而跳过。已严格按 Ubuntu job `95598476085` 的完整 runner 差异机械应用全部格式，不改行为；修复后本机 `git diff --check`、严格 JSON、86-command manifest/handler 唯一性与对齐、桌面 Mosh 单授权/Android 零暴露、3 个聚焦测试和真实 marker fixture、无 `MOSH_KEY` 生产处理及无 `node_modules`/`target` 检查通过，根分区保持 48%。VPS 继续不下载 Cargo/rustfmt、Mosh、SDK 或依赖；等待格式修复提交后的四平台 locked fmt/check/test、Linux 真实 fixture、frontend 与 Android 矩阵完整验证。 |
 | 2026-08-18 | D2 Mosh 第二轮 Actions 与清单回归修复 | 格式修复提交 `95c4224` 的 PR #1 run `32100553212` 已进入终态：frontend、Android aarch64 debug APK/Gradle unit gate、四平台 `cargo fmt --check` 与 locked check 均 `COMPLETED/SUCCESS`；Linux 真实 SSH bootstrap/Mosh UDP 测试 `real_mosh_terminal_when_configured` 通过，Linux 其余 214 项、Windows 其余 208 项及两个 macOS runner 各其余 213 项测试均通过。四个平台唯一失败是 `custom_command_manifest_matches_handler_and_capability` 仍断言新增 Mosh 前的 85 项，实际 manifest/handler 已为唯一 86 项；现将该防回归计数修正为 86，不改产品行为。修复后本机 `git diff --check`、严格 JSON、manifest/唯一项/handler/固定断言四项 86 对齐、桌面 Mosh 单授权/Android 零暴露及无 `node_modules`/`target` 检查通过，根分区从起始 48% 到交接前 50%；VPS 无 Cargo，未下载任何依赖。等待修复提交后的完整矩阵。 |
+| 2026-08-18 | D2 可选 Mosh 独立交互模式（Actions 完成） | 清单回归修复提交 `07101c4` 的 PR #1 run `32101043636` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 SSH bootstrap/Mosh UDP fixture 及 Android aarch64 debug APK/Gradle unit gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。真实 firewall、漫游、休眠、长时间断网和 Windows 原生可用性保持外部验收。 |
+| 2026-08-18 | D2 Relay 自建部署、轮换与恢复（待 Actions） | `RelayTokenSet` 现只允许 1–4 个不同 key id，`serve --token-file` 可重复加载私有 token；服务端按请求 key id 有界选择后验证完整 HMAC，未知/已撤销 token 不连接目标，删除磁盘文件不会伪装为内存撤销。新增真实回环测试先证明旧/新 token 同时认证，再以仅新 token 的重启实例证明旧 token 失败；另有空/重复/超限集合、未知 wire version 在认证前拒绝，以及 audit 故障实例拒绝后只能由全新健康实例恢复的测试。仓库新增无秘密环境示例、无 capability 的 hardened systemd unit、私有审计 logrotate 重启策略，`docs/RELAY.md` 给出构建校验、firewall/TLS 边界、重叠轮换/紧急撤销、并行端口升级/回退及 audit/token/进程/限额故障恢复演练；安全回归继续锁定 Relay 不进入 Tauri command/capability/Android/WebView。真实主机部署、TLS/VPN、firewall、轮换执行、多区域和长时间网络仍为外部验收。 |
+| 2026-08-18 | D2 Relay 部署/恢复本机轻量门禁 | `git diff --check`、Tauri/package/capability 严格 JSON、86-command manifest/唯一项/handler 对齐、Relay 12 个测试及其中轮换/撤销/版本/audit 恢复 4 个关键测试静态清单、最多 4 token/重复 token 拒绝、重复 CLI token 路径解析、Relay 无 Tauri/Android/WebView surface、systemd capability/只读配置/私有可写审计/受限地址族、logrotate 私有创建与禁用 `copytruncate` 检查通过；`systemd-analyze verify` 只报告本 VPS 未安装文档目标 binary，`logrotate --debug` 只报告尚未创建外部部署用户。无 `node_modules`/`target`，根分区从起始 48% 到检查时 49%。VPS 无 Cargo/rustfmt，未下载工具链、依赖或服务；完整格式、编译、12 项 Relay 测试和四平台矩阵交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 Mosh 格式修复提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入自建部署文档、协议版本/升级/撤销与故障恢复演练。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN 部署保持外部验收；Android Sync capability 继续 disabled。
+等待 Relay 部署/轮换/恢复提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后重新扫描路线图、README 与 docs 的剩余代码/Actions 可实现项。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

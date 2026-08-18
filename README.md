@@ -169,7 +169,7 @@ VPShell 当前源码实现 `Direct`、用户显式配置的原生逐跳 route、
 Direct -> ProxyJump -> SOCKS5 -> HTTP CONNECT -> 用户自建 Relay -> 可选托管节点
 ```
 
-`vpshell-relay` 现在提供可运行的自建参考服务与本机回环 client：服务端用随机挑战/HMAC-SHA256 认证、精确目标 allowlist、连接/字节/时长限额和无敏感值 JSONL 审计，只转发最终 SSH 密文字节，不终止 SSH 或读取凭据。协议控制面不加密，目标元数据保护、TLS/VPN、firewall、日志轮换和多区域部署仍由运维者负责；没有真实部署和公开实测指标前，项目不会把它宣传成“海外智能加速”。部署和限制见 [docs/RELAY.md](docs/RELAY.md)。
+`vpshell-relay` 现在提供可运行的自建参考服务与本机回环 client：服务端用随机挑战/HMAC-SHA256 认证、精确目标 allowlist、连接/字节/时长限额和无敏感值 JSONL 审计，只转发最终 SSH 密文字节，不终止 SSH 或读取凭据。服务端支持最多 4 个 token 的有界重叠轮换，仓库提供 hardened systemd/logrotate 基线以及协议升级、撤销、回退和故障恢复演练；协议控制面仍不加密，真实 TLS/VPN、firewall、日志轮换执行和多区域部署由运维者外部验收。没有真实部署和公开实测指标前，项目不会把它宣传成“海外智能加速”。部署和限制见 [docs/RELAY.md](docs/RELAY.md)。
 
 网络诊断的“路线评估”由 Rust 在用户显式启动后执行。它最多比较 4 个原生 route；当前界面为同一目标生成直连和已配置跳板两种候选，每轮都完成逐跳认证、host-key pin 和最终 SFTP readiness。单个 campaign 限 30–300 秒间隔、3–20 轮滚动窗口和最多 120 轮；评分由成功率、中位数、P95 与失败惩罚组成，80% 成功率以下不推荐，15% 切换滞后避免小幅波动反复改变建议。快照只返回候选 ID、统计量和稳定错误码，关闭对话框即取消。它不自动修改 route，也不代表 UDP 丢包、吞吐、地域质量或“加速”效果。
 

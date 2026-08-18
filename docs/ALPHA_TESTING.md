@@ -150,9 +150,9 @@
 - 单跳 Linux 回环 fixture 必须继续实际完成 pin、公钥认证、两次共享 SFTP 浏览、PTY resize/字节收发和取消，证明 route 重构没有把现有直连退化为 mock。
 - 系统 OpenSSH fixture 必须使用生产参数构造器和精确写入的临时 host key 实际执行远端标记命令；请求未知字段、非 canonical UUID、选项式 host/user、0 端口、越界 PTY 和 ProxyCommand 注入都必须拒绝，credential/key reference 不能出现在 argv。单跳只允许密钥格式、认证算法协商和 RSA SHA-2 不可用三类原生错误携带 OpenSSH 回退；host-key 不匹配/未验证、认证失败/拒绝、取消、超时、无效请求和多跳 route 必须保持无回退字段。
 - 本地转发 IPC 不接受 `bindHost`、密码或 route 外凭据字段；监听必须固定为 `127.0.0.1`，0 端口由 OS 安全分配。远端转发 IPC 还必须拒绝 `targetHost`，最终 SSH 目标的监听与客户端目标都固定为 `127.0.0.1`；未登记、端点不匹配或超过 32 连接的 forwarded channel 必须在确认前拒绝。动态转发 IPC 只接受 UUID、route 和端口，固定回环监听；验证无认证 SOCKS5 CONNECT 的 IPv4/域名/IPv6 目标，并确认 BIND、UDP ASSOCIATE、未知地址类型、无效域名、零端口和超过 32 个连接 fail closed。Linux 双跳夹具的最终 sshd 只能 `PermitOpen` 自身测试端口、`PermitListen` 回环地址，测试必须分别经本地 listener、服务器分配的远端 listener 和动态 SOCKS5 listener 读取真实 SSH banner，停止后等待 Rust 代际清理；非回环监听始终不可用。
-- 自建 Relay 源码测试必须使用真实回环 TCP 完成 challenge/HMAC 双向 proof、opaque SSH-like 字节往返、错误 token、目标篡改/拒绝、challenge 重放、全局/单 IP/认证速率、字节/空闲/总时长/取消、audit fail-closed 和 token/audit 私有文件边界；command manifest、desktop/Android capability 与 WebView 状态中不得出现 Relay token 或启动入口。
+- 自建 Relay 源码测试必须使用真实回环 TCP 完成 challenge/HMAC 双向 proof、opaque SSH-like 字节往返、错误 token、目标篡改/拒绝、challenge 重放、全局/单 IP/认证速率、字节/空闲/总时长/取消、audit fail-closed、token/audit 私有文件边界、旧/新 token 重叠与撤销后拒绝，并证明未知 wire version 不协商或降级；command manifest、desktop/Android capability 与 WebView 状态中不得出现 Relay token 或启动入口。
 - 外部验收只在自有非生产节点执行：Relay firewall 仅开放预期入口，allowlist 仅包含测试 SSH 目标；客户端仍须显示并验证最终 SSH host-key。分别测试错误 token、错误目标、断网、慢连接、限流、审计磁盘不可写和进程重启，确认没有开放代理、无凭据/SSH bytes/原始 IP/hostname 进入 JSONL。协议 v1 控制面不加密；未配置独立 ACL 或经审计 TLS/VPN 时不得把目标元数据称为保密。
-- 至少两地区节点、长时间丢包/重连、日志轮换、token 轮换/撤销和升级/回退尚未完成前，不宣称自动选路、线路加速或生产 Relay 服务。
+- 仓库 systemd/logrotate 基线及 token 轮换/撤销、升级/回退、audit/token 故障恢复 runbook 只提供可执行边界；至少两地区真实节点、长时间丢包/重连、真实日志轮换、TLS/VPN/firewall 和运维演练尚未外部完成前，不宣称自动选路、线路加速或生产 Relay 服务。
 - 路线评估请求必须拒绝非 canonical campaign UUID、空/超过 4 个候选、重复/非法 candidate ID、30 秒以下或 300 秒以上间隔、窗口/总轮数越界、未知字段和 hop 内明文 `password`。Android capability 必须排除 start/get/stop 三项命令。
 - 为同一测试目标配置可直连且可经跳板到达的两条 route；至少完成 3 轮，确认每轮都实际通过各自 host-key/pin 和认证并完成最终 SFTP readiness。错误 pin 应只返回对应候选与 `hopIndex` 的稳定错误码；快照不得包含 host、用户名、credentialRef、私钥路径或底层错误文本。
 - 人为使一条路线失败，确认成功率低于 80% 后不会被推荐；构造小于 15% 的评分波动，确认保持原建议并显示滞后原因。停止和关闭对话框均应取消在途连接且不再增加样本。该页面不得自动修改主机跳板配置，也不得显示 UDP 丢包、吞吐或“加速”结论。

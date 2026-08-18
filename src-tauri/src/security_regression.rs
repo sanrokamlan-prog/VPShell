@@ -221,6 +221,9 @@ mod tests {
     fn relay_is_a_desktop_binary_without_webview_or_secret_audit_surface() {
         let relay = include_str!("relay.rs");
         let binary = include_str!("bin/vpshell-relay.rs");
+        let service = include_str!("../../deploy/relay/vpshell-relay.service");
+        let environment = include_str!("../../deploy/relay/relay.env.example");
+        let logrotate = include_str!("../../deploy/relay/vpshell-relay.logrotate");
         let manifest = include_str!("../command_manifest.txt");
         let desktop = include_str!("../capabilities/default.json");
         let android = include_str!("../capabilities/android.json");
@@ -233,7 +236,19 @@ mod tests {
         assert!(binary.contains("relay-local-listener-must-be-loopback"));
         assert!(relay.contains("const CLIENT_DOMAIN: &[u8] = b\"vpshell-relay-v1-client\""));
         assert!(relay.contains("const SERVER_DOMAIN: &[u8] = b\"vpshell-relay-v1-server\""));
+        assert!(relay.contains("MAX_ACTIVE_TOKENS: usize = 4"));
+        assert!(relay.contains("pub struct RelayTokenSet"));
         assert!(relay.contains("pub struct RelayAuditEvent"));
+        assert!(binary.contains("\"--token-file\" => token_paths.push"));
+        assert!(service.contains("NoNewPrivileges=true"));
+        assert!(service.contains("ProtectSystem=strict"));
+        assert!(service.contains("ReadOnlyPaths=/etc/vpshell-relay"));
+        assert!(service.contains("ReadWritePaths=/var/log/vpshell-relay"));
+        assert!(service.contains("RestrictAddressFamilies=AF_INET AF_INET6"));
+        assert!(!environment.to_ascii_lowercase().contains("token="));
+        assert!(logrotate.contains("create 0600 vpshell-relay vpshell-relay"));
+        assert!(logrotate.contains("systemctl try-restart vpshell-relay.service"));
+        assert!(!logrotate.contains("copytruncate"));
         for forbidden_field in [
             "pub token:",
             "pub key_id:",

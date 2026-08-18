@@ -1,5 +1,9 @@
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use tokio::net::TcpListener;
@@ -9,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use vpshell_lib::relay::{
     JsonLineAudit, RelayClientConfig, RelayLimits, RelayServerConfig, RelayTarget, RelayToken,
-    run_local_connector, serve,
+    RelayTokenSet, run_local_connector, serve,
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -42,12 +46,19 @@ async fn run() -> Result<(), &'static str> {
         }
         Some("serve") => {
             let listen = parse_socket_addr(&required_value(&mut arguments, "--listen")?)?;
-            let token_path = required_path(&mut arguments, "--token-file")?;
+            let first_token_path = required_path(&mut arguments, "--token-file")?;
+            let mut token_paths = vec![PathBuf::from(first_token_path)];
             let mut targets = Vec::new();
             let mut audit_path = None;
             let mut limits = RelayLimits::default();
             while let Some(argument) = arguments.next() {
                 match argument.as_str() {
+                    "--token-file" => token_paths.push(PathBuf::from(
+                        arguments
+                            .next()
+                            .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                            .ok_or("relay-cli-arguments-invalid")?,
+                    )),
                     "--allow-target" => targets.push(RelayTarget::parse(
                         &arguments.next().ok_or("relay-cli-arguments-invalid")?,
                     )?),
@@ -70,7 +81,7 @@ async fn run() -> Result<(), &'static str> {
                     _ => return Err("relay-cli-arguments-invalid"),
                 }
             }
-            let token = Arc::new(RelayToken::load(Path::new(&token_path))?);
+            let tokens = Arc::new(RelayTokenSet::load_files(&token_paths)?);
             let server_config = RelayServerConfig {
                 allowed_targets: targets,
                 limits,
@@ -90,7 +101,7 @@ async fn run() -> Result<(), &'static str> {
             serve(
                 listener,
                 server_config,
-                token,
+                tokens,
                 audit,
                 CancellationToken::new(),
             )
