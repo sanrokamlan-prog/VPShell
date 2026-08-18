@@ -14,8 +14,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::sync_merge::{
-    EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection,
-    entity_fields_are_syncable,
+    EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection, entity_fields_are_syncable,
 };
 
 const STORE_SCHEMA_VERSION: i64 = 4;
@@ -888,9 +887,7 @@ fn script_objects(
         .filter(|script| script.get("custom").and_then(Value::as_bool) == Some(true))
         .filter_map(|script| {
             let local_id = script.get("id")?.as_str()?;
-            if local_id.is_empty()
-                || local_id.len() > 128
-                || local_id.chars().any(char::is_control)
+            if local_id.is_empty() || local_id.len() > 128 || local_id.chars().any(char::is_control)
             {
                 return None;
             }
@@ -1261,7 +1258,8 @@ fn apply_script_projection_fields(
     let local_risk = script.get("risk").and_then(Value::as_str);
     let risk = local_risk
         .filter(|risk| risk_rank(risk) > risk_rank(remote_risk))
-        .unwrap_or(remote_risk);
+        .unwrap_or(remote_risk)
+        .to_string();
     let parameters = match fields.get("parameters") {
         Some(FieldValue::TextList(values)) => values.clone(),
         None | Some(FieldValue::Clear) => Vec::new(),
@@ -1272,11 +1270,11 @@ fn apply_script_projection_fields(
     script.insert("title".to_string(), Value::String(title));
     script.insert("command".to_string(), Value::String(command));
     script.insert("sourceUrl".to_string(), Value::String(source));
-    script.insert("risk".to_string(), Value::String(risk.to_string()));
+    script.insert("risk".to_string(), Value::String(risk));
     script.insert("custom".to_string(), Value::Bool(true));
-    script.entry("description".to_string()).or_insert_with(|| {
-        Value::String("从加密同步恢复的自建脚本".to_string())
-    });
+    script
+        .entry("description".to_string())
+        .or_insert_with(|| Value::String("从加密同步恢复的自建脚本".to_string()));
     script
         .entry("category".to_string())
         .or_insert_with(|| Value::String("我的脚本".to_string()));
@@ -1970,8 +1968,7 @@ impl AppStore {
             .and_then(Value::as_array)
             .ok_or_else(|| "AppState scripts 损坏".to_string())?
             .clone();
-        let (mut entity_by_local, mut local_by_entity) =
-            load_script_entity_mappings(&transaction)?;
+        let (mut entity_by_local, mut local_by_entity) = load_script_entity_mappings(&transaction)?;
         let mut used_local_ids = entity_by_local.keys().cloned().collect::<BTreeSet<_>>();
         for value in &current_scripts {
             if let Some(local_id) = value
@@ -2450,7 +2447,10 @@ mod tests {
         };
         assert_eq!(fields["name"], FieldValue::Text("Public audit".into()));
         assert_eq!(fields["risk"], FieldValue::Text("caution".into()));
-        assert_eq!(fields["parameters"], FieldValue::TextList(vec!["TARGET".into()]));
+        assert_eq!(
+            fields["parameters"],
+            FieldValue::TextList(vec!["TARGET".into()])
+        );
         assert!(!fields.contains_key("description"));
         assert!(!fields.contains_key("category"));
         assert!(!serde_json::to_string(fields).unwrap().contains("hidden"));

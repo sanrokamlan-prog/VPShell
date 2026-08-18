@@ -1287,9 +1287,11 @@ mod tests {
         assert_eq!(state["scripts"][0]["category"], "local category");
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
         for encoded in provider.objects.lock().unwrap().values() {
-            assert!(!encoded.windows("local description".len()).any(|window| {
-                window == "local description".as_bytes()
-            }));
+            assert!(
+                !encoded
+                    .windows("local description".len())
+                    .any(|window| { window == "local description".as_bytes() })
+            );
         }
     }
 
