@@ -1330,10 +1330,7 @@ fn command_history_sync_fields(
             "hostId".to_string(),
             FieldValue::Text(host_entity_ids.get(text("hostId")?)?.clone()),
         ),
-        (
-            "kind".to_string(),
-            FieldValue::Text("command".to_string()),
-        ),
+        ("kind".to_string(), FieldValue::Text("command".to_string())),
         (
             "remotePath".to_string(),
             FieldValue::Text(text("path")?.to_string()),
@@ -1409,14 +1406,14 @@ fn queue_command_history_sync_changes(
         }
     }
     let pending: i64 = transaction
-        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+            row.get(0)
+        })
         .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
     let available = MAX_PENDING_SYNC_CHANGES.saturating_sub(pending).max(0) as usize;
     if changes.len() > available {
         if previous.is_some() {
-            return Err(
-                "AppState 同步 changefeed 已达到 10000 项上限；请先完成同步".to_string(),
-            );
+            return Err("AppState 同步 changefeed 已达到 10000 项上限；请先完成同步".to_string());
         }
         changes.truncate(available);
     }
@@ -3261,7 +3258,9 @@ impl AppStore {
             }
         }
         let pending: i64 = transaction
-            .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+                row.get(0)
+            })
             .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
         if pending != 0 {
             return Ok(ProjectionOutcome::Deferred);
@@ -3285,8 +3284,7 @@ impl AppStore {
         let root = next_value
             .as_object_mut()
             .ok_or_else(|| "AppState 根对象损坏".to_string())?;
-        let (host_entity_by_local, host_local_by_entity) =
-            load_host_entity_mappings(&transaction)?;
+        let (host_entity_by_local, host_local_by_entity) = load_host_entity_mappings(&transaction)?;
         let (_, mut history_local_by_entity) = load_history_entity_mappings(&transaction)?;
         let active_host_ids = root
             .get("hosts")
@@ -3362,11 +3360,8 @@ impl AppStore {
                 "createdAt": created_at,
             }));
         }
-        projected.sort_by(|left, right| {
-            right["createdAt"]
-                .as_str()
-                .cmp(&left["createdAt"].as_str())
-        });
+        projected
+            .sort_by(|left, right| right["createdAt"].as_str().cmp(&left["createdAt"].as_str()));
         projected.append(&mut preserved);
         if projected.len() > 10_000 {
             return Err("远端命令历史同步投影超过 10000 项".to_string());
@@ -4332,7 +4327,10 @@ mod tests {
             .iter()
             .find(|change| change.entity_kind == EntityKind::History)
             .expect("safe command history change");
-        assert_eq!(Uuid::parse_str(&history.entity_id).unwrap().to_string(), history.entity_id);
+        assert_eq!(
+            Uuid::parse_str(&history.entity_id).unwrap().to_string(),
+            history.entity_id
+        );
         let LocalEntityMutation::Patch(history_fields) = &history.mutation else {
             panic!("command history must be patch");
         };
@@ -4341,7 +4339,11 @@ mod tests {
             history_fields["value"],
             FieldValue::Text("systemctl status nginx".into())
         );
-        assert!(!serde_json::to_string(history_fields).unwrap().contains("token"));
+        assert!(
+            !serde_json::to_string(history_fields)
+                .unwrap()
+                .contains("token")
+        );
         let history_entity_id = history.entity_id.clone();
         let mut remote_fields = history_fields.clone();
         remote_fields.insert(
@@ -4384,8 +4386,16 @@ mod tests {
             serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
         let commands = projected["commandHistory"].as_array().unwrap();
         assert_eq!(commands.len(), 2);
-        assert!(commands.iter().any(|item| item["command"] == "systemctl reload nginx"));
-        assert!(commands.iter().any(|item| item["command"] == "deploy --token=secret"));
+        assert!(
+            commands
+                .iter()
+                .any(|item| item["command"] == "systemctl reload nginx")
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|item| item["command"] == "deploy --token=secret")
+        );
         let mut cleared = projected;
         cleared["commandHistory"] = serde_json::json!([{
             "id": "legacy-history-secret",
@@ -4441,7 +4451,10 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(store.snapshot().unwrap().state_json, before_invalid.state_json);
+        assert_eq!(
+            store.snapshot().unwrap().state_json,
+            before_invalid.state_json
+        );
     }
 
     #[test]
@@ -5479,14 +5492,15 @@ mod tests {
         drop(store);
         let connection = open_connection(&database_path(&root.0)).unwrap();
         connection
-            .execute("DELETE FROM app_sync_changes WHERE entity_kind = 'history'", [])
+            .execute(
+                "DELETE FROM app_sync_changes WHERE entity_kind = 'history'",
+                [],
+            )
             .unwrap();
         connection
             .execute("DELETE FROM app_sync_history_state", [])
             .unwrap();
-        connection
-            .pragma_update(None, "user_version", 8)
-            .unwrap();
+        connection.pragma_update(None, "user_version", 8).unwrap();
         drop(connection);
 
         let migrated = AppStore::load(root.0.clone()).unwrap();

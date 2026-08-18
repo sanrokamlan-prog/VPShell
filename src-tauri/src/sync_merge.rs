@@ -1501,7 +1501,10 @@ fn field_allowed(kind: &EntityKind, field: &str) -> bool {
         ),
         EntityKind::Background => matches!(field, "kind" | "blobId" | "opacity"),
         EntityKind::History => {
-            matches!(field, "kind" | "value" | "hostId" | "remotePath" | "createdAt")
+            matches!(
+                field,
+                "kind" | "value" | "hostId" | "remotePath" | "createdAt"
+            )
         }
     }
 }
@@ -1787,11 +1790,7 @@ fn valid_iso_timestamp(value: &str) -> bool {
         2 => 28,
         _ => return false,
     };
-    year >= 1970
-        && (1..=maximum_day).contains(&day)
-        && hour <= 23
-        && minute <= 59
-        && second <= 59
+    year >= 1970 && (1..=maximum_day).contains(&day) && hour <= 23 && minute <= 59 && second <= 59
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -2269,7 +2268,10 @@ mod tests {
             ),
             ("hostId".to_string(), FieldValue::Text(HOST_ID.into())),
             ("kind".to_string(), FieldValue::Text("command".into())),
-            ("remotePath".to_string(), FieldValue::Text("/srv/app".into())),
+            (
+                "remotePath".to_string(),
+                FieldValue::Text("/srv/app".into()),
+            ),
             (
                 "value".to_string(),
                 FieldValue::Text("systemctl status nginx".into()),
