@@ -118,10 +118,11 @@
 | 完成 | 桌面标准 HTTPS WebDAV 产品入口、Rust 系统凭据引用、共享 bootstrap/协调器和自动调度接线；PR #1 run `32187922267`（`3e04035`）全平台 Actions 全绿 |
 | 完成 | 桌面 WebDAV 显式 PEM CA：Rust-owned 私有导入/引用/重读、失败清理、真实临时 CA TLS fixture 和 Android 禁权；PR #1 run `32190493641`（`717bb41`）全平台 Actions 全绿 |
 | 完成 | 背景可见度作为第五个固定 setting 实体接入事务 operation、远端投影和防回声；背景图片来源/资产仍保持本机；PR #1 run `32192743308`（`2c80942`）全平台 Actions 全绿 |
-| 进行中 | 通过秘密扫描的公开命令历史以稳定 history 实体、事务 operation、tombstone 和远端投影接入；路径/参数/连接历史仍保持未实现 |
-| 待实现 | 路径/参数/连接历史、背景图片 blob/其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
+| 完成 | 通过秘密扫描的公开命令历史以稳定 history 实体、事务 operation、tombstone 和远端投影接入；PR #1 run `32196254742`（`531ffe2`）全平台 Actions 全绿 |
+| 进行中 | 通过秘密扫描的公开路径历史以稳定 history 实体、事务 operation、tombstone 和远端投影接入；旧字符串无伪造时间保持本机 |
+| 待实现 | 参数/连接历史、背景图片 blob/其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、五个既有固定设置实体、桌面持久冲突中心及自动调度均已通过 Actions；公开命令历史正在实现，路径/参数/连接历史、背景图片 blob/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、五个既有固定设置实体、桌面持久冲突中心、自动调度及公开命令历史均已通过 Actions；公开路径历史正在实现，参数/连接历史、背景图片 blob/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -280,7 +281,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 公开命令历史格式修复本机轻量门禁 | `git diff --check`、Ubuntu/macOS/Windows runner 报告的 16 段精确 rustfmt 形态、四份严格 JSON、Android Sync 只读 capability、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区保持 53%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、依赖或 SDK；四平台 locked fmt/check/test、Linux 真实 fixture、frontend 与 Android 构建交给格式修复提交的 PR #1 Actions。 |
 | 2026-08-18 | B9 公开命令历史第二轮 Actions 与测试编译修复 | 格式修复提交 `94dd674` 的 PR #1 run `32195661109` 已全部进入终态：frontend 生产构建及 Android aarch64 debug APK/Gradle unit gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel/arm 的 locked rustfmt 与 `cargo check` 均成功，随后四个平台在 lib 测试目标编译时一致报告两处测试代码错误：coordinator 测试直接访问私有 `AppStoreSnapshot.state_json`（E0616），AppStore 测试在消费 `changes` 后继续使用其中借用的 `history_fields`（E0505），因此完整测试与 Linux 真实 fixture 未执行完毕。修复改用仓库既有的 serde 公共序列化形态读取 `stateJson`，并在消费集合前取得字段映射的 owned clone；产品代码、同步协议和运行时行为均未改变。 |
 | 2026-08-18 | B9 公开命令历史测试编译修复本机轻量门禁 | `git diff --check`、四份严格 JSON、两处 runner 精确错误位点的静态闭合、snapshot 公共序列化读取与 owned clone 生命周期顺序、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区保持 53%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、依赖或 SDK；四平台 locked fmt/check/test、Linux 真实 fixture、frontend 与 Android 构建交给测试编译修复提交的 PR #1 Actions。 |
+| 2026-08-18 | B9 公开命令历史双向同步（Actions 完成） | 测试编译修复提交 `531ffe2` 的 PR #1 run `32196254742` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 OpenSSH/SFTP 与临时 CA fixture 及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 公开路径历史双向同步（待 Actions） | `pathHistory` 改为每主机最多 100 条的 `{id,path,createdAt}` 结构；新访问使用随机 UUID 与真实 UTC 时间，旧裸字符串迁移为带空时间的本机 legacy 条目，不伪造历史时间。Rust 从 AppState 提取路径条目，以保留前缀和主机 ID 字节长度编码无歧义隔离命令/路径本机映射，只有绑定已同步主机、绝对路径或 `~` 路径、严格 UTC 时间且通过控制字符/长度/秘密扫描的条目才生成 `kind=path` 四字段 history patch；更新、去重、清空和主机移除沿用事务 changefeed、observed merge、加密 outbox、内容指纹与 tombstone。共享历史投影按 `kind` 分流，在主机投影之后原子写回每主机路径，未知主机不展示，legacy/秘密路径保持本机，完整投影统一推进 revision/hash 并防回声；单主机超过 100 条、相对路径、额外/缺失字段和错误类型 fail closed。路径栏展示最近 30 条并提供确认清空入口。聚焦测试覆盖协议完整形状/秘密和相对路径拒绝、AppStore 稳定身份/legacy 与秘密保留/远端更新/清空 tombstone/非法投影回滚，以及真实协调器周期同时上传命令与路径加密 operation。参数与连接历史仍未接线。 |
+| 2026-08-18 | B9 公开路径历史本机轻量门禁 | `git diff --check`、四份严格 JSON、前端 legacy/回收站迁移和结构化新增/去重/确认清空链路、命令与路径本机映射前缀隔离、path 四字段完整白名单/绝对路径/秘密扫描/时间验证、保存/迁移/恢复 changefeed 与 host→history 投影顺序、AppStore/merge/coordinator 三层聚焦测试静态清单、README/架构/同步/开发/Alpha 测试边界一致性、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区保持 53%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、前端依赖或 SDK；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送公开命令历史的测试编译修复；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后继续路径/参数历史的可删除安全模型或背景图片 blob 中的下一个安全闭环；不把连接尝试当作已认证成功记录同步，也不在缺少分块/安全安装时宣称背景图片同步完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送公开路径历史双向同步；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后继续参数历史的具名安全模型；连接历史必须以 Rust-owned 已认证成功事实为来源，不把前端连接尝试当作成功记录同步。背景图片 blob 也不在缺少分块、配额、回收和安全安装时宣称完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

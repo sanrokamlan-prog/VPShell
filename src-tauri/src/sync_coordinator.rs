@@ -738,7 +738,7 @@ impl SyncCoordinatorManager {
             .history_merge_projection()
             .map_err(journal_code)?;
         app_store
-            .apply_remote_command_history_projection(
+            .apply_remote_history_projection(
                 vault_id,
                 projection.revision,
                 &projection.entities,
@@ -781,7 +781,7 @@ impl SyncCoordinatorManager {
             .ensure_setting_sync_changes(now_ms)
             .map_err(|_| "app-state-handoff".to_string())?;
         app_store
-            .ensure_command_history_sync_changes(now_ms)
+            .ensure_history_sync_changes(now_ms)
             .map_err(|_| "app-state-handoff".to_string())?;
         Ok(())
     }
@@ -1967,6 +1967,13 @@ mod tests {
             "path": "/srv/app",
             "createdAt": "2026-08-18T22:30:00.000Z"
         }]);
+        state["pathHistory"] = serde_json::json!({
+            "host-local": [{
+                "id": "local-path-entry",
+                "path": "/srv/app",
+                "createdAt": "2026-08-18T22:29:00.000Z"
+            }]
+        });
         store
             .save(SaveAppStateRequest {
                 state_json: state.to_string(),
@@ -2013,7 +2020,7 @@ mod tests {
             .unwrap();
 
         let status = coordinator.run_once(&store, 1_000).unwrap();
-        assert_eq!(status.last_uploaded_objects, 2);
+        assert_eq!(status.last_uploaded_objects, 3);
         assert_eq!(status.last_downloaded_objects, 1);
         assert_eq!(status.open_conflicts, 1);
         let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
@@ -2025,6 +2032,7 @@ mod tests {
             "systemctl reload nginx"
         );
         assert_eq!(state["commandHistory"][0]["hostId"], "host-local");
+        assert_eq!(state["pathHistory"]["host-local"][0]["path"], "/srv/app");
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
     }
 

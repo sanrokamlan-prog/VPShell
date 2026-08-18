@@ -1,8 +1,8 @@
 # VPShell 加密同步设计
 
-当前实现补充：`onboardingCompleted`、默认监控采样频率与背景可见度已分别作为第三、第四、第五个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；它们分别只含一个布尔字段、一个 5–300 秒整数和一个 5%–65% 整数。通过秘密扫描的命令历史使用独立 `history` 实体、稳定 UUID 和 tombstone 接入同一链路；含明显秘密的记录保持本机。引导内容、运行中监控状态、路径/参数/连接历史、背景图片来源/资产及设备本地数据仍不入同步包。
+当前实现补充：`onboardingCompleted`、默认监控采样频率与背景可见度已分别作为第三、第四、第五个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；它们分别只含一个布尔字段、一个 5–300 秒整数和一个 5%–65% 整数。通过秘密扫描的命令与远端路径历史使用独立 `history` 实体、稳定 UUID 和 tombstone 接入同一链路；含明显秘密的记录和没有真实时间的旧路径条目保持本机。引导内容、运行中监控状态、参数/连接历史、背景图片来源/资产及设备本地数据仍不入同步包。
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 与 HTTPS WebDAV 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；WebDAV basic-auth 密码只保存到系统凭据管理器，前端持久状态/AppState 只保留随机引用。显式 PEM CA 由 Rust 限量导入应用私有目录，AppState 同样只保存本机随机引用，源路径和证书内容不持久化或同步。AppState 主机公开字段、安全自建脚本、五个固定设置实体和公开命令历史已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。桌面冲突中心以分页有界预览展示持久冲突，前端只回传 snapshot revision、conflict ID 和候选索引；Rust 从持久候选构造、加密并原子入队 resolution operation，再重投影 AppState。主机 credential/key/path/trust pin，provider 凭据，脚本描述、分类和未通过秘密扫描的内容，含明显秘密的命令历史，自定义字体资产/名称、背景图片来源/资产，以及设备本地编辑器路径不进入 operation，远端投影也不会替换这些本机数据。路径/参数/连接历史、背景图片 blob、其他尚未建模设置、扩展 provider 产品入口、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 与 HTTPS WebDAV 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；WebDAV basic-auth 密码只保存到系统凭据管理器，前端持久状态/AppState 只保留随机引用。显式 PEM CA 由 Rust 限量导入应用私有目录，AppState 同样只保存本机随机引用，源路径和证书内容不持久化或同步。AppState 主机公开字段、安全自建脚本、五个固定设置实体及公开命令/路径历史已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。桌面冲突中心以分页有界预览展示持久冲突，前端只回传 snapshot revision、conflict ID 和候选索引；Rust 从持久候选构造、加密并原子入队 resolution operation，再重投影 AppState。主机 credential/key/path/trust pin，provider 凭据，脚本描述、分类和未通过秘密扫描的内容，含明显秘密的命令/路径历史，自定义字体资产/名称、背景图片来源/资产，以及设备本地编辑器路径不进入 operation，远端投影也不会替换这些本机数据。参数/连接历史、背景图片 blob、其他尚未建模设置、扩展 provider 产品入口、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
 
 ### 当前 v1 密码学边界
 
@@ -87,7 +87,7 @@ COMMIT;
 
 当前 `sync_outbox.rs` 使用独立 `vpshell-sync.sqlite3` schema v2 落实 journal 内原子边界，并持久保存随机本机 device ID 与单调 HLC。调用者只能通过 Rust 内部闭包修改同一个 SQLite transaction；闭包不得执行网络、文件写入或其他不可回滚副作用。`sync_operations` 只保存已通过 v1 严格解析的加密信封，`sync_outbox` 保存状态/次数/租约/稳定错误码，业务明文、密码、私钥、credential ref、Token 和 provider 凭据不进入 journal。未发布最多 10,000 对象/256 MiB，整个 journal 最多 50,000 对象/384 MiB，数据库文件启动硬限制 512 MiB；已发布本地对象保留 30 天，远端 receipt 保留 90 天，但每设备持久高水位不会清理。
 
-远端 receipt 与 merge state 提交后，协调器从 journal 分别读取完整主机、脚本、setting 和命令历史投影，再交给 `vpshell-state.sqlite3` schema v9 的独立事务。schema v8 为第五个固定 setting 实体回填背景可见度内容指纹；schema v9 为命令历史建立稳定 ID、内容指纹和独立投影水位，升级回填按 changefeed 剩余容量分批恢复。业务库要求 vault 绑定一致、没有尚未交给 journal 的本地 change，并为四个实体域分别以 `(merge_revision, projection_hash)` 拒绝回退或同 revision 换内容。主机公开字段只覆盖公开字段，本机 credential/key path/host-key pin 和其他运行字段保留；新远端主机先获得持久本机 ID，jump route 必须能映射到最多三台仍活动的实体。脚本投影只创建或更新 `custom=true` 的白名单字段，保留现有 description/category；本机不安全或非自建脚本拒绝远端更新和删除，远端风险等级不能降低本机风险。setting 投影只接受终端外观、应用行为偏好、onboarding 状态、默认监控采样频率和背景可见度五个固定实体，分别要求恰好三个、两个、一个、一个和一个完整字段；它保留 `customFontName`/`externalEditorPath`、背景 `source/value` 与运行中监控状态，并按实体更新内容指纹。命令历史投影在主机之后执行，只展示能映射到活动本地主机的完整公开实体，保留未通过秘密扫描的本机记录，并以实体指纹防止普通保存形成回声。缺少必需字段、额外字段、悬空/已删除路线、无效脚本或超过 AppState 上限时对应投影事务整体回滚。专用投影写入不生成 changefeed，前端接受返回的 AppState snapshot/revision 时跳过一次自动保存。两个数据库之间以及四个业务投影事务之间崩溃时不伪称原子：下次周期即使远端对象已有 receipt，也会从持久 merge state 重试尚未记录 revision 的投影。
+远端 receipt 与 merge state 提交后，协调器从 journal 分别读取完整主机、脚本、setting 和 history 投影，再交给 `vpshell-state.sqlite3` schema v9 的独立事务。schema v8 为第五个固定 setting 实体回填背景可见度内容指纹；schema v9 为 history 建立稳定 ID、内容指纹和独立投影水位，升级回填按 changefeed 剩余容量分批恢复。业务库要求 vault 绑定一致、没有尚未交给 journal 的本地 change，并为四个实体域分别以 `(merge_revision, projection_hash)` 拒绝回退或同 revision 换内容。主机公开字段只覆盖公开字段，本机 credential/key path/host-key pin 和其他运行字段保留；新远端主机先获得持久本机 ID，jump route 必须能映射到最多三台仍活动的实体。脚本投影只创建或更新 `custom=true` 的白名单字段，保留现有 description/category；本机不安全或非自建脚本拒绝远端更新和删除，远端风险等级不能降低本机风险。setting 投影只接受终端外观、应用行为偏好、onboarding 状态、默认监控采样频率和背景可见度五个固定实体，分别要求恰好三个、两个、一个、一个和一个完整字段；它保留 `customFontName`/`externalEditorPath`、背景 `source/value` 与运行中监控状态，并按实体更新内容指纹。history 投影在主机之后执行，按 `kind` 分流命令与每主机路径，只展示能映射到活动本地主机的完整公开实体，保留未通过秘密扫描或没有真实时间的本机记录，并以实体指纹防止普通保存形成回声。缺少必需字段、额外字段、悬空/已删除路线、无效脚本或超过 AppState 上限时对应投影事务整体回滚。专用投影写入不生成 changefeed，前端接受返回的 AppState snapshot/revision 时跳过一次自动保存。两个数据库之间以及四个业务投影事务之间崩溃时不伪称原子：下次周期即使远端对象已有 receipt，也会从持久 merge state 重试尚未记录 revision 的投影。
 
 worker claim 使用两分钟租约；进程中断后的过期租约不会立即重放，而是进入 `retry_wait`。网络、超时、限流和远端暂不可用按 2/4/8/16/32 秒退避，最多六次且单次最长五分钟；协议、认证、不可变冲突和完整性错误直接进入 `permanent_failure`。取消进入 `paused`，只能显式恢复且不重置尝试次数；`published` 是不可逆终态。损坏、截断或超过 512 MiB 的 journal 最多保留两个隔离备份，新库写入 `reconcile-required`；协调器会保持停止并只报告状态，远端核对和显式解除流程未接线前不能自动继续上传。
 
@@ -258,9 +258,9 @@ Operation
 
 ## 11. 合并规则
 
-### 11.1 历史事件与可删除命令历史
+### 11.1 历史事件与可删除命令/路径历史
 
-协议保留不可变 history event，按 `event_id` 取并集，供后续远端路径、参数使用和脚本运行记录使用。当前产品命令历史不走该 append-only 路径，而是使用稳定 UUID 的 `history` 实体；完整 patch 必须恰好包含 `kind=command`、公开命令、同步 host UUID、远端路径和严格 UTC 时间，清空或主机删除生成因果 tombstone。这样离线设备不能在缺少删除语义时重新带回已清空命令。
+协议保留不可变 history event，按 `event_id` 取并集，供后续参数使用和脚本运行记录使用。当前产品命令与远端路径历史不走该 append-only 路径，而是使用稳定 UUID 的 `history` 实体；命令完整 patch 必须恰好包含 `kind=command`、公开命令、同步 host UUID、远端路径和严格 UTC 时间，路径完整 patch 必须恰好包含 `kind=path`、公开绝对路径或 `~`、同步 host UUID 和严格 UTC 时间。清空、去重替换或主机删除生成因果 tombstone，这样离线设备不能在缺少删除语义时重新带回已清空历史。旧裸字符串路径没有可信发生时间，只迁移为本机条目，直到用户再次访问形成真实新记录才参与同步。
 
 本机文件路径带 `scope=local` 和 `device_id/platform`，只在原设备提供快捷切换；远端工作目录带 `scope=remote`，可按 `host_id` 在设备间同步。secret 参数值从不生成 history event。
 
@@ -284,7 +284,7 @@ LWW 只保证收敛，不保证业务选择正确。以下变化即使能自动�
 
 主机 trust pin 是本地安全状态。其他设备同步来的指纹只能作为待核对建议，不能静默替换本机已信任指纹。
 
-当前 `sync_merge.rs` 把 host/script/setting/background/history 字段列为协议白名单，operation/state 分别限制为 1 MiB/64 MiB，单 patch 64 字段，最多 10,000 实体、50,000 旧 history event、1,000 conflict 和 50,000 已应用 operation。字段 register 按 `(HLC physical, logical, device_id, operation_id)` 排序；相同 operation ID 不同内容拒绝为 replay。公开命令实体还限制 4,096 字节命令/路径、canonical host UUID、合法远端绝对路径或 `~`、严格 UTC 毫秒时间；明显密码/Token/Authorization/私钥和 credential ref 模式拒绝。后续参数历史仍必须明确非敏感参数名和值，不能直接复用命令历史入口。
+当前 `sync_merge.rs` 把 host/script/setting/background/history 字段列为协议白名单，operation/state 分别限制为 1 MiB/64 MiB，单 patch 64 字段，最多 10,000 实体、50,000 旧 history event、1,000 conflict 和 50,000 已应用 operation。字段 register 按 `(HLC physical, logical, device_id, operation_id)` 排序；相同 operation ID 不同内容拒绝为 replay。公开命令/路径实体限制 4,096 字节值、canonical host UUID、合法远端绝对路径或 `~`、严格 UTC 毫秒时间与各 kind 的完整字段形状；明显密码/Token/Authorization/私钥和 credential ref 模式拒绝。AppState 另限制每主机最多 100 条路径记录，界面只展示最近 30 条。后续参数历史仍必须明确非敏感参数名和值，不能直接复用命令或路径历史入口。
 
 删除 operation 保存它观察到的每字段 stamp。这样已观察编辑随后删除不会误报，未观察的离线编辑无论先到还是后到都会生成相同 conflict ID；默认 register/tombstone 仍确定性收敛。冲突 ID由实体/字段和排序后的双方内容计算，connection identity、脚本正文/来源、风险降低、并发删除和删除后编辑有独立原因。解决 operation 必须晚于双方；多个设备并发解决时仍按 stamp 选择同一结果，并支持保持删除或显式恢复。`sync_merge_state` 通过 expected revision 在调用者的 journal transaction 内读取、apply、写回，因此可与本地 outbox 或远端 receipt 原子提交。当前没有 Tauri IPC/后台 worker 展示该中心。
 
@@ -391,7 +391,7 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：桌面 Local Folder 和 HTTPS WebDAV 已接通初始化/解锁、主机公开字段、安全自建脚本、五个固定设置实体、公开命令历史的双向事务交接、持久冲突解决，以及手动与解锁期自动单周期；WebDAV 密码通过随机引用存入系统凭据管理器，显式 PEM CA 通过独立本机引用交给 Rust TLS 客户端。仍需路径/参数/连接历史、背景图片 blob/其他尚未建模设置业务域入队、真实外部服务器兼容矩阵及断网退避测试。
+3. **MVP provider**：桌面 Local Folder 和 HTTPS WebDAV 已接通初始化/解锁、主机公开字段、安全自建脚本、五个固定设置实体、公开命令/路径历史的双向事务交接、持久冲突解决，以及手动与解锁期自动单周期；WebDAV 密码通过随机引用存入系统凭据管理器，显式 PEM CA 通过独立本机引用交给 Rust TLS 客户端。仍需参数/连接历史、背景图片 blob/其他尚未建模设置业务域入队、真实外部服务器兼容矩阵及断网退避测试。
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心、分页详情和 Rust-owned 候选解决 operation 已接入协调器事务；仍需多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
 6. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。

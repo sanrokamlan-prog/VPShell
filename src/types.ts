@@ -98,6 +98,12 @@ export interface ConnectionHistoryItem {
   path: string;
 }
 
+export interface PathHistoryItem {
+  id: string;
+  path: string;
+  createdAt: string;
+}
+
 export interface DeletedHostItem {
   id: string;
   host: HostProfile;
@@ -105,7 +111,7 @@ export interface DeletedHostItem {
   expiresAt: string;
   commandHistory: CommandHistoryItem[];
   connectionHistory: ConnectionHistoryItem[];
-  pathHistory: string[];
+  pathHistory: PathHistoryItem[];
 }
 
 export interface SyncSettings {
@@ -149,7 +155,7 @@ export interface AppState {
   sshKeys: SshKeyProfile[];
   commandHistory: CommandHistoryItem[];
   connectionHistory: ConnectionHistoryItem[];
-  pathHistory: Record<string, string[]>;
+  pathHistory: Record<string, PathHistoryItem[]>;
   sync: SyncSettings;
   wallpaper: WallpaperSettings;
   terminalAppearance: TerminalAppearanceSettings;

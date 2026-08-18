@@ -34,6 +34,7 @@ const MAX_GENERAL_STRING_BYTES: usize = 64 * 1024;
 const MAX_WALLPAPER_VALUE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_SYNC_CHANGES: i64 = 10_000;
 const MAX_SYNCED_HOSTS: usize = 2_000;
+const PATH_HISTORY_LOCAL_KEY_PREFIX: &str = "vpshell-path-history:";
 
 const TOP_LEVEL_FIELDS: &[&str] = &[
     "hosts",
@@ -472,6 +473,13 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
             let state: Value = serde_json::from_str(&state_json)
                 .map_err(|error| format!("待迁移 AppState JSON 损坏: {error}"))?;
             queue_command_history_sync_changes(
+                &transaction,
+                None,
+                &state,
+                revision.max(1) as u64,
+                updated_at_ms.max(0),
+            )?;
+            queue_path_history_sync_changes(
                 &transaction,
                 None,
                 &state,
@@ -1274,7 +1282,11 @@ fn command_history_objects(
         let Some(local_id) = item.get("id").and_then(Value::as_str) else {
             continue;
         };
-        if local_id.is_empty() || local_id.len() > 128 || local_id.chars().any(char::is_control) {
+        if local_id.is_empty()
+            || local_id.len() > 128
+            || local_id.starts_with(PATH_HISTORY_LOCAL_KEY_PREFIX)
+            || local_id.chars().any(char::is_control)
+        {
             continue;
         }
         if result.insert(local_id.to_string(), item.clone()).is_some() {
@@ -1341,6 +1353,80 @@ fn command_history_sync_fields(
         ),
     ]);
     entity_fields_are_syncable(&EntityKind::History, &fields).then_some(fields)
+}
+
+fn path_history_storage_key(host_id: &str, local_id: &str) -> String {
+    format!("{}{local_id}", path_history_storage_prefix(host_id))
+}
+
+fn path_history_storage_prefix(host_id: &str) -> String {
+    format!("{PATH_HISTORY_LOCAL_KEY_PREFIX}{}:{host_id}", host_id.len())
+}
+
+fn path_history_objects(
+    value: Option<&Value>,
+) -> Result<BTreeMap<String, (String, serde_json::Map<String, Value>)>, String> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let root = ensure_object(value, "root")?;
+    let history = ensure_object(
+        root.get("pathHistory")
+            .ok_or_else(|| "本地状态缺少 pathHistory".to_string())?,
+        "pathHistory",
+    )?;
+    let mut result = BTreeMap::new();
+    for (host_id, entries) in history {
+        if host_id.is_empty() || host_id.len() > 128 || host_id.chars().any(char::is_control) {
+            continue;
+        }
+        for item in ensure_array(entries, "pathHistory item", 100)? {
+            let Some(item) = item.as_object() else {
+                continue;
+            };
+            let Some(local_id) = item.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if local_id.is_empty()
+                || local_id.len() > 128
+                || local_id.chars().any(char::is_control)
+            {
+                continue;
+            }
+            let storage_key = path_history_storage_key(host_id, local_id);
+            if result
+                .insert(storage_key, (host_id.clone(), item.clone()))
+                .is_some()
+            {
+                return Err("本地路径历史包含重复 ID".to_string());
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn path_history_sync_fields(
+    host_id: &str,
+    item: &serde_json::Map<String, Value>,
+    host_entity_ids: &BTreeMap<String, String>,
+) -> Option<BTreeMap<String, FieldValue>> {
+    let text = |field: &str| item.get(field).and_then(Value::as_str);
+    let fields = BTreeMap::from([
+        (
+            "createdAt".to_string(),
+            FieldValue::Text(text("createdAt")?.to_string()),
+        ),
+        (
+            "hostId".to_string(),
+            FieldValue::Text(host_entity_ids.get(host_id)?.clone()),
+        ),
+        ("kind".to_string(), FieldValue::Text("path".to_string())),
+        (
+            "value".to_string(),
+            FieldValue::Text(text("path")?.to_string()),
+        ),
+    ]);
+    validate_path_history_projection_fields(&fields).is_ok().then_some(fields)
 }
 
 fn queue_command_history_sync_changes(
@@ -1452,6 +1538,123 @@ fn queue_command_history_sync_changes(
                     params![entity_id],
                 )
                 .map_err(|error| format!("无法删除命令历史同步状态: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn queue_path_history_sync_changes(
+    transaction: &Transaction<'_>,
+    previous: Option<&Value>,
+    next: &Value,
+    revision: u64,
+    now: i64,
+) -> Result<(), String> {
+    let previous_history = path_history_objects(previous)?;
+    let next_history = path_history_objects(Some(next))?;
+    let local_ids = previous_history
+        .keys()
+        .chain(next_history.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let entity_ids = ensure_history_entity_ids(transaction, local_ids)?;
+    let (host_entity_ids, _) = load_host_entity_mappings(transaction)?;
+    let mut changes = Vec::new();
+    for (local_id, (host_id, item)) in &next_history {
+        let Some(fields) = path_history_sync_fields(host_id, item, &host_entity_ids) else {
+            continue;
+        };
+        let entity_id = &entity_ids[local_id];
+        let content_hash = sync_fields_hash(&fields)?;
+        let queued_hash: Option<String> = transaction
+            .query_row(
+                "SELECT content_hash FROM app_sync_history_state WHERE entity_id = ?1",
+                params![entity_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取路径历史同步状态: {error}"))?;
+        if queued_hash.as_deref() == Some(content_hash.as_str()) {
+            continue;
+        }
+        changes.push((
+            entity_id.clone(),
+            "patch",
+            Some(
+                serde_json::to_string(&fields)
+                    .map_err(|error| format!("无法编码脱敏路径历史变更: {error}"))?,
+            ),
+            Some(content_hash),
+        ));
+    }
+    for (local_id, (host_id, item)) in &previous_history {
+        let entity_id = &entity_ids[local_id];
+        let was_synced: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM app_sync_history_state WHERE entity_id = ?1)",
+                params![entity_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("无法读取路径历史删除状态: {error}"))?;
+        let remains_syncable = next_history
+            .get(local_id)
+            .and_then(|(next_host_id, next)| {
+                path_history_sync_fields(next_host_id, next, &host_entity_ids)
+            })
+            .is_some();
+        let was_syncable =
+            path_history_sync_fields(host_id, item, &host_entity_ids).is_some();
+        if was_synced && was_syncable && !remains_syncable {
+            changes.push((entity_id.clone(), "delete", None, None));
+        }
+    }
+    let pending: i64 = transaction
+        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
+    let available = MAX_PENDING_SYNC_CHANGES.saturating_sub(pending).max(0) as usize;
+    if changes.len() > available {
+        if previous.is_some() {
+            return Err("AppState 同步 changefeed 已达到 10000 项上限；请先完成同步".to_string());
+        }
+        changes.truncate(available);
+    }
+    let revision = i64::try_from(revision)
+        .map_err(|_| "AppState 同步 revision 超过 SQLite INTEGER".to_string())?;
+    for (entity_id, kind, fields_json, content_hash) in changes {
+        transaction
+            .execute(
+                "INSERT INTO app_sync_changes(
+                    operation_id, entity_id, mutation_kind, fields_json, state_revision,
+                    created_at_ms, entity_kind
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'history')",
+                params![
+                    Uuid::new_v4().to_string(),
+                    entity_id,
+                    kind,
+                    fields_json,
+                    revision,
+                    now
+                ],
+            )
+            .map_err(|error| format!("无法写入 AppState 路径历史同步 changefeed: {error}"))?;
+        if let Some(content_hash) = content_hash {
+            transaction
+                .execute(
+                    "INSERT INTO app_sync_history_state(entity_id, content_hash)
+                     VALUES (?1, ?2)
+                     ON CONFLICT(entity_id) DO UPDATE SET content_hash = excluded.content_hash",
+                    params![entity_id, content_hash],
+                )
+                .map_err(|error| format!("无法记录路径历史同步状态: {error}"))?;
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM app_sync_history_state WHERE entity_id = ?1",
+                    params![entity_id],
+                )
+                .map_err(|error| format!("无法删除路径历史同步状态: {error}"))?;
         }
     }
     Ok(())
@@ -1815,10 +2018,50 @@ fn validate_command_history_projection_fields(
                 "kind" | "value" | "hostId" | "remotePath" | "createdAt"
             )
         });
-    if !matches_shape || !entity_fields_are_syncable(&EntityKind::History, fields) {
+    let kind_matches = matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "command");
+    if !matches_shape
+        || !kind_matches
+        || !entity_fields_are_syncable(&EntityKind::History, fields)
+    {
         return Err("远端命令历史同步投影字段未通过协议验证".to_string());
     }
     Ok(())
+}
+
+fn validate_path_history_projection_fields(
+    fields: &BTreeMap<String, FieldValue>,
+) -> Result<(), String> {
+    let matches_shape = fields.len() == 4
+        && fields
+            .keys()
+            .all(|field| matches!(field.as_str(), "kind" | "value" | "hostId" | "createdAt"));
+    let kind_matches = matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "path");
+    let path_matches = matches!(fields.get("value"), Some(FieldValue::Text(value))
+        if value.len() <= 4096
+            && (value == "~" || value.starts_with('/') || value.starts_with("~/"))
+            && !value.chars().any(char::is_control));
+    if !matches_shape
+        || !kind_matches
+        || !path_matches
+        || !entity_fields_are_syncable(&EntityKind::History, fields)
+    {
+        return Err("远端路径历史同步投影字段未通过协议验证".to_string());
+    }
+    Ok(())
+}
+
+fn validate_history_projection_fields(
+    fields: &BTreeMap<String, FieldValue>,
+) -> Result<(), String> {
+    match fields.get("kind") {
+        Some(FieldValue::Text(value)) if value == "command" => {
+            validate_command_history_projection_fields(fields)
+        }
+        Some(FieldValue::Text(value)) if value == "path" => {
+            validate_path_history_projection_fields(fields)
+        }
+        _ => Err("远端历史同步投影 kind 无效".to_string()),
+    }
 }
 
 fn load_host_entity_mappings(
@@ -1869,7 +2112,7 @@ fn load_history_entity_mappings(
         let (local_id, entity_id) =
             row.map_err(|error| format!("命令历史同步身份映射损坏: {error}"))?;
         if local_id.is_empty()
-            || local_id.len() > 128
+            || local_id.len() > 384
             || local_id.chars().any(char::is_control)
             || Uuid::parse_str(&entity_id).is_err()
             || entity_by_local
@@ -2191,6 +2434,7 @@ impl AppStore {
         queue_script_sync_changes(&transaction, None, &state, 1, now)?;
         queue_setting_sync_changes(&transaction, None, &state, 1, now)?;
         queue_command_history_sync_changes(&transaction, None, &state, 1, now)?;
+        queue_path_history_sync_changes(&transaction, None, &state, 1, now)?;
         insert_event(
             &transaction,
             "legacy-local-storage-imported",
@@ -2314,6 +2558,13 @@ impl AppStore {
             now,
         )?;
         queue_command_history_sync_changes(
+            &transaction,
+            previous_value.as_ref(),
+            &next_value,
+            next_revision,
+            now,
+        )?;
+        queue_path_history_sync_changes(
             &transaction,
             previous_value.as_ref(),
             &next_value,
@@ -3185,7 +3436,7 @@ impl AppStore {
         })
     }
 
-    pub(crate) fn apply_remote_command_history_projection(
+    pub(crate) fn apply_remote_history_projection(
         &self,
         vault_id: &str,
         merge_revision: u64,
@@ -3193,26 +3444,26 @@ impl AppStore {
         now: i64,
     ) -> Result<ProjectionOutcome, String> {
         let vault_id = Uuid::parse_str(vault_id)
-            .map_err(|_| "AppState 命令历史同步 vault ID 无效".to_string())?
+            .map_err(|_| "AppState 历史同步 vault ID 无效".to_string())?
             .to_string();
         if now < 0 || projection.len() > 10_000 {
-            return Err("AppState 命令历史同步投影范围无效".to_string());
+            return Err("AppState 历史同步投影范围无效".to_string());
         }
         let mut seen = BTreeSet::new();
         for item in projection {
             let entity_id = Uuid::parse_str(&item.entity_id)
-                .map_err(|_| "远端命令历史同步实体 ID 无效".to_string())?
+                .map_err(|_| "远端历史同步实体 ID 无效".to_string())?
                 .to_string();
             if entity_id != item.entity_id || !seen.insert(entity_id) {
-                return Err("远端命令历史同步实体 ID 重复或不规范".to_string());
+                return Err("远端历史同步实体 ID 重复或不规范".to_string());
             }
             if let Some(fields) = &item.fields {
-                validate_command_history_projection_fields(fields)?;
+                validate_history_projection_fields(fields)?;
             }
         }
         let projection_hash = entity_projection_hash(projection)?;
         let merge_revision_sql = i64::try_from(merge_revision)
-            .map_err(|_| "AppState 命令历史同步 merge revision 超过 SQLite INTEGER".to_string())?;
+            .map_err(|_| "AppState 历史同步 merge revision 超过 SQLite INTEGER".to_string())?;
         let _guard = self
             .inner
             .lock
@@ -3221,7 +3472,7 @@ impl AppStore {
         let mut connection = open_connection(&self.inner.database_path)?;
         let transaction = connection
             .transaction()
-            .map_err(|error| format!("无法开始 AppState 命令历史同步投影事务: {error}"))?;
+            .map_err(|error| format!("无法开始 AppState 历史同步投影事务: {error}"))?;
         let bound_vault: Option<String> = transaction
             .query_row(
                 "SELECT vault_id FROM app_sync_binding WHERE singleton = 1",
@@ -3241,20 +3492,20 @@ impl AppStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
-            .map_err(|error| format!("无法读取 AppState 命令历史同步投影状态: {error}"))?;
+            .map_err(|error| format!("无法读取 AppState 历史同步投影状态: {error}"))?;
         if let Some((applied_revision, applied_hash)) = applied {
             if applied_revision < 0 {
-                return Err("AppState 命令历史同步投影 revision 损坏".to_string());
+                return Err("AppState 历史同步投影 revision 损坏".to_string());
             }
             let applied_revision = applied_revision as u64;
             if merge_revision < applied_revision {
-                return Err("AppState 命令历史同步投影 revision 回退".to_string());
+                return Err("AppState 历史同步投影 revision 回退".to_string());
             }
             if merge_revision == applied_revision {
                 if projection_hash == applied_hash {
                     return Ok(ProjectionOutcome::Unchanged);
                 }
-                return Err("相同 AppState 命令历史同步投影 revision 的内容不同".to_string());
+                return Err("相同 AppState 历史同步投影 revision 的内容不同".to_string());
             }
         }
         let pending: i64 = transaction
@@ -3294,19 +3545,38 @@ impl AppStore {
             .filter_map(|host| host.get("id").and_then(Value::as_str))
             .map(str::to_string)
             .collect::<BTreeSet<_>>();
-        let local_history = command_history_objects(Some(&current_value))?;
-        let preserved_ids = local_history
+        let local_commands = command_history_objects(Some(&current_value))?;
+        let preserved_command_ids = local_commands
             .iter()
             .filter(|(_, item)| command_history_sync_fields(item, &host_entity_by_local).is_none())
             .map(|(local_id, _)| local_id.as_str())
             .collect::<BTreeSet<_>>();
-        let mut preserved = local_history
+        let mut preserved_commands = local_commands
             .values()
             .filter(|item| command_history_sync_fields(item, &host_entity_by_local).is_none())
             .cloned()
             .map(Value::Object)
             .collect::<Vec<_>>();
-        let mut projected = Vec::new();
+        let local_paths = path_history_objects(Some(&current_value))?;
+        let preserved_path_ids = local_paths
+            .iter()
+            .filter(|(_, (host_id, item))| {
+                path_history_sync_fields(host_id, item, &host_entity_by_local).is_none()
+            })
+            .map(|(storage_key, _)| storage_key.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut projected_paths = BTreeMap::<String, Vec<Value>>::new();
+        for (_, (host_id, item)) in local_paths.iter().filter(|(_, (host_id, item))| {
+            path_history_sync_fields(host_id, item, &host_entity_by_local).is_none()
+        }) {
+            if active_host_ids.contains(host_id) {
+                projected_paths
+                    .entry(host_id.clone())
+                    .or_default()
+                    .push(Value::Object(item.clone()));
+            }
+        }
+        let mut projected_commands = Vec::new();
         let mut projected_hashes = Vec::new();
         for item in projection {
             let Some(fields) = &item.fields else {
@@ -3324,52 +3594,96 @@ impl AppStore {
             if !active_host_ids.contains(local_host_id.as_str()) {
                 continue;
             }
+            let history_kind = match fields.get("kind") {
+                Some(FieldValue::Text(value)) => value.as_str(),
+                _ => return Err("远端历史同步投影缺少 kind".to_string()),
+            };
             let local_id = if let Some(local_id) = history_local_by_entity.get(&item.entity_id) {
                 local_id.clone()
             } else {
-                let local_id = item.entity_id.clone();
+                let local_id = if history_kind == "path" {
+                    path_history_storage_key(local_host_id, &item.entity_id)
+                } else {
+                    item.entity_id.clone()
+                };
                 transaction
                     .execute(
                         "INSERT INTO app_sync_history_ids(local_id, entity_id) VALUES (?1, ?2)",
                         params![local_id, item.entity_id],
                     )
-                    .map_err(|error| format!("无法写入远端命令历史身份映射: {error}"))?;
+                    .map_err(|error| format!("无法写入远端历史身份映射: {error}"))?;
                 history_local_by_entity.insert(item.entity_id.clone(), local_id.clone());
                 local_id
             };
-            if preserved_ids.contains(local_id.as_str()) {
-                continue;
-            }
-            let command = match fields.get("value") {
+            let value = match fields.get("value") {
                 Some(FieldValue::Text(value)) => value.clone(),
-                _ => return Err("远端命令历史同步投影缺少 value".to_string()),
-            };
-            let path = match fields.get("remotePath") {
-                Some(FieldValue::Text(value)) => value.clone(),
-                _ => return Err("远端命令历史同步投影缺少 remotePath".to_string()),
+                _ => return Err("远端历史同步投影缺少 value".to_string()),
             };
             let created_at = match fields.get("createdAt") {
                 Some(FieldValue::Text(value)) => value.clone(),
-                _ => return Err("远端命令历史同步投影缺少 createdAt".to_string()),
+                _ => return Err("远端历史同步投影缺少 createdAt".to_string()),
             };
-            projected.push(serde_json::json!({
-                "id": local_id,
-                "command": command,
-                "hostId": local_host_id,
-                "path": path,
-                "createdAt": created_at,
-            }));
+            if history_kind == "command" {
+                if preserved_command_ids.contains(local_id.as_str()) {
+                    continue;
+                }
+                let path = match fields.get("remotePath") {
+                    Some(FieldValue::Text(value)) => value.clone(),
+                    _ => return Err("远端命令历史同步投影缺少 remotePath".to_string()),
+                };
+                projected_commands.push(serde_json::json!({
+                    "id": local_id,
+                    "command": value,
+                    "hostId": local_host_id,
+                    "path": path,
+                    "createdAt": created_at,
+                }));
+            } else if history_kind == "path" {
+                if preserved_path_ids.contains(local_id.as_str()) {
+                    continue;
+                }
+                let prefix = path_history_storage_prefix(local_host_id);
+                let path_local_id = local_id
+                    .strip_prefix(&prefix)
+                    .ok_or_else(|| "远端路径历史身份映射与主机不匹配".to_string())?;
+                projected_paths
+                    .entry(local_host_id.clone())
+                    .or_default()
+                    .push(serde_json::json!({
+                        "id": path_local_id,
+                        "path": value,
+                        "createdAt": created_at,
+                    }));
+            } else {
+                return Err("远端历史同步投影 kind 无效".to_string());
+            }
         }
-        projected
+        projected_commands
             .sort_by(|left, right| right["createdAt"].as_str().cmp(&left["createdAt"].as_str()));
-        projected.append(&mut preserved);
-        if projected.len() > 10_000 {
+        projected_commands.append(&mut preserved_commands);
+        if projected_commands.len() > 10_000 {
             return Err("远端命令历史同步投影超过 10000 项".to_string());
         }
-        root.insert("commandHistory".to_string(), Value::Array(projected));
+        let mut path_history = serde_json::Map::new();
+        for (host_id, mut entries) in projected_paths {
+            entries.sort_by(|left, right| {
+                right["createdAt"].as_str().cmp(&left["createdAt"].as_str())
+            });
+            if entries.len() > 100 {
+                return Err("远端路径历史同步投影单主机超过 100 项".to_string());
+            }
+            if !entries.is_empty() {
+                path_history.insert(host_id, Value::Array(entries));
+            }
+        }
+        root.insert(
+            "commandHistory".to_string(),
+            Value::Array(projected_commands),
+        );
+        root.insert("pathHistory".to_string(), Value::Object(path_history));
         validate_state_json(
             &serde_json::to_string(&next_value)
-                .map_err(|error| format!("无法编码 AppState 命令历史同步投影结果: {error}"))?,
+                .map_err(|error| format!("无法编码 AppState 历史同步投影结果: {error}"))?,
         )?;
         let changed = next_value != current_value;
         if changed {
@@ -3379,32 +3693,32 @@ impl AppStore {
             let next_revision_sql = i64::try_from(next_revision)
                 .map_err(|_| "AppState revision 超过 SQLite INTEGER".to_string())?;
             let next_json = serde_json::to_string(&next_value)
-                .map_err(|error| format!("无法编码 AppState 命令历史同步投影结果: {error}"))?;
+                .map_err(|error| format!("无法编码 AppState 历史同步投影结果: {error}"))?;
             transaction
                 .execute(
                     "UPDATE app_state SET schema_version = ?1, revision = ?2,
                         state_json = ?3, updated_at_ms = ?4 WHERE singleton = 1",
                     params![STORE_SCHEMA_VERSION, next_revision_sql, next_json, now],
                 )
-                .map_err(|error| format!("无法写入 AppState 命令历史同步投影: {error}"))?;
+                .map_err(|error| format!("无法写入 AppState 历史同步投影: {error}"))?;
             insert_event(
                 &transaction,
-                "sync-command-history-applied",
-                &["commandHistory".to_string()],
+                "sync-history-applied",
+                &changed_domains(Some(&current_value), &next_value),
                 now,
             )?;
             prune_events(&transaction, now)?;
         }
         transaction
             .execute("DELETE FROM app_sync_history_state", [])
-            .map_err(|error| format!("无法重置 AppState 命令历史同步状态: {error}"))?;
+            .map_err(|error| format!("无法重置 AppState 历史同步状态: {error}"))?;
         for (entity_id, content_hash) in projected_hashes {
             transaction
                 .execute(
                     "INSERT INTO app_sync_history_state(entity_id, content_hash) VALUES (?1, ?2)",
                     params![entity_id, content_hash],
                 )
-                .map_err(|error| format!("无法记录 AppState 远端命令历史同步状态: {error}"))?;
+                .map_err(|error| format!("无法记录 AppState 远端历史同步状态: {error}"))?;
         }
         transaction
             .execute(
@@ -3417,10 +3731,10 @@ impl AppStore {
                     projection_hash = excluded.projection_hash",
                 params![vault_id, merge_revision_sql, projection_hash],
             )
-            .map_err(|error| format!("无法推进 AppState 命令历史同步投影状态: {error}"))?;
+            .map_err(|error| format!("无法推进 AppState 历史同步投影状态: {error}"))?;
         transaction
             .commit()
-            .map_err(|error| format!("无法提交 AppState 命令历史同步投影事务: {error}"))?;
+            .map_err(|error| format!("无法提交 AppState 历史同步投影事务: {error}"))?;
         Ok(if changed {
             ProjectionOutcome::Applied
         } else {
@@ -3540,9 +3854,9 @@ impl AppStore {
             .map_err(|error| format!("无法提交 AppState 设置同步恢复事务: {error}"))
     }
 
-    pub(crate) fn ensure_command_history_sync_changes(&self, now: i64) -> Result<(), String> {
+    pub(crate) fn ensure_history_sync_changes(&self, now: i64) -> Result<(), String> {
         if now < 0 {
-            return Err("AppState 命令历史同步恢复时间不能为负数".to_string());
+            return Err("AppState 历史同步恢复时间不能为负数".to_string());
         }
         let _guard = self
             .inner
@@ -3552,7 +3866,7 @@ impl AppStore {
         let mut connection = open_connection(&self.inner.database_path)?;
         let transaction = connection
             .transaction()
-            .map_err(|error| format!("无法开始 AppState 命令历史同步恢复事务: {error}"))?;
+            .map_err(|error| format!("无法开始 AppState 历史同步恢复事务: {error}"))?;
         let existing: Option<(i64, String)> = transaction
             .query_row(
                 "SELECT revision, state_json FROM app_state WHERE singleton = 1",
@@ -3560,7 +3874,7 @@ impl AppStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
-            .map_err(|error| format!("无法读取待恢复 AppState 命令历史: {error}"))?;
+            .map_err(|error| format!("无法读取待恢复 AppState 历史: {error}"))?;
         if let Some((revision, state_json)) = existing {
             if revision < 0 {
                 return Err("AppState revision 损坏".to_string());
@@ -3573,10 +3887,17 @@ impl AppStore {
                 revision.max(1) as u64,
                 now,
             )?;
+            queue_path_history_sync_changes(
+                &transaction,
+                None,
+                &state,
+                revision.max(1) as u64,
+                now,
+            )?;
         }
         transaction
             .commit()
-            .map_err(|error| format!("无法提交 AppState 命令历史同步恢复事务: {error}"))
+            .map_err(|error| format!("无法提交 AppState 历史同步恢复事务: {error}"))
     }
 
     pub(crate) fn acknowledge_entity_sync_change(
@@ -4364,7 +4685,7 @@ mod tests {
         }
         assert_eq!(
             store
-                .apply_remote_command_history_projection(
+                .apply_remote_history_projection(
                     &vault_id,
                     3,
                     &[
@@ -4421,7 +4742,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .apply_remote_command_history_projection(
+                .apply_remote_history_projection(
                     &vault_id,
                     4,
                     &[MergedEntityProjection {
@@ -4441,7 +4762,7 @@ mod tests {
         );
         assert!(
             store
-                .apply_remote_command_history_projection(
+                .apply_remote_history_projection(
                     &vault_id,
                     5,
                     &[MergedEntityProjection {
@@ -4456,6 +4777,137 @@ mod tests {
             store.snapshot().unwrap().state_json,
             before_invalid.state_json
         );
+    }
+
+    #[test]
+    fn path_history_changefeed_filters_legacy_and_secrets_and_projects_tombstones() {
+        assert_ne!(
+            path_history_storage_key("host:a", "path"),
+            path_history_storage_key("host", "a:path")
+        );
+        let root = TempDir::new("path-history-sync");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["pathHistory"] = serde_json::json!({
+            "host-1": [
+                {
+                    "id": "path-safe",
+                    "path": "/srv/releases/current",
+                    "createdAt": "2026-08-18T23:30:00.000Z"
+                },
+                {
+                    "id": "path-secret",
+                    "path": "/srv/token=secret",
+                    "createdAt": "2026-08-18T23:29:00.000Z"
+                },
+                {
+                    "id": "legacy-path-0-0",
+                    "path": "/srv/legacy",
+                    "createdAt": ""
+                }
+            ]
+        });
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        store.bind_sync_vault(&vault_id).unwrap();
+        let changes = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 2);
+        let history = changes
+            .iter()
+            .find(|change| change.entity_kind == EntityKind::History)
+            .expect("safe path history change");
+        let history_entity_id = history.entity_id.clone();
+        let LocalEntityMutation::Patch(fields) = &history.mutation else {
+            panic!("path history must be patch");
+        };
+        assert_eq!(fields["kind"], FieldValue::Text("path".into()));
+        assert_eq!(
+            fields["value"],
+            FieldValue::Text("/srv/releases/current".into())
+        );
+        let fields = fields.clone();
+        let mut remote_fields = fields.clone();
+        remote_fields.insert(
+            "value".to_string(),
+            FieldValue::Text("/srv/releases/next".into()),
+        );
+        for change in changes {
+            store
+                .acknowledge_entity_sync_change(&vault_id, &change.operation_id)
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .apply_remote_history_projection(
+                    &vault_id,
+                    1,
+                    &[MergedEntityProjection {
+                        entity_id: history_entity_id.clone(),
+                        fields: Some(remote_fields),
+                    }],
+                    5_000,
+                )
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let snapshot = store.snapshot().unwrap();
+        let projected: Value =
+            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+        let paths = projected["pathHistory"]["host-1"].as_array().unwrap();
+        assert_eq!(paths.len(), 3);
+        assert!(paths.iter().any(|item| item["path"] == "/srv/releases/next"));
+        assert!(paths.iter().any(|item| item["path"] == "/srv/token=secret"));
+        assert!(paths.iter().any(|item| item["path"] == "/srv/legacy"));
+
+        let mut cleared = projected;
+        cleared["pathHistory"]["host-1"] = serde_json::json!([
+            {
+                "id": "path-secret",
+                "path": "/srv/token=secret",
+                "createdAt": "2026-08-18T23:29:00.000Z"
+            },
+            {
+                "id": "legacy-path-0-0",
+                "path": "/srv/legacy",
+                "createdAt": ""
+            }
+        ]);
+        store
+            .save(SaveAppStateRequest {
+                state_json: cleared.to_string(),
+                expected_revision: snapshot.revision,
+            })
+            .unwrap();
+        let deletion = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(deletion.len(), 1);
+        assert_eq!(deletion[0].entity_id, history_entity_id);
+        assert_eq!(deletion[0].mutation, LocalEntityMutation::Delete);
+
+        let mut invalid_fields = fields;
+        invalid_fields.insert(
+            "value".to_string(),
+            FieldValue::Text("relative/path".into()),
+        );
+        let before_invalid = store.snapshot().unwrap();
+        assert!(
+            store
+                .apply_remote_history_projection(
+                    &vault_id,
+                    2,
+                    &[MergedEntityProjection {
+                        entity_id: history_entity_id,
+                        fields: Some(invalid_fields),
+                    }],
+                    6_000,
+                )
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, before_invalid.revision);
     }
 
     #[test]

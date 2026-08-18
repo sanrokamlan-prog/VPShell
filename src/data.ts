@@ -1,10 +1,37 @@
-import type { AppState, ApplicationSettings, CommandRecipe, HostProfile, ScriptRecipe } from "./types";
+import type {
+  AppState,
+  ApplicationSettings,
+  CommandRecipe,
+  HostProfile,
+  PathHistoryItem,
+  ScriptRecipe,
+} from "./types";
 
 const legacyDemoHostIds = new Set([
   "host-sg-prod",
   "host-hk-gateway",
   "host-tokyo-test",
 ]);
+
+function normalizePathHistoryEntries(entries: unknown, scope: string): PathHistoryItem[] {
+  return (Array.isArray(entries) ? entries : []).flatMap((entry, entryIndex): PathHistoryItem[] => {
+    if (typeof entry === "string") {
+      return [{
+        id: `legacy-path-${scope}-${entryIndex}`,
+        path: entry,
+        createdAt: "",
+      }];
+    }
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as Partial<PathHistoryItem>;
+    if (typeof candidate.id !== "string"
+      || candidate.id.length === 0
+      || candidate.id.length > 128
+      || typeof candidate.path !== "string"
+      || typeof candidate.createdAt !== "string") return [];
+    return [{ id: candidate.id, path: candidate.path, createdAt: candidate.createdAt }];
+  });
+}
 
 export const builtInScripts: ScriptRecipe[] = [
   {
@@ -387,6 +414,9 @@ export const initialState: AppState = {
 
 /** Remove only the three profiles shipped as legacy demos and their exact references. */
 export function migratePersistedAppState(value: AppState): AppState {
+  const legacyPathHistory = (
+    value as unknown as { pathHistory?: Record<string, unknown[]> }
+  ).pathHistory;
   const sourceHosts = Array.isArray(value.hosts) ? value.hosts : [];
   const hosts = sourceHosts
     .filter((host) => !legacyDemoHostIds.has(host.id))
@@ -402,8 +432,20 @@ export function migratePersistedAppState(value: AppState): AppState {
       return directHost;
     });
   const pathHistory = Object.fromEntries(
-    Object.entries(value.pathHistory ?? {}).filter(([hostId]) => !legacyDemoHostIds.has(hostId)),
+    Object.entries(legacyPathHistory ?? {})
+      .filter(([hostId]) => !legacyDemoHostIds.has(hostId))
+      .map(([hostId, entries], hostIndex) => [
+        hostId,
+        normalizePathHistoryEntries(entries, String(hostIndex)),
+      ]),
   );
+  const deletedHosts = (value.deletedHosts ?? []).map((item, index) => {
+    const legacyItem = item as unknown as { pathHistory?: unknown };
+    return {
+      ...item,
+      pathHistory: normalizePathHistoryEntries(legacyItem.pathHistory, `deleted-${index}`),
+    };
+  });
   const settings = {
     ...initialState.settings,
     ...(value.settings ?? {}),
@@ -419,7 +461,7 @@ export function migratePersistedAppState(value: AppState): AppState {
     ...initialState,
     ...value,
     hosts,
-    deletedHosts: value.deletedHosts ?? [],
+    deletedHosts,
     commandHistory: (value.commandHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
     connectionHistory: (value.connectionHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
     pathHistory,

@@ -2797,8 +2797,27 @@ function App() {
               <Clock3 size={14} />
               <span>路径</span>
               <div className="path-chips">
-                {currentPathHistory.map((path) => <button type="button" key={path} onClick={() => setCommandInput(`cd ${path}`)}>{path}</button>)}
+                {currentPathHistory.slice(0, 30).map((item) => (
+                  <button type="button" key={item.id} onClick={() => setCommandInput(`cd ${item.path}`)}>{item.path}</button>
+                ))}
               </div>
+              {currentPathHistory.length > 0 ? (
+                <button
+                  className="icon-button compact"
+                  type="button"
+                  title="清空此主机的路径历史"
+                  aria-label="清空此主机的路径历史"
+                  onClick={() => {
+                    if (!window.confirm(`清空“${activeHost.name}”的路径历史吗？`)) return;
+                    setAppState((current) => ({
+                      ...current,
+                      pathHistory: { ...current.pathHistory, [activeHost.id]: [] },
+                    }));
+                  }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              ) : null}
             </div>
             <div className="composer-shell">
               {intentSuggestions.length > 0 ? (
@@ -2849,7 +2868,10 @@ function App() {
                   ...current,
                   pathHistory: {
                     ...current.pathHistory,
-                    [activeHost.id]: [path, ...(current.pathHistory[activeHost.id] ?? []).filter((item) => item !== path)].slice(0, 30),
+                    [activeHost.id]: [
+                      { id: crypto.randomUUID(), path, createdAt: new Date().toISOString() },
+                      ...(current.pathHistory[activeHost.id] ?? []).filter((item) => item.path !== path),
+                    ].slice(0, 100),
                   },
                 }));
               }}

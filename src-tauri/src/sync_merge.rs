@@ -1280,11 +1280,34 @@ pub(crate) fn entity_fields_are_syncable(
     kind: &EntityKind,
     fields: &BTreeMap<String, FieldValue>,
 ) -> bool {
-    !fields.is_empty()
+    let fields_valid = !fields.is_empty()
         && fields.len() <= MAX_FIELDS_PER_PATCH
         && fields
             .iter()
-            .all(|(field, value)| validate_field(kind, field, value).is_ok())
+            .all(|(field, value)| validate_field(kind, field, value).is_ok());
+    if !fields_valid || kind != &EntityKind::History {
+        return fields_valid;
+    }
+    match fields.get("kind") {
+        Some(FieldValue::Text(kind)) if kind == "command" => {
+            fields.len() == 5
+                && fields.keys().all(|field| {
+                    matches!(
+                        field.as_str(),
+                        "kind" | "value" | "hostId" | "remotePath" | "createdAt"
+                    )
+                })
+        }
+        Some(FieldValue::Text(kind)) if kind == "path" => {
+            fields.len() == 4
+                && fields
+                    .keys()
+                    .all(|field| matches!(field.as_str(), "kind" | "value" | "hostId" | "createdAt"))
+                && matches!(fields.get("value"), Some(FieldValue::Text(value))
+                    if value == "~" || value.starts_with('/') || value.starts_with("~/"))
+        }
+        _ => false,
+    }
 }
 
 fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeResult<()> {
@@ -1408,7 +1431,11 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
         {
             Ok(())
         }
-        (EntityKind::History, "kind", FieldValue::Text(value)) if value == "command" => Ok(()),
+        (EntityKind::History, "kind", FieldValue::Text(value))
+            if matches!(value.as_str(), "command" | "path") =>
+        {
+            Ok(())
+        }
         (EntityKind::History, "value", FieldValue::Text(value))
             if !value.is_empty()
                 && value.len() <= 4096
@@ -2331,6 +2358,47 @@ mod tests {
                 "createdAt".to_string(),
                 FieldValue::Text("2026-08-18".into()),
             )]),
+        ));
+    }
+
+    #[test]
+    fn path_history_entities_require_complete_public_remote_paths() {
+        let fields = BTreeMap::from([
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-18T23:30:00.000Z".into()),
+            ),
+            ("hostId".to_string(), FieldValue::Text(HOST_ID.into())),
+            ("kind".to_string(), FieldValue::Text("path".into())),
+            (
+                "value".to_string(),
+                FieldValue::Text("/srv/releases/current".into()),
+            ),
+        ]);
+        assert!(entity_fields_are_syncable(&EntityKind::History, &fields));
+        let mut relative = fields.clone();
+        relative.insert(
+            "value".to_string(),
+            FieldValue::Text("srv/releases".into()),
+        );
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &relative,
+        ));
+        let mut secret = fields.clone();
+        secret.insert(
+            "value".to_string(),
+            FieldValue::Text("/srv/token=secret".into()),
+        );
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &secret,
+        ));
+        let mut incomplete = fields;
+        incomplete.remove("createdAt");
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &incomplete,
         ));
     }
 
