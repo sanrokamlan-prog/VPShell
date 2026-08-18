@@ -3229,7 +3229,7 @@ mod tests {
             fields: Some(BTreeMap::from([(
                 "onboardingCompleted".to_string(),
                 FieldValue::Text("yes".into()),
-            ])),
+            )])),
         }];
         assert!(
             store
