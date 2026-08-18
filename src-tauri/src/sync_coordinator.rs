@@ -341,12 +341,8 @@ impl SyncCoordinatorManager {
                 }
                 let vault_id = uuid::Uuid::new_v4().to_string();
                 let vault_key = VaultKey::generate()?;
-                let keyslot = create_password_keyslot(
-                    password.as_bytes(),
-                    &vault_id,
-                    &vault_key,
-                    kdf,
-                )?;
+                let keyslot =
+                    create_password_keyslot(password.as_bytes(), &vault_id, &vault_key, kdf)?;
                 let bootstrap = encode_bootstrap(&SyncBootstrap {
                     format_version: BOOTSTRAP_FORMAT_VERSION,
                     vault_id: vault_id.clone(),
@@ -365,20 +361,19 @@ impl SyncCoordinatorManager {
                 (vault_id, vault_key)
             }
             LocalFolderSetupMode::Unlock => {
-                let encoded = provider
-                    .get(BOOTSTRAP_OBJECT_KEY, &cancellation)
-                    .map_err(|error| {
-                        if error.code == ProviderErrorCode::NotFound {
-                            "同步目录尚未初始化；请明确选择初始化新 vault".to_string()
-                        } else {
-                            provider_setup_error(&error)
-                        }
-                    })?;
+                let encoded =
+                    provider
+                        .get(BOOTSTRAP_OBJECT_KEY, &cancellation)
+                        .map_err(|error| {
+                            if error.code == ProviderErrorCode::NotFound {
+                                "同步目录尚未初始化；请明确选择初始化新 vault".to_string()
+                            } else {
+                                provider_setup_error(&error)
+                            }
+                        })?;
                 let bootstrap = decode_bootstrap(&encoded)?;
-                let vault_key = open_password_keyslot(
-                    password.as_bytes(),
-                    &bootstrap.password_keyslot,
-                )?;
+                let vault_key =
+                    open_password_keyslot(password.as_bytes(), &bootstrap.password_keyslot)?;
                 (bootstrap.vault_id, vault_key)
             }
         };
@@ -762,8 +757,8 @@ fn encode_bootstrap(bootstrap: &SyncBootstrap) -> Result<Vec<u8>, String> {
         return Err("同步 bootstrap 版本或 vault identity 无效".to_string());
     }
     bootstrap.password_keyslot.encode()?;
-    let encoded = serde_json::to_vec(bootstrap)
-        .map_err(|_| "无法编码同步 bootstrap".to_string())?;
+    let encoded =
+        serde_json::to_vec(bootstrap).map_err(|_| "无法编码同步 bootstrap".to_string())?;
     if encoded.is_empty() || encoded.len() > MAX_BOOTSTRAP_BYTES {
         return Err("同步 bootstrap 为空或超过 32 KiB 上限".to_string());
     }
@@ -1331,7 +1326,10 @@ mod tests {
             )
             .unwrap();
         assert!(unlocked.configured);
-        assert_eq!(coordinator.run_once(2_000).unwrap().phase, SyncCoordinatorPhase::Idle);
+        assert_eq!(
+            coordinator.run_once(2_000).unwrap().phase,
+            SyncCoordinatorPhase::Idle
+        );
     }
 
     #[test]
