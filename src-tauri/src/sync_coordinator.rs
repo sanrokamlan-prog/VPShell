@@ -1076,7 +1076,7 @@ mod tests {
             "wallpaper": {"source": "none", "value": "", "opacity": 0.2},
             "terminalAppearance": {"fontFamily": "Cascadia Code", "fontSize": 13, "lineHeight": 1.25},
             "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false, "packageTransfersEnabled": true},
-            "onboardingCompleted": true
+            "onboardingCompleted": false
         })
         .to_string()
     }

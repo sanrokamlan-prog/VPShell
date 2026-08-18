@@ -16,6 +16,8 @@ VPShell 是一个 Windows-first、最终覆盖 Windows、macOS 和 Linux 的 SSH
 
 ## 2. v0.1.0 已实现
 
+同步设置补充：`onboardingCompleted` 作为第三个固定 setting 实体仅同步布尔完成状态；引导内容和设备本地路径保持本机，远端回写不生成回声 change。
+
 v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 
 | 模块 | 已实现 | 当前限制 |

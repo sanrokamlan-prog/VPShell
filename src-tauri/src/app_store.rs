@@ -20,6 +20,7 @@ use crate::sync_merge::{
 const STORE_SCHEMA_VERSION: i64 = 6;
 const TERMINAL_APPEARANCE_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000001";
 const APPLICATION_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000002";
+const ONBOARDING_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000003";
 const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVENTS: i64 = 10_000;
@@ -1215,6 +1216,26 @@ fn default_application_preference_sync_fields() -> BTreeMap<String, FieldValue> 
     ])
 }
 
+fn onboarding_sync_fields(value: &Value) -> Result<BTreeMap<String, FieldValue>, String> {
+    let root = ensure_object(value, "root")?;
+    let completed = root
+        .get("onboardingCompleted")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "本地状态 onboardingCompleted 无效".to_string())?;
+    let fields = BTreeMap::from([(
+        "onboardingCompleted".to_string(),
+        FieldValue::Flag(completed),
+    )]);
+    if !entity_fields_are_syncable(&EntityKind::Setting, &fields) {
+        return Err("本地状态 onboardingCompleted 未通过同步字段验证".to_string());
+    }
+    Ok(fields)
+}
+
+fn default_onboarding_sync_fields() -> BTreeMap<String, FieldValue> {
+    BTreeMap::from([("onboardingCompleted".to_string(), FieldValue::Flag(false))])
+}
+
 fn sync_fields_hash(fields: &BTreeMap<String, FieldValue>) -> Result<String, String> {
     let encoded =
         serde_json::to_vec(fields).map_err(|error| format!("无法编码本地同步字段指纹: {error}"))?;
@@ -1325,6 +1346,15 @@ fn queue_setting_sync_changes(
         &default_application_preference_sync_fields(),
         revision,
         now,
+    )?;
+    queue_fixed_setting_sync_change(
+        transaction,
+        initial_state,
+        ONBOARDING_ENTITY_ID,
+        onboarding_sync_fields(next)?,
+        &default_onboarding_sync_fields(),
+        revision,
+        now,
     )
 }
 
@@ -1359,6 +1389,9 @@ fn validate_setting_projection_fields(
                         "autoUploadEditedFiles" | "packageTransfersEnabled"
                     )
                 })
+        }
+        ONBOARDING_ENTITY_ID => {
+            fields.len() == 1 && fields.keys().all(|field| field == "onboardingCompleted")
         }
         _ => false,
     };
@@ -2437,6 +2470,7 @@ impl AppStore {
             }
             if setting.entity_id != TERMINAL_APPEARANCE_ENTITY_ID
                 && setting.entity_id != APPLICATION_PREFERENCES_ENTITY_ID
+                && setting.entity_id != ONBOARDING_ENTITY_ID
             {
                 return Err("AppState 设置同步投影包含未接线实体".to_string());
             }
@@ -2529,6 +2563,10 @@ impl AppStore {
             .iter()
             .find(|setting| setting.entity_id == APPLICATION_PREFERENCES_ENTITY_ID)
             .and_then(|setting| setting.fields.as_ref());
+        let onboarding_fields = projection
+            .iter()
+            .find(|setting| setting.entity_id == ONBOARDING_ENTITY_ID)
+            .and_then(|setting| setting.fields.as_ref());
         if let Some(fields) = terminal_fields {
             let font_family = match fields.get("fontFamily") {
                 Some(FieldValue::Text(value)) => value.clone(),
@@ -2573,6 +2611,13 @@ impl AppStore {
                 "packageTransfersEnabled".to_string(),
                 Value::Bool(package_transfers_enabled),
             );
+        }
+        if let Some(fields) = onboarding_fields {
+            let completed = match fields.get("onboardingCompleted") {
+                Some(FieldValue::Flag(value)) => *value,
+                _ => return Err("远端设置同步投影缺少 onboardingCompleted".to_string()),
+            };
+            root.insert("onboardingCompleted".to_string(), Value::Bool(completed));
         }
         validate_state_json(
             &serde_json::to_string(&next_value)
@@ -2822,7 +2867,7 @@ mod tests {
             "wallpaper": {"source": "none", "value": "", "opacity": 0.2},
             "terminalAppearance": {"fontFamily": "Cascadia Code", "fontSize": 13, "lineHeight": 1.25},
             "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false, "packageTransfersEnabled": true},
-            "onboardingCompleted": true
+            "onboardingCompleted": false
         }).to_string()
     }
 
@@ -3114,6 +3159,84 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.snapshot().unwrap().revision, 3);
+    }
+
+    #[test]
+    fn onboarding_completion_changefeed_and_remote_projection_are_boolean_and_non_echoing() {
+        let root = TempDir::new("onboarding-setting");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        acknowledge_initial_host(&store, &vault_id);
+
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["onboardingCompleted"] = Value::Bool(true);
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        let changes = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].entity_id, ONBOARDING_ENTITY_ID);
+        let LocalEntityMutation::Patch(fields) = &changes[0].mutation else {
+            panic!("onboarding completion must be a patch");
+        };
+        assert_eq!(
+            fields,
+            &BTreeMap::from([(
+                "onboardingCompleted".to_string(),
+                FieldValue::Flag(true)
+            )])
+        );
+        store
+            .acknowledge_entity_sync_change(&vault_id, &changes[0].operation_id)
+            .unwrap();
+
+        let projection = vec![MergedEntityProjection {
+            entity_id: ONBOARDING_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([(
+                "onboardingCompleted".to_string(),
+                FieldValue::Flag(false),
+            )])),
+        }];
+        assert_eq!(
+            store
+                .apply_remote_setting_projection(&vault_id, 3, &projection, 5_000)
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let snapshot = store.snapshot().unwrap();
+        let projected: Value =
+            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+        assert_eq!(projected["onboardingCompleted"], false);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+        assert_eq!(
+            store
+                .apply_remote_setting_projection(&vault_id, 3, &projection, 5_001)
+                .unwrap(),
+            ProjectionOutcome::Unchanged
+        );
+
+        let invalid = vec![MergedEntityProjection {
+            entity_id: ONBOARDING_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([(
+                "onboardingCompleted".to_string(),
+                FieldValue::Text("yes".into()),
+            ])),
+        }];
+        assert!(
+            store
+                .apply_remote_setting_projection(&vault_id, 4, &invalid, 5_002)
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, snapshot.revision);
     }
 
     #[test]
@@ -3962,7 +4085,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(setting_states, 2);
+        assert_eq!(setting_states, 3);
     }
 
     #[test]

@@ -1376,6 +1376,7 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
             "autoUploadEditedFiles" | "packageTransfersEnabled",
             FieldValue::Flag(_),
         ) => Ok(()),
+        (EntityKind::Setting, "onboardingCompleted", FieldValue::Flag(_)) => Ok(()),
         (
             EntityKind::Setting,
             "terminalTheme" | "fontFamily" | "locale",
@@ -1457,6 +1458,7 @@ fn field_allowed(kind: &EntityKind, field: &str) -> bool {
                 | "locale"
                 | "autoUploadEditedFiles"
                 | "packageTransfersEnabled"
+                | "onboardingCompleted"
         ),
         EntityKind::Background => matches!(field, "kind" | "blobId" | "opacity"),
     }
@@ -2024,6 +2026,15 @@ mod tests {
                 "packageTransfersEnabled",
                 FieldValue::Flag(false),
             ),
+            patch(
+                75,
+                DEVICE_A,
+                105,
+                EntityKind::Setting,
+                HOST_ID,
+                "onboardingCompleted",
+                FieldValue::Flag(true),
+            ),
         ];
         let mut state = MergeState::default();
         for operation in &operations {
@@ -2032,6 +2043,10 @@ mod tests {
         assert_eq!(
             state.entity_fields(&EntityKind::Setting, HOST_ID).unwrap()["fontSize"],
             FieldValue::Integer(16)
+        );
+        assert_eq!(
+            state.entity_fields(&EntityKind::Setting, HOST_ID).unwrap()["onboardingCompleted"],
+            FieldValue::Flag(true)
         );
         assert_eq!(
             state.setting_projection().unwrap(),
@@ -2043,14 +2058,15 @@ mod tests {
                         "packageTransfersEnabled".to_string(),
                         FieldValue::Flag(false),
                     ),
+                    ("onboardingCompleted".to_string(), FieldValue::Flag(true)),
                 ])),
             }]
         );
         assert!(
             patch(
-                75,
+                76,
                 DEVICE_A,
-                105,
+                106,
                 EntityKind::Setting,
                 HOST_ID,
                 "packageTransfersEnabled",
