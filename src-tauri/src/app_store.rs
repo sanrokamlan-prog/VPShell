@@ -1336,8 +1336,7 @@ impl AppStore {
             .and_then(Value::as_array)
             .ok_or_else(|| "AppState deletedHosts 损坏".to_string())?
             .clone();
-        let (mut entity_by_local, mut local_by_entity) =
-            load_host_entity_mappings(&transaction)?;
+        let (mut entity_by_local, mut local_by_entity) = load_host_entity_mappings(&transaction)?;
         let mut used_local_ids = entity_by_local.keys().cloned().collect::<BTreeSet<_>>();
         for value in &current_hosts {
             if let Some(local_id) = value
@@ -1828,10 +1827,7 @@ mod tests {
         let state: Value = serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
         assert_eq!(state["hosts"][0]["name"], "Remote name");
         assert_eq!(state["hosts"][0]["host"], "remote.example");
-        assert_eq!(
-            state["hosts"][0]["credentialRef"],
-            "ssh-public-reference"
-        );
+        assert_eq!(state["hosts"][0]["credentialRef"], "ssh-public-reference");
         assert!(store.pending_host_sync_changes(128).unwrap().is_empty());
         assert_eq!(
             store
@@ -1925,10 +1921,7 @@ mod tests {
                 FieldValue::Text("target.example".to_string()),
             ),
             ("port".to_string(), FieldValue::Integer(22)),
-            (
-                "username".to_string(),
-                FieldValue::Text("root".to_string()),
-            ),
+            ("username".to_string(), FieldValue::Text("root".to_string())),
             ("group".to_string(), FieldValue::Clear),
             (
                 "environment".to_string(),

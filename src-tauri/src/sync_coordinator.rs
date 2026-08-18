@@ -509,17 +509,9 @@ impl SyncCoordinatorManager {
             }
         }
         self.check_generation(generation, cancellation)?;
-        let projection = self
-            .journal
-            .host_merge_projection()
-            .map_err(journal_code)?;
+        let projection = self.journal.host_merge_projection().map_err(journal_code)?;
         app_store
-            .apply_remote_host_projection(
-                vault_id,
-                projection.revision,
-                &projection.hosts,
-                now_ms,
-            )
+            .apply_remote_host_projection(vault_id, projection.revision, &projection.hosts, now_ms)
             .map_err(|_| "app-state-writeback".to_string())?;
         self.journal.prune(now_ms).map_err(journal_code)?;
         Ok(CycleCounts {
@@ -1171,13 +1163,7 @@ mod tests {
             &Uuid::new_v4().to_string(),
             Some(&remote_device),
             Some(1),
-            &operation_patch(
-                &remote_device,
-                1,
-                &entity_id,
-                "address",
-                "remote.example",
-            ),
+            &operation_patch(&remote_device, 1, &entity_id, "address", "remote.example"),
         )
         .unwrap()
         .encode()
