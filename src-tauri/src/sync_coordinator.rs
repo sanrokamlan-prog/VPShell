@@ -2016,9 +2016,9 @@ mod tests {
         assert_eq!(status.last_uploaded_objects, 2);
         assert_eq!(status.last_downloaded_objects, 1);
         assert_eq!(status.open_conflicts, 1);
-        let snapshot = store.snapshot().unwrap();
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
         let state: serde_json::Value =
-            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
         assert_eq!(state["commandHistory"].as_array().unwrap().len(), 1);
         assert_eq!(
             state["commandHistory"][0]["command"],

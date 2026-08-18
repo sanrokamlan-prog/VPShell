@@ -4345,6 +4345,7 @@ mod tests {
                 .contains("token")
         );
         let history_entity_id = history.entity_id.clone();
+        let history_fields = history_fields.clone();
         let mut remote_fields = history_fields.clone();
         remote_fields.insert(
             "value".to_string(),
