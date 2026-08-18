@@ -32,9 +32,16 @@ jobs:
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         shell: bash
-        timeout-minutes: 15
+        timeout-minutes: 45
         run: |
           set -euo pipefail
+          packages=(
+            libwebkit2gtk-4.1-dev
+            libappindicator3-dev
+            librsvg2-dev
+            openssh-server
+            patchelf
+          )
           for attempt in 1 2 3; do
             if sudo timeout 2m apt-get \
               -o Acquire::Retries=2 \
@@ -48,11 +55,25 @@ jobs:
             fi
             sleep "$((attempt * 5))"
           done
-          sudo timeout 12m env DEBIAN_FRONTEND=noninteractive apt-get \
+          for attempt in 1 2; do
+            if sudo timeout 15m env DEBIAN_FRONTEND=noninteractive apt-get \
+              -o Acquire::Retries=2 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              -o DPkg::Lock::Timeout=60 \
+              -o Dpkg::Use-Pty=0 \
+              install -y --no-install-recommends --download-only "${packages[@]}"; then
+              break
+            fi
+            if [[ "$attempt" == 2 ]]; then
+              exit 1
+            fi
+            sleep 5
+          done
+          sudo timeout 5m env DEBIAN_FRONTEND=noninteractive apt-get \
             -o DPkg::Lock::Timeout=60 \
             -o Dpkg::Use-Pty=0 \
-            install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev openssh-server patchelf
+            install -y --no-install-recommends --no-download "${packages[@]}"
       - name: Set up real OpenSSH/SFTP native-engine fixture
         if: runner.os == 'Linux'
         shell: bash
