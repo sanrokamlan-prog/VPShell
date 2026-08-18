@@ -292,8 +292,8 @@ impl TryFrom<StartSshRequest> for ValidatedStartSshRequest {
         }
         let session_id = match request.session_id {
             Some(value) => {
-                let parsed = uuid::Uuid::parse_str(&value)
-                    .map_err(|_| "终端会话标识无效".to_string())?;
+                let parsed =
+                    uuid::Uuid::parse_str(&value).map_err(|_| "终端会话标识无效".to_string())?;
                 if value.len() != 36 || parsed.to_string() != value {
                     return Err("终端会话标识无效".to_string());
                 }
@@ -371,10 +371,7 @@ fn openssh_terminal_arguments(request: &ValidatedStartSshRequest, kex: &str) -> 
         ]);
     }
     if request.credential_ref.is_some() || request.identity_passphrase_ref.is_some() {
-        arguments.extend([
-            "-o".to_string(),
-            "NumberOfPasswordPrompts=1".to_string(),
-        ]);
+        arguments.extend(["-o".to_string(), "NumberOfPasswordPrompts=1".to_string()]);
     }
     arguments.extend([
         "--".to_string(),
@@ -1517,9 +1514,7 @@ mod tests {
             username: "operator".to_string(),
             identity_file: Some("/tmp/vpshell-test-key".to_string()),
             credential_ref: Some("ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212".to_string()),
-            identity_passphrase_ref: Some(
-                "key-018f1f55-26f8-7a9f-9cd8-4d7558482213".to_string(),
-            ),
+            identity_passphrase_ref: Some("key-018f1f55-26f8-7a9f-9cd8-4d7558482213".to_string()),
             cols: Some(120),
             rows: Some(32),
         }
@@ -1649,10 +1644,9 @@ mod tests {
             .expect("OpenSSH test port")
             .parse()
             .expect("numeric OpenSSH test port");
-        let username =
-            std::env::var("VPSHELL_NATIVE_TEST_USER").expect("OpenSSH test username");
-        let identity_file = std::env::var("VPSHELL_NATIVE_TEST_IDENTITY_FILE")
-            .expect("OpenSSH test identity file");
+        let username = std::env::var("VPSHELL_NATIVE_TEST_USER").expect("OpenSSH test username");
+        let identity_file =
+            std::env::var("VPSHELL_NATIVE_TEST_IDENTITY_FILE").expect("OpenSSH test identity file");
         let request = ValidatedStartSshRequest::try_from(StartSshRequest {
             session_id: Some(uuid::Uuid::new_v4().to_string()),
             host,

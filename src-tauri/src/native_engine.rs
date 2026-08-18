@@ -3690,8 +3690,8 @@ mod tests {
             "native-engine-auth-negotiation-failed",
             "native-engine-rsa-sha2-unavailable",
         ] {
-            let error = NativeEngineError::new(code, "compatibility", false)
-                .with_terminal_fallback(1);
+            let error =
+                NativeEngineError::new(code, "compatibility", false).with_terminal_fallback(1);
             assert_eq!(error.fallback_engine, Some("openssh"));
             assert_eq!(
                 serde_json::to_value(error).unwrap()["fallbackEngine"],
@@ -3710,7 +3710,10 @@ mod tests {
         ] {
             let error =
                 NativeEngineError::new(code, "fail closed", false).with_terminal_fallback(1);
-            assert_eq!(error.fallback_engine, None, "unexpected fallback for {code}");
+            assert_eq!(
+                error.fallback_engine, None,
+                "unexpected fallback for {code}"
+            );
             assert!(
                 serde_json::to_value(error).unwrap()["fallbackEngine"].is_null(),
                 "serialized fallback for {code}"
