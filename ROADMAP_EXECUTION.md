@@ -105,10 +105,11 @@
 | 完成 | 默认关闭的凭据 vault，独立密钥域，秘密不进入日志/事件/明文包 |
 | 完成 | SFTP、S3-compatible、自建 Gateway 结构化 provider；TOTP 仅保护 Gateway 登录 |
 | 完成 | 篡改、重放、冲突、断网、截断、升级、恢复失败和真实 provider 测试报告 |
-| 进行中 | 桌面 Local Folder 产品入口：不可变 bootstrap、显式初始化/解锁、手动单周期、取消/锁定和 value-free 状态已接线，等待 Actions |
-| 待实现 | AppState operation 事务入队/合并回写、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
+| 完成 | 桌面 Local Folder 产品入口：不可变 bootstrap、显式初始化/解锁、手动单周期、取消/锁定和 value-free 状态；PR #1 run `32104797505` 全绿 |
+| 进行中 | AppState 主机公开字段保存事务 changefeed、稳定实体映射、observed merge operation、加密 outbox 与跨库幂等确认已接线，等待 Actions |
+| 待实现 | 远端 merge 到 AppState 的安全回写、其他业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归已完成，Rust 协调器内核也已接通 outbox/provider/merge；Local Folder 产品入口正在验证，但业务 operation、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口均已通过 Actions；主机公开字段的本地 operation 链路正在验证，但远端 AppState 回写、其他业务域、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
 
 ## Phase C：Android Preview
 
@@ -203,7 +204,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 桌面 Local Folder 初始化/解锁与手动单周期（待 Actions） | Rust coordinator 新增不可变 schema-v1 bootstrap：用户明确初始化时生成随机 vault/VMK并只写 Argon2id 认证 keyslot，解锁模式对缺失对象不隐式创建，初始化对已有对象不覆盖；密码仅在 `Zeroizing` 内存持有。桌面接入 value-free 状态、初始化/解锁、blocking 单周期、取消和锁定，顶部状态不再读取草稿布尔值；新增命令只在 desktop capability，Android 继续只读且 Sync disabled。聚焦测试覆盖初始化、bootstrap 无密码、错误/正确密码解锁、空目录、重复初始化、未知版本和空周期；AppState operation 入队/回写、自动调度、冲突解决、WebDAV 产品入口与真实多设备明确未完成。 |
 | 2026-08-18 | B9 Local Folder 产品入口本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest/唯一项/handler/capability 对齐、五个新增命令仅 desktop 授权且 Android 零暴露、bootstrap/version/mode/清零密码与无日志静态边界、CSS 括号、三项聚焦测试属性（含配置并发门）、无 `node_modules`/`target` 检查通过；根分区交接前 49%。VPS 无 Cargo/rustfmt/本地 TypeScript 依赖，未下载工具链、SDK 或项目依赖；frontend、四平台 locked fmt/check/test 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | B9 Local Folder 首轮 Actions 与格式修复 | 提交 `f0396b0` 的 PR #1 run `32104355927` 已进入终态：frontend 生产构建与 Android aarch64 debug APK/Gradle gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告 `sync_coordinator.rs` 相同 4 段 keyslot/bootstrap/断言排版差异后失败，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按 Ubuntu job `95610787756` 及其他平台一致输出机械应用全部差异，不改行为；等待格式修复提交后的四平台 locked fmt/check/test、frontend 与 Android 完整矩阵。 |
+| 2026-08-18 | B9 桌面 Local Folder 产品入口（Actions 完成） | 格式修复提交 `f80f85a` 的 PR #1 run `32104797505` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 AppState 主机 operation 事务交接（待 Actions） | `vpshell-state.sqlite3` 升级 schema v2：状态保存与最多 10,000 项 durable changefeed 同事务提交，v1 快照迁移时回填已有主机；本地 `host-*` 持久映射随机协议 UUID，patch 只含 name/address/port/username/group/environment/tags/jumpRoute，credentialRef、私钥/路径、host-key pin 和运行字段不进入 change。手动 worker 将 change 交给独立 schema-v2 sync journal：持久本机 device ID/seq/HLC，HLC 越过已观察远端 stamp，带 observed fields 构造具名 operation，并在 journal 单事务完成 AEAD、merge state 和 outbox；成功后才确认业务 change。两个 SQLite 提交之间崩溃时按 operation ID 解密核对实体/payload 后幂等确认，不伪称跨库原子；内容改变、vault 改绑或损坏均 fail closed。远端 merge 安全回写和其他业务域明确未完成。新增 changefeed 脱敏/敏感引用无 operation、删除稳定实体、v1 双库迁移、journal 原子幂等/内容绑定、远端时钟推进和 coordinator 加密上传后确认测试。 |
+| 2026-08-18 | B9 AppState operation 本机轻量门禁 | `git diff --check`、91-command handler/capability 数量不变、Android Sync capability 继续 disabled、五个改动 Rust 模块静态引用闭合、文档边界与无 `node_modules`/`target` 检查通过；根分区交接时 50%。VPS 无 Cargo/rustfmt/TypeScript 依赖，未下载工具链、SDK 或项目依赖；frontend、四平台 locked fmt/check/test 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待桌面 Local Folder 初始化/解锁与手动单周期提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入 AppState 到具名 merge operation/outbox 的事务入队与安全回写。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 AppState 主机 operation 事务交接提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入远端 merge 到 AppState 的事务安全回写。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

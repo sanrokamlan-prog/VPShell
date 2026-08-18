@@ -10,12 +10,18 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    sync_crypto::{EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object},
-    sync_merge::{MergeError, MergeErrorCode, apply_persisted_operation, load_persisted_state},
+    sync_crypto::{
+        EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object, encrypt_sync_object,
+    },
+    sync_merge::{
+        LocalHostMutation, MergeError, MergeErrorCode, advance_local_hlc,
+        apply_persisted_operation, build_local_host_operation, load_persisted_state,
+        local_host_operation_matches,
+    },
     sync_provider::validate_key,
 };
 
-const JOURNAL_SCHEMA_VERSION: i64 = 1;
+const JOURNAL_SCHEMA_VERSION: i64 = 2;
 const MAX_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PENDING_OBJECTS: i64 = 10_000;
 const MAX_STORED_OBJECTS: i64 = 50_000;
@@ -270,8 +276,9 @@ fn migrate_schema(connection: &mut Connection) -> JournalResult<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法开始同步 journal 迁移"))?;
-    transaction.execute_batch(
-        "CREATE TABLE sync_safety (
+    if version == 0 {
+        transaction.execute_batch(
+            "CREATE TABLE sync_safety (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
             blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)),
             reason TEXT
@@ -332,8 +339,46 @@ fn migrate_schema(connection: &mut Connection) -> JournalResult<()> {
             revision INTEGER NOT NULL CHECK (revision >= 0),
             state_blob BLOB NOT NULL,
             updated_at_ms INTEGER NOT NULL
-        );"
-    ).map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法创建同步 journal schema"))?;
+        );",
+        )
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法创建同步 journal schema"))?;
+    }
+    if version < 2 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_local_identity (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    device_id TEXT NOT NULL UNIQUE,
+                    last_hlc_ms INTEGER NOT NULL CHECK (last_hlc_ms >= 0),
+                    last_hlc_logical INTEGER NOT NULL CHECK (last_hlc_logical BETWEEN 0 AND 65535)
+                );",
+            )
+            .map_err(|_| {
+                JournalError::new(JournalErrorCode::Storage, "无法创建同步本机身份 schema")
+            })?;
+        let identity_exists: Option<i64> = transaction
+            .query_row(
+                "SELECT singleton FROM sync_local_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| {
+                JournalError::new(JournalErrorCode::Storage, "无法检查同步本机身份")
+            })?;
+        if identity_exists.is_none() {
+            transaction
+                .execute(
+                    "INSERT INTO sync_local_identity(
+                        singleton, device_id, last_hlc_ms, last_hlc_logical
+                     ) VALUES (1, ?1, 0, 0)",
+                    params![Uuid::new_v4().to_string()],
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法初始化同步本机身份")
+                })?;
+        }
+    }
     transaction
         .pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)
         .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入同步 journal schema"))?;
@@ -614,6 +659,98 @@ fn retry_delay_ms(attempt: u32) -> i64 {
         .min(MAX_RETRY_MS)
 }
 
+fn enqueue_local_in_transaction<F>(
+    transaction: &Transaction<'_>,
+    object_key: &str,
+    encrypted_object: &[u8],
+    object: &EncryptedSyncObject,
+    hash: &str,
+    now_ms: i64,
+    apply_business_change: F,
+) -> JournalResult<EnqueueOutcome>
+where
+    F: FnOnce(&Transaction<'_>) -> JournalResult<()>,
+{
+    ensure_unblocked(transaction)?;
+    let existing: Option<String> = transaction
+        .query_row(
+            "SELECT object_hash FROM sync_operations WHERE object_key = ?1",
+            params![object_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法检查同步 operation"))?;
+    if let Some(existing) = existing {
+        if existing == hash {
+            return Ok(EnqueueOutcome::AlreadyQueued);
+        }
+        return Err(JournalError::new(
+            JournalErrorCode::Conflict,
+            "同名同步 operation 的密文哈希不同",
+        ));
+    }
+    let relocated: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT object_key, object_hash FROM sync_operations
+             WHERE object_hash = ?1
+                OR (vault_id = ?2 AND object_kind = ?3 AND object_id = ?4)
+             LIMIT 1",
+            params![
+                hash,
+                object.vault_id(),
+                object_kind_label(object.object_kind()),
+                object.object_id(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| {
+            JournalError::new(JournalErrorCode::Storage, "无法核对同步 operation 身份")
+        })?;
+    if relocated.is_some() {
+        return Err(JournalError::new(
+            JournalErrorCode::Conflict,
+            "同步 operation 的密文或对象身份已由其他 key 使用",
+        ));
+    }
+    ensure_capacity(transaction, encrypted_object.len())?;
+    let sequence =
+        verify_next_sequence(transaction, "local", object.device_id(), object.sequence())?;
+    apply_business_change(transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO sync_operations(
+                object_key, object_hash, vault_id, object_kind, object_id, device_id, sequence,
+                encrypted_object, origin, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'local', ?9)",
+            params![
+                object_key,
+                hash,
+                object.vault_id(),
+                object_kind_label(object.object_kind()),
+                object.object_id(),
+                object.device_id(),
+                sequence,
+                encrypted_object,
+                now_ms,
+            ],
+        )
+        .map_err(|_| {
+            JournalError::new(JournalErrorCode::Storage, "无法写入本地同步 operation")
+        })?;
+    transaction
+        .execute(
+            "INSERT INTO sync_outbox(
+                object_key, state, attempt_count, next_attempt_ms, lease_id,
+                lease_expires_ms, last_error_code, published_at_ms, updated_at_ms
+             ) VALUES (?1, 'pending', 0, ?2, NULL, NULL, NULL, NULL, ?2)",
+            params![object_key, now_ms],
+        )
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入同步 outbox"))?;
+    update_head(transaction, "local", object, hash, sequence)?;
+    Ok(EnqueueOutcome::Queued)
+}
+
 impl SyncJournal {
     pub(crate) fn open(app_data_directory: PathBuf) -> JournalResult<Self> {
         fs::create_dir_all(&app_data_directory).map_err(|_| {
@@ -726,86 +863,202 @@ impl SyncJournal {
         let object = validate_envelope(encrypted_object)?;
         let hash = object_hash(encrypted_object);
         self.transaction(|transaction| {
+            enqueue_local_in_transaction(
+                transaction,
+                object_key,
+                encrypted_object,
+                &object,
+                &hash,
+                now_ms,
+                apply_business_change,
+            )
+        })
+    }
+
+    pub(crate) fn enqueue_local_host_change(
+        &self,
+        vault_key: &VaultKey,
+        vault_id: &str,
+        operation_id: &str,
+        entity_id: &str,
+        mutation: LocalHostMutation,
+        now_ms: i64,
+    ) -> JournalResult<EnqueueOutcome> {
+        validate_now(now_ms)?;
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        let operation_id = Uuid::parse_str(operation_id)
+            .map_err(|_| {
+                JournalError::new(JournalErrorCode::InvalidInput, "同步 operation ID 无效")
+            })?
+            .to_string();
+        let entity_id = Uuid::parse_str(entity_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 entity ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
             ensure_unblocked(transaction)?;
-            let existing: Option<String> = transaction
+            let existing: Option<(String, Vec<u8>)> = transaction
                 .query_row(
-                    "SELECT object_hash FROM sync_operations WHERE object_key = ?1",
-                    params![object_key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|_| {
-                    JournalError::new(JournalErrorCode::Storage, "无法检查同步 operation")
-                })?;
-            if let Some(existing) = existing {
-                if existing == hash {
-                    return Ok(EnqueueOutcome::AlreadyQueued);
-                }
-                return Err(JournalError::new(
-                    JournalErrorCode::Conflict,
-                    "同名同步 operation 的密文哈希不同",
-                ));
-            }
-            let relocated: Option<(String, String)> = transaction
-                .query_row(
-                    "SELECT object_key, object_hash FROM sync_operations
-                     WHERE object_hash = ?1
-                        OR (vault_id = ?2 AND object_kind = ?3 AND object_id = ?4)
-                     LIMIT 1",
-                    params![
-                        hash,
-                        object.vault_id(),
-                        object_kind_label(object.object_kind()),
-                        object.object_id(),
-                    ],
+                    "SELECT origin, encrypted_object FROM sync_operations
+                     WHERE vault_id = ?1 AND object_kind = 'event' AND object_id = ?2",
+                    params![vault_id, operation_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(|_| {
-                    JournalError::new(JournalErrorCode::Storage, "无法核对同步 operation 身份")
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法检查 AppState 同步 operation",
+                    )
                 })?;
-            if relocated.is_some() {
+            if let Some((origin, encrypted)) = existing {
+                if origin == "local" {
+                    let envelope = validate_envelope(&encrypted)?;
+                    if envelope.vault_id() != vault_id.as_str()
+                        || envelope.object_kind() != &SyncObjectKind::Event
+                        || envelope.object_id() != operation_id.as_str()
+                    {
+                        return Err(JournalError::new(
+                            JournalErrorCode::Storage,
+                            "现有 AppState operation 身份损坏",
+                        ));
+                    }
+                    let plaintext = decrypt_sync_object(vault_key, &envelope).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Authentication,
+                            "现有 AppState operation 无法认证",
+                        )
+                    })?;
+                    if local_host_operation_matches(
+                        &plaintext,
+                        &operation_id,
+                        &entity_id,
+                        &mutation,
+                    ) {
+                        return Ok(EnqueueOutcome::AlreadyQueued);
+                    }
+                    return Err(JournalError::new(
+                        JournalErrorCode::Conflict,
+                        "现有 AppState operation 与 changefeed 内容不同",
+                    ));
+                }
                 return Err(JournalError::new(
                     JournalErrorCode::Conflict,
-                    "同步 operation 的密文或对象身份已由其他 key 使用",
+                    "AppState operation ID 已由远端对象占用",
                 ));
             }
-            ensure_capacity(transaction, encrypted_object.len())?;
-            let sequence =
-                verify_next_sequence(transaction, "local", object.device_id(), object.sequence())?;
-            apply_business_change(transaction)?;
-            transaction
-                .execute(
-                    "INSERT INTO sync_operations(
-                    object_key, object_hash, vault_id, object_kind, object_id, device_id, sequence,
-                    encrypted_object, origin, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'local', ?9)",
-                    params![
-                        object_key,
-                        hash,
-                        object.vault_id(),
-                        object_kind_label(object.object_kind()),
-                        object.object_id(),
-                        object.device_id(),
-                        sequence,
-                        encrypted_object,
-                        now_ms,
-                    ],
+            let (device_id, last_hlc_ms, last_hlc_logical): (String, i64, i64) = transaction
+                .query_row(
+                    "SELECT device_id, last_hlc_ms, last_hlc_logical
+                     FROM sync_local_identity WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(|_| {
-                    JournalError::new(JournalErrorCode::Storage, "无法写入本地同步 operation")
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份")
                 })?;
-            transaction
-                .execute(
-                    "INSERT INTO sync_outbox(
-                    object_key, state, attempt_count, next_attempt_ms, lease_id,
-                    lease_expires_ms, last_error_code, published_at_ms, updated_at_ms
-                 ) VALUES (?1, 'pending', 0, ?2, NULL, NULL, NULL, NULL, ?2)",
-                    params![object_key, now_ms],
+            let highest: Option<i64> = transaction
+                .query_row(
+                    "SELECT highest_sequence FROM sync_heads
+                     WHERE direction = 'local' AND device_id = ?1",
+                    params![device_id],
+                    |row| row.get(0),
                 )
-                .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入同步 outbox"))?;
-            update_head(transaction, "local", &object, &hash, sequence)?;
-            Ok(EnqueueOutcome::Queued)
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取本机同步序号")
+                })?;
+            let sequence = highest
+                .unwrap_or(0)
+                .checked_add(1)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| {
+                    JournalError::new(JournalErrorCode::LimitExceeded, "本机同步序号已耗尽")
+                })?;
+            let (physical_ms, logical) = if now_ms > last_hlc_ms {
+                (now_ms, 0_u16)
+            } else if last_hlc_logical < u16::MAX as i64 {
+                (last_hlc_ms, (last_hlc_logical as u16).saturating_add(1))
+            } else {
+                (
+                    last_hlc_ms.checked_add(1).ok_or_else(|| {
+                        JournalError::new(
+                            JournalErrorCode::LimitExceeded,
+                            "本机同步 HLC 已耗尽",
+                        )
+                    })?,
+                    0_u16,
+                )
+            };
+            let (merge_revision, state) =
+                load_persisted_state(transaction).map_err(map_merge_error)?;
+            let (physical_ms, logical) =
+                advance_local_hlc(&state, physical_ms, logical).map_err(map_merge_error)?;
+            let operation = build_local_host_operation(
+                &state,
+                &operation_id,
+                &device_id,
+                sequence,
+                physical_ms,
+                logical,
+                &entity_id,
+                mutation,
+            )
+            .map_err(map_merge_error)?;
+            let encoded_operation = operation.encode().map_err(map_merge_error)?;
+            let encrypted_object = encrypt_sync_object(
+                vault_key,
+                &vault_id,
+                SyncObjectKind::Event,
+                &operation_id,
+                Some(&device_id),
+                Some(sequence),
+                &encoded_operation,
+            )
+            .and_then(|object| object.encode())
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::InvalidInput,
+                    "无法加密 AppState 同步 operation",
+                )
+            })?;
+            let object = validate_envelope(&encrypted_object)?;
+            let hash = object_hash(&encrypted_object);
+            let object_key = format!(
+                "vpshell/v1/{vault_id}/segments/{device_id}/{sequence}.oseg"
+            );
+            enqueue_local_in_transaction(
+                transaction,
+                &object_key,
+                &encrypted_object,
+                &object,
+                &hash,
+                now_ms,
+                |transaction| {
+                    apply_persisted_operation(
+                        transaction,
+                        &encoded_operation,
+                        merge_revision,
+                        now_ms,
+                    )
+                    .map_err(map_merge_error)?;
+                    transaction
+                        .execute(
+                            "UPDATE sync_local_identity
+                             SET last_hlc_ms = ?1, last_hlc_logical = ?2
+                             WHERE singleton = 1 AND device_id = ?3",
+                            params![physical_ms, i64::from(logical), device_id],
+                        )
+                        .map_err(|_| {
+                            JournalError::new(
+                                JournalErrorCode::Storage,
+                                "无法推进本机同步 HLC",
+                            )
+                        })?;
+                    Ok(())
+                },
+            )
         })
     }
 
@@ -1303,6 +1556,8 @@ fn recover_expired_leases(transaction: &Transaction<'_>, now_ms: i64) -> Journal
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::sync_crypto::{SyncObjectKind, encrypt_sync_object};
 
@@ -1417,6 +1672,62 @@ mod tests {
         let status = journal.status().unwrap();
         assert_eq!(status.pending_objects, 1);
         assert_eq!(status.pending_bytes, object.len() as u64);
+    }
+
+    #[test]
+    fn app_state_host_enqueue_is_atomic_idempotent_and_content_bound() {
+        let root = TempDir::new("app-state-host");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let key = VaultKey::generate().unwrap();
+        let operation_id = Uuid::new_v4().to_string();
+        let entity_id = Uuid::new_v4().to_string();
+        let mutation = LocalHostMutation::Patch(BTreeMap::from([(
+            "name".to_string(),
+            crate::sync_merge::FieldValue::Text("server".to_string()),
+        )]));
+        assert_eq!(
+            journal.enqueue_local_host_change(
+                &key,
+                VAULT_ID,
+                &operation_id,
+                &entity_id,
+                mutation.clone(),
+                10,
+            ),
+            Ok(EnqueueOutcome::Queued)
+        );
+        assert_eq!(journal.merge_status().unwrap().revision, 1);
+        assert_eq!(
+            journal.enqueue_local_host_change(
+                &key,
+                VAULT_ID,
+                &operation_id,
+                &entity_id,
+                mutation,
+                11,
+            ),
+            Ok(EnqueueOutcome::AlreadyQueued)
+        );
+        let changed = LocalHostMutation::Patch(BTreeMap::from([(
+            "name".to_string(),
+            crate::sync_merge::FieldValue::Text("changed".to_string()),
+        )]));
+        assert_eq!(
+            journal
+                .enqueue_local_host_change(
+                    &key,
+                    VAULT_ID,
+                    &operation_id,
+                    &entity_id,
+                    changed,
+                    12,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Conflict
+        );
+        assert_eq!(journal.status().unwrap().pending_objects, 1);
+        assert_eq!(journal.merge_status().unwrap().revision, 1);
     }
 
     #[test]
@@ -1719,6 +2030,33 @@ mod tests {
                 .filter_map(Result::ok)
                 .any(|entry| { entry.file_name().to_string_lossy().contains(".corrupt-") })
         );
+    }
+
+    #[test]
+    fn version_one_journal_adds_a_persistent_local_identity() {
+        let root = TempDir::new("identity-migration");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        drop(journal);
+        let connection = open_connection(&journal_path(&root.0)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE sync_local_identity;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        drop(journal);
+        let connection = open_connection(&journal_path(&root.0)).unwrap();
+        let device_id: String = connection
+            .query_row(
+                "SELECT device_id FROM sync_local_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(Uuid::parse_str(&device_id).unwrap().to_string(), device_id);
     }
 
     #[test]

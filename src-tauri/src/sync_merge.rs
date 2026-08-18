@@ -113,6 +113,12 @@ pub(crate) enum FieldValue {
     Clear,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LocalHostMutation {
+    Patch(BTreeMap<String, FieldValue>),
+    Delete,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FieldRegister {
@@ -239,6 +245,148 @@ impl MergeOperation {
             device_id: self.device_id.clone(),
             operation_id: self.operation_id.clone(),
         }
+    }
+}
+
+pub(crate) fn build_local_host_operation(
+    state: &MergeState,
+    operation_id: &str,
+    device_id: &str,
+    sequence: u64,
+    physical_ms: i64,
+    logical: u16,
+    entity_id: &str,
+    mutation: LocalHostMutation,
+) -> MergeResult<MergeOperation> {
+    let record = state.entities.get(&entity_key(&EntityKind::Host, entity_id));
+    let payload = match mutation {
+        LocalHostMutation::Patch(fields) => {
+            let observed_fields = fields
+                .keys()
+                .map(|field| {
+                    (
+                        field.clone(),
+                        record
+                            .and_then(|record| record.fields.get(field))
+                            .map(|register| register.stamp.clone()),
+                    )
+                })
+                .collect();
+            MergePayload::Patch(PatchPayload {
+                entity_kind: EntityKind::Host,
+                entity_id: entity_id.to_string(),
+                fields,
+                observed_fields,
+                observed_tombstone: record.and_then(|record| record.tombstone.clone()),
+            })
+        }
+        LocalHostMutation::Delete => MergePayload::Delete(DeletePayload {
+            entity_kind: EntityKind::Host,
+            entity_id: entity_id.to_string(),
+            observed_fields: record
+                .map(|record| {
+                    record
+                        .fields
+                        .iter()
+                        .map(|(field, register)| (field.clone(), register.stamp.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            observed_tombstone: record.and_then(|record| record.tombstone.clone()),
+        }),
+    };
+    let operation = MergeOperation {
+        format_version: FORMAT_VERSION,
+        operation_id: operation_id.to_string(),
+        device_id: device_id.to_string(),
+        sequence,
+        hlc: HybridLogicalClock {
+            physical_ms,
+            logical,
+        },
+        payload,
+    };
+    validate_operation(&operation)?;
+    Ok(operation)
+}
+
+pub(crate) fn advance_local_hlc(
+    state: &MergeState,
+    candidate_physical_ms: i64,
+    candidate_logical: u16,
+) -> MergeResult<(i64, u16)> {
+    if candidate_physical_ms < 0 {
+        return Err(MergeError::new(
+            MergeErrorCode::InvalidInput,
+            "本机同步 HLC 时间无效",
+        ));
+    }
+    let mut maximum: Option<(i64, u16)> = None;
+    let mut observe = |stamp: &MergeStamp| {
+        let value = (stamp.hlc.physical_ms, stamp.hlc.logical);
+        if maximum.is_none_or(|current| value > current) {
+            maximum = Some(value);
+        }
+    };
+    for record in state.entities.values() {
+        for register in record.fields.values() {
+            observe(&register.stamp);
+        }
+        if let Some(stamp) = &record.tombstone {
+            observe(stamp);
+        }
+    }
+    for event in state.histories.values() {
+        observe(&event.stamp);
+    }
+    for conflict in state.conflicts.values() {
+        for alternative in &conflict.alternatives {
+            observe(&alternative.stamp);
+        }
+        if let Some(stamp) = &conflict.resolution_stamp {
+            observe(stamp);
+        }
+    }
+    let Some(maximum) = maximum else {
+        return Ok((candidate_physical_ms, candidate_logical));
+    };
+    if (candidate_physical_ms, candidate_logical) > maximum {
+        return Ok((candidate_physical_ms, candidate_logical));
+    }
+    if maximum.1 < u16::MAX {
+        Ok((maximum.0, maximum.1 + 1))
+    } else {
+        Ok((
+            maximum.0.checked_add(1).ok_or_else(|| {
+                MergeError::new(MergeErrorCode::LimitExceeded, "同步 HLC 已耗尽")
+            })?,
+            0,
+        ))
+    }
+}
+
+pub(crate) fn local_host_operation_matches(
+    encoded: &[u8],
+    operation_id: &str,
+    entity_id: &str,
+    mutation: &LocalHostMutation,
+) -> bool {
+    let Ok(operation) = MergeOperation::decode(encoded) else {
+        return false;
+    };
+    if operation.operation_id != operation_id {
+        return false;
+    }
+    match (&operation.payload, mutation) {
+        (MergePayload::Patch(payload), LocalHostMutation::Patch(fields)) => {
+            payload.entity_kind == EntityKind::Host
+                && payload.entity_id == entity_id
+                && payload.fields == *fields
+        }
+        (MergePayload::Delete(payload), LocalHostMutation::Delete) => {
+            payload.entity_kind == EntityKind::Host && payload.entity_id == entity_id
+        }
+        _ => false,
     }
 }
 
@@ -1980,5 +2128,22 @@ mod tests {
             state.entity_fields(&EntityKind::Setting, HOST_ID).unwrap()["fontSize"],
             FieldValue::Integer(17)
         );
+    }
+
+    #[test]
+    fn local_hlc_advances_past_observed_remote_clock() {
+        let remote = patch(
+            90,
+            DEVICE_B,
+            50_000,
+            EntityKind::Host,
+            HOST_ID,
+            "name",
+            FieldValue::Text("remote".into()),
+        );
+        let mut state = MergeState::default();
+        state.apply(&remote).unwrap();
+        assert_eq!(advance_local_hlc(&state, 1_000, 0).unwrap(), (50_000, 1));
+        assert_eq!(advance_local_hlc(&state, 60_000, 0).unwrap(), (60_000, 0));
     }
 }

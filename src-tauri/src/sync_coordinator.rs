@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{
+    app_store::AppStore,
     sync_crypto::{
         Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
         create_password_keyslot, open_password_keyslot,
@@ -225,6 +226,17 @@ impl SyncCoordinatorManager {
         })
     }
 
+    pub(crate) fn status_with_app_store(
+        &self,
+        app_store: &AppStore,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        let mut status = self.status()?;
+        status.pending_objects = status
+            .pending_objects
+            .saturating_add(app_store.pending_host_sync_change_count()?);
+        Ok(status)
+    }
+
     pub(crate) fn cancel(&self) -> Result<(), String> {
         let mut runtime = self.lock_runtime()?;
         if !runtime.running {
@@ -381,7 +393,11 @@ impl SyncCoordinatorManager {
         self.status()
     }
 
-    pub(crate) fn run_once(&self, now_ms: i64) -> Result<SyncCoordinatorStatus, String> {
+    pub(crate) fn run_once(
+        &self,
+        app_store: &AppStore,
+        now_ms: i64,
+    ) -> Result<SyncCoordinatorStatus, String> {
         if now_ms < 0 {
             return Err("同步协调器时间不能为负数".to_string());
         }
@@ -420,6 +436,7 @@ impl SyncCoordinatorManager {
         };
 
         let result = self.run_cycle(
+            app_store,
             provider.as_ref(),
             vault_key.as_ref(),
             &vault_id,
@@ -444,11 +461,12 @@ impl SyncCoordinatorManager {
                 self.finish_cycle_with_error(generation, phase, &code)?;
             }
         }
-        self.status()
+        self.status_with_app_store(app_store)
     }
 
     fn run_cycle(
         &self,
+        app_store: &AppStore,
         provider: &dyn SyncObjectProvider,
         vault_key: &VaultKey,
         vault_id: &str,
@@ -461,6 +479,7 @@ impl SyncCoordinatorManager {
         if journal_status.safety_blocked {
             return Err("reconcile-required".to_string());
         }
+        self.drain_app_state_changes(app_store, vault_key, vault_id, now_ms)?;
         let uploaded = self.push_pending(
             provider,
             vault_id,
@@ -494,6 +513,37 @@ impl SyncCoordinatorManager {
             uploaded,
             downloaded,
         })
+    }
+
+    fn drain_app_state_changes(
+        &self,
+        app_store: &AppStore,
+        vault_key: &VaultKey,
+        vault_id: &str,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        app_store
+            .bind_sync_vault(vault_id)
+            .map_err(|_| "app-state-handoff".to_string())?;
+        for change in app_store
+            .pending_host_sync_changes(MAX_PUSH_OBJECTS_PER_CYCLE)
+            .map_err(|_| "app-state-handoff".to_string())?
+        {
+            self.journal
+                .enqueue_local_host_change(
+                    vault_key,
+                    vault_id,
+                    &change.operation_id,
+                    &change.entity_id,
+                    change.mutation,
+                    now_ms,
+                )
+                .map_err(journal_code)?;
+            app_store
+                .acknowledge_host_sync_change(vault_id, &change.operation_id)
+                .map_err(|_| "app-state-handoff".to_string())?;
+        }
+        Ok(())
     }
 
     fn push_pending(
@@ -838,6 +888,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        app_store::SaveAppStateRequest,
         sync_crypto::{SyncObjectKind, encrypt_sync_object},
         sync_provider::{
             ProviderError, ProviderErrorCode, ProviderResult, PutObjectOutcome, SyncObjectPage,
@@ -861,6 +912,30 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn test_app_store(root: &TempDir) -> AppStore {
+        AppStore::load(root.0.join("app-state")).unwrap()
+    }
+
+    fn app_state_fixture() -> String {
+        serde_json::json!({
+            "hosts": [{
+                "id": "host-local", "name": "Example", "group": "Test",
+                "host": "192.0.2.1", "port": 22, "username": "dev",
+                "environment": "development", "tags": ["fixture"],
+                "credentialRef": "ssh-reference", "hostKeySha256":
+                "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }],
+            "deletedHosts": [], "scripts": [], "commands": [], "sshKeys": [],
+            "commandHistory": [], "connectionHistory": [], "pathHistory": {},
+            "sync": {"enabled": true, "provider": "local", "endpoint": "", "remotePath": "/vpshell", "username": "", "totpEnabled": false, "syncSecrets": false},
+            "wallpaper": {"source": "none", "value": "", "opacity": 0.2},
+            "terminalAppearance": {"fontFamily": "monospace", "fontSize": 13, "lineHeight": 1.25},
+            "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false},
+            "onboardingCompleted": true
+        })
+        .to_string()
     }
 
     #[derive(Default)]
@@ -1014,6 +1089,43 @@ mod tests {
     }
 
     #[test]
+    fn app_state_changefeed_is_encrypted_merged_and_acknowledged_before_upload() {
+        let root = TempDir::new("app-state-outbox");
+        let store = test_app_store(&root);
+        store
+            .save(SaveAppStateRequest {
+                state_json: app_state_fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        assert_eq!(store.pending_host_sync_changes(128).unwrap().len(), 1);
+
+        let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let vault_id = Uuid::new_v4().to_string();
+        coordinator
+            .attach_session(provider.clone(), VaultKey::generate().unwrap(), &vault_id)
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .status_with_app_store(&store)
+                .unwrap()
+                .pending_objects,
+            1
+        );
+        let status = coordinator.run_once(&store, 2_000).unwrap();
+        assert_eq!(status.last_uploaded_objects, 1);
+        assert_eq!(status.merge_revision, 1);
+        assert_eq!(status.open_conflicts, 0);
+        assert!(store.pending_host_sync_changes(128).unwrap().is_empty());
+        let objects = provider.objects.lock().unwrap();
+        assert_eq!(objects.len(), 1);
+        let encoded = objects.values().next().unwrap();
+        assert!(!encoded.windows(b"192.0.2.1".len()).any(|value| value == b"192.0.2.1"));
+        assert!(!encoded.windows(b"ssh-reference".len()).any(|value| value == b"ssh-reference"));
+    }
+
+    #[test]
     fn cycle_uploads_claimed_objects_and_applies_remote_merge_atomically() {
         let root = TempDir::new("cycle");
         let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();
@@ -1059,7 +1171,7 @@ mod tests {
         coordinator
             .attach_session(provider.clone(), vault_key, &vault_id)
             .unwrap();
-        let status = coordinator.run_once(2_000).unwrap();
+        let status = coordinator.run_once(&test_app_store(&root), 2_000).unwrap();
         assert_eq!(status.phase, SyncCoordinatorPhase::Idle);
         assert_eq!(status.pending_objects, 0);
         assert_eq!(status.merge_revision, 1);
@@ -1100,7 +1212,7 @@ mod tests {
             .attach_session(provider, vault_key, &vault_id)
             .unwrap();
 
-        let status = coordinator.run_once(2_000).unwrap();
+        let status = coordinator.run_once(&test_app_store(&root), 2_000).unwrap();
         assert_eq!(status.phase, SyncCoordinatorPhase::Suspended);
         assert_eq!(status.last_error_code.as_deref(), Some("authentication"));
         assert_eq!(status.merge_revision, 0);
@@ -1164,7 +1276,7 @@ mod tests {
         coordinator
             .attach_session(provider.clone(), attached_key, &attached_vault)
             .unwrap();
-        let status = coordinator.run_once(2_000).unwrap();
+        let status = coordinator.run_once(&test_app_store(&root), 2_000).unwrap();
         assert_eq!(status.last_uploaded_objects, 1);
         assert_eq!(status.pending_objects, 1);
         let objects = provider.objects.lock().unwrap();
@@ -1205,7 +1317,7 @@ mod tests {
         coordinator
             .attach_session(provider, vault_key, &vault_id)
             .unwrap();
-        let status = coordinator.run_once(2_000).unwrap();
+        let status = coordinator.run_once(&test_app_store(&root), 2_000).unwrap();
         assert_eq!(status.phase, SyncCoordinatorPhase::Conflicts);
         assert_eq!(status.open_conflicts, 1);
         assert_eq!(status.merge_revision, 2);
@@ -1229,7 +1341,7 @@ mod tests {
                 &vault_id,
             )
             .unwrap();
-        let blocked = coordinator.run_once(2_000).unwrap();
+        let blocked = coordinator.run_once(&test_app_store(&root), 2_000).unwrap();
         assert_eq!(blocked.phase, SyncCoordinatorPhase::ReconcileRequired);
         assert_eq!(
             blocked.last_error_code.as_deref(),
@@ -1269,7 +1381,7 @@ mod tests {
             .attach_session(Arc::new(CancelOnPutProvider), vault_key, &vault_id)
             .unwrap();
 
-        let status = coordinator.run_once(2_000).unwrap();
+        let status = coordinator.run_once(&test_app_store(&root), 2_000).unwrap();
         assert_eq!(status.phase, SyncCoordinatorPhase::Cancelled);
         assert_eq!(status.last_error_code.as_deref(), Some("cancelled"));
         assert_eq!(status.pending_objects, 1);
@@ -1327,7 +1439,10 @@ mod tests {
             .unwrap();
         assert!(unlocked.configured);
         assert_eq!(
-            coordinator.run_once(2_000).unwrap().phase,
+            coordinator
+                .run_once(&test_app_store(&root), 2_000)
+                .unwrap()
+                .phase,
             SyncCoordinatorPhase::Idle
         );
     }
@@ -1413,7 +1528,9 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(coordinator.run_once(2_000).is_err());
+        assert!(coordinator
+            .run_once(&test_app_store(&root), 2_000)
+            .is_err());
         assert!(coordinator.detach_session().is_err());
         assert!(
             coordinator

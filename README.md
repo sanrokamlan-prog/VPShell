@@ -38,7 +38,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 
 | 运维痛点 | VPShell 方向 | `v0.1.0-alpha.7` |
 | --- | --- | :---: |
-| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **部分接线**：密码学、恢复/导出、设备 registry、Local/WebDAV provider、持久 outbox/replay、确定性 merge 与 Rust 协调器内核已实现；桌面 Local Folder 可显式初始化/解锁并运行单周期，业务 operation 入队/回写、自动触发、其他 provider 与冲突解决 UI 仍未完成 |
+| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **部分接线**：密码学、恢复/导出、设备 registry、Local/WebDAV provider、持久 outbox/replay、确定性 merge 与 Rust 协调器内核已实现；桌面 Local Folder 可显式初始化/解锁并运行单周期，主机公开字段已进入事务 changefeed 和加密 outbox；远端安全回写、其他业务域、自动触发、其他 provider 与冲突解决 UI 仍未完成 |
 | 大量小文件/目录传输缓慢 | 自动探测 `tar + zstd`，缺少远端能力时回退 SFTP | **已实现**：直连后端 |
 | 命令、路径和参数反复复制 | 不设产品条数上限的事件历史、快速检索和参数模板 | **部分实现**：本地历史与最近连接 |
 | 操作时忘记当前主机 | 常驻配置 IP、环境标记、Shell Integration 上报 hostname/cwd | **v0.2 工作区**：显式 bash/zsh 探针与 8 层自报上下文栈 |

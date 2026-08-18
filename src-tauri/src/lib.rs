@@ -1419,17 +1419,23 @@ async fn save_app_state(
 #[tauri::command]
 fn desktop_sync_status(
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    store: State<'_, app_store::AppStore>,
 ) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
-    coordinator.status()
+    coordinator.status_with_app_store(store.inner())
 }
 
 #[tauri::command]
 async fn configure_local_folder_sync(
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    store: State<'_, app_store::AppStore>,
     request: sync_coordinator::ConfigureLocalFolderSyncRequest,
 ) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
     let coordinator = coordinator.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || coordinator.configure_local_folder(request))
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        coordinator.configure_local_folder(request)?;
+        coordinator.status_with_app_store(&store)
+    })
         .await
         .map_err(|error| format!("Local Folder 同步配置任务异常结束: {error}"))?
 }
@@ -1437,8 +1443,10 @@ async fn configure_local_folder_sync(
 #[tauri::command]
 async fn run_sync_once(
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    store: State<'_, app_store::AppStore>,
 ) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
     let coordinator = coordinator.inner().clone();
+    let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1446,7 +1454,7 @@ async fn run_sync_once(
             .as_millis()
             .try_into()
             .unwrap_or(i64::MAX);
-        coordinator.run_once(now_ms)
+        coordinator.run_once(&store, now_ms)
     })
     .await
     .map_err(|error| format!("同步单周期任务异常结束: {error}"))?
@@ -1455,17 +1463,19 @@ async fn run_sync_once(
 #[tauri::command]
 fn cancel_sync(
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    store: State<'_, app_store::AppStore>,
 ) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
     coordinator.cancel()?;
-    coordinator.status()
+    coordinator.status_with_app_store(store.inner())
 }
 
 #[tauri::command]
 fn lock_sync(
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    store: State<'_, app_store::AppStore>,
 ) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
     coordinator.detach_session()?;
-    coordinator.status()
+    coordinator.status_with_app_store(store.inner())
 }
 
 #[tauri::command]
