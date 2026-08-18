@@ -148,7 +148,7 @@
 - 原生 probe 与终端的 IPC 必须只接受 `route.hops[]`；空 route、超过 4 跳、重复 hop UUID、重复 host/port、无效端点/指纹/超时、同跳多认证来源、旧的扁平请求和 `password` 等未知秘密字段都应拒绝。
 - 两跳夹具必须使用不同 host-key、用户和一次性私钥；跳板 sshd 只允许连接目标测试端口，目标 sshd 禁止继续转发。先用错误目标 pin 确认只返回第 2 跳，再以正确 pin 实际完成 probe、共享 SFTP、PTY 字节收发和取消；错误不得包含 host、credentialRef、私钥路径或底层库文本。
 - 单跳 Linux 回环 fixture 必须继续实际完成 pin、公钥认证、两次共享 SFTP 浏览、PTY resize/字节收发和取消，证明 route 重构没有把现有直连退化为 mock。
-- 本地转发 IPC 不接受 `bindHost`、密码或 route 外凭据字段；监听必须固定为 `127.0.0.1`，0 端口由 OS 安全分配。远端转发 IPC 还必须拒绝 `targetHost`，最终 SSH 目标的监听与客户端目标都固定为 `127.0.0.1`；未登记、端点不匹配或超过 32 连接的 forwarded channel 必须在确认前拒绝。Linux 双跳夹具的最终 sshd 只能 `PermitOpen` 自身测试端口、`PermitListen` 回环地址，测试必须分别经本地 listener 和服务器分配的远端 listener 读取真实 SSH banner，停止后等待 Rust 代际清理；非回环监听与动态转发仍应拒绝或不可用。
+- 本地转发 IPC 不接受 `bindHost`、密码或 route 外凭据字段；监听必须固定为 `127.0.0.1`，0 端口由 OS 安全分配。远端转发 IPC 还必须拒绝 `targetHost`，最终 SSH 目标的监听与客户端目标都固定为 `127.0.0.1`；未登记、端点不匹配或超过 32 连接的 forwarded channel 必须在确认前拒绝。动态转发 IPC 只接受 UUID、route 和端口，固定回环监听；验证无认证 SOCKS5 CONNECT 的 IPv4/域名/IPv6 目标，并确认 BIND、UDP ASSOCIATE、未知地址类型、无效域名、零端口和超过 32 个连接 fail closed。Linux 双跳夹具的最终 sshd 只能 `PermitOpen` 自身测试端口、`PermitListen` 回环地址，测试必须分别经本地 listener、服务器分配的远端 listener 和动态 SOCKS5 listener 读取真实 SSH banner，停止后等待 Rust 代际清理；非回环监听始终不可用。
 
 ### J. v0.2 工作区恢复验收（仅源码构建）
 

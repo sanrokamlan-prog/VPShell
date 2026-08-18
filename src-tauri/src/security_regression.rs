@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            79,
+            82,
             "command manifest contains duplicates or changed count"
         );
 
@@ -169,6 +169,9 @@ mod tests {
             "allow-start-native-remote-forward",
             "allow-list-native-remote-forwards",
             "allow-stop-native-remote-forward",
+            "allow-start-native-dynamic-forward",
+            "allow-list-native-dynamic-forwards",
+            "allow-stop-native-dynamic-forward",
         ] {
             assert!(!android_permissions.contains(forbidden));
         }
@@ -225,17 +228,26 @@ mod tests {
     }
 
     #[test]
-    fn native_local_forward_is_loopback_only_and_android_denied() {
+    fn native_forwards_are_bounded_loopback_only_and_android_denied() {
         let native = include_str!("native_engine.rs");
         let frontend = include_str!("../../src/App.tsx");
         let android = include_str!("../capabilities/android.json");
         assert!(native.contains("SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port)"));
         assert!(native.contains("MAX_LOCAL_FORWARDS: usize = 8"));
         assert!(native.contains("MAX_LOCAL_FORWARD_CONNECTIONS: usize = 32"));
+        assert!(native.contains("MAX_REMOTE_FORWARDS: usize = 8"));
+        assert!(native.contains("MAX_REMOTE_FORWARD_CONNECTIONS: usize = 32"));
+        assert!(native.contains("MAX_DYNAMIC_FORWARDS: usize = 8"));
+        assert!(native.contains("MAX_DYNAMIC_FORWARD_CONNECTIONS: usize = 32"));
+        assert!(native.contains("negotiate_socks5_connect(&mut local_stream)"));
+        assert!(native.contains("request[1] != 0x01"));
         assert!(native.contains("copy_bidirectional(&mut local_stream, &mut remote_stream)"));
         assert!(frontend.contains("<input value=\"127.0.0.1\" readOnly"));
+        assert!(frontend.contains("value=\"SOCKS5 CONNECT\" readOnly"));
         assert!(!frontend.contains("name=\"bindHost\""));
         assert!(!android.contains("native-local-forward"));
+        assert!(!android.contains("native-remote-forward"));
+        assert!(!android.contains("native-dynamic-forward"));
     }
 
     #[test]

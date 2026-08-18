@@ -7,7 +7,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::Read,
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddrV4},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -24,7 +24,7 @@ use russh::{
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::copy_bidirectional,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     task::JoinSet,
@@ -41,6 +41,10 @@ const MAX_LOCAL_FORWARDS: usize = 8;
 const MAX_LOCAL_FORWARD_CONNECTIONS: usize = 32;
 const MAX_REMOTE_FORWARDS: usize = 8;
 const MAX_REMOTE_FORWARD_CONNECTIONS: usize = 32;
+const MAX_DYNAMIC_FORWARDS: usize = 8;
+const MAX_DYNAMIC_FORWARD_CONNECTIONS: usize = 32;
+const MAX_SOCKS5_METHODS: usize = 16;
+const SOCKS5_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NATIVE_ROUTE_HOPS: usize = 4;
 const TERMINAL_COMMAND_QUEUE: usize = 64;
 const TERMINAL_EVENT_QUEUE: usize = 64;
@@ -120,6 +124,14 @@ pub(crate) struct NativeRemoteForwardStartRequest {
     route: NativeRouteRequest,
     bind_port: u16,
     target_port: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeDynamicForwardStartRequest {
+    forward_id: String,
+    route: NativeRouteRequest,
+    bind_port: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -204,6 +216,21 @@ pub(crate) struct NativeRemoteForwardSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct NativeDynamicForwardSnapshot {
+    schema_version: u16,
+    forward_id: String,
+    state: &'static str,
+    bind_host: &'static str,
+    bind_port: u16,
+    route_host: String,
+    route_hops: u8,
+    active_connections: u64,
+    accepted_connections: u64,
+    rejected_connections: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct NativeEngineError {
     code: &'static str,
     message: &'static str,
@@ -250,6 +277,7 @@ struct NativeEngineManagerInner {
     terminal_sessions: Mutex<HashMap<Uuid, ActiveTerminalSession>>,
     local_forwards: Mutex<HashMap<Uuid, ActiveLocalForward>>,
     remote_forwards: Mutex<HashMap<Uuid, ActiveRemoteForward>>,
+    dynamic_forwards: Mutex<HashMap<Uuid, ActiveDynamicForward>>,
     next_generation: AtomicU64,
 }
 
@@ -284,6 +312,15 @@ struct ActiveRemoteForward {
     route_hops: u8,
     target_port: u16,
     stats: Arc<RemoteForwardStats>,
+}
+
+struct ActiveDynamicForward {
+    generation: u64,
+    cancellation: CancellationToken,
+    bind_port: u16,
+    route_host: String,
+    route_hops: u8,
+    stats: Arc<DynamicForwardStats>,
 }
 
 #[derive(Default)]
@@ -336,6 +373,30 @@ struct RemoteForwardIngress {
     connections: mpsc::Sender<RemoteForwardConnection>,
     capacity: Arc<Semaphore>,
     stats: Arc<RemoteForwardStats>,
+}
+
+#[derive(Default)]
+struct DynamicForwardStats {
+    ready: AtomicU8,
+    active_connections: AtomicU64,
+    accepted_connections: AtomicU64,
+    rejected_connections: AtomicU64,
+}
+
+struct ActiveDynamicForwardConnectionGuard {
+    stats: Arc<DynamicForwardStats>,
+}
+
+impl Drop for ActiveDynamicForwardConnectionGuard {
+    fn drop(&mut self) {
+        self.stats.active_connections.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct Socks5ConnectTarget {
+    host: String,
+    port: u16,
 }
 
 enum NativeSftpCommand {
@@ -425,6 +486,7 @@ impl Default for NativeEngineManager {
                 terminal_sessions: Mutex::new(HashMap::new()),
                 local_forwards: Mutex::new(HashMap::new()),
                 remote_forwards: Mutex::new(HashMap::new()),
+                dynamic_forwards: Mutex::new(HashMap::new()),
                 next_generation: AtomicU64::new(0),
             }),
         }
@@ -977,6 +1039,142 @@ impl NativeEngineManager {
         Ok(())
     }
 
+    pub(crate) async fn start_dynamic_forward(
+        &self,
+        request: NativeDynamicForwardStartRequest,
+    ) -> Result<NativeDynamicForwardSnapshot, NativeEngineError> {
+        let ValidatedDynamicForwardStart {
+            forward_id,
+            route,
+            bind_port,
+        } = ValidatedDynamicForwardStart::try_from(request)?;
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port))
+            .await
+            .map_err(|_| {
+                NativeEngineError::new(
+                    "native-dynamic-forward-bind-failed",
+                    "动态转发无法绑定回环端口",
+                    true,
+                )
+            })?;
+        let bound_port = listener
+            .local_addr()
+            .map_err(|_| {
+                NativeEngineError::new(
+                    "native-dynamic-forward-bind-failed",
+                    "动态转发无法读取绑定端口",
+                    true,
+                )
+            })?
+            .port();
+        let route_host = route
+            .hops
+            .last()
+            .map(|hop| hop.host.clone())
+            .ok_or_else(|| NativeEngineError::invalid("动态转发 SSH 路由为空"))?;
+        let route_hops = u8::try_from(route.hops.len())
+            .map_err(|_| NativeEngineError::invalid("动态转发 SSH 路由跳数无效"))?;
+        let generation = self.next_generation()?;
+        let cancellation = CancellationToken::new();
+        let stats = Arc::new(DynamicForwardStats::default());
+        self.reserve_dynamic_forward(
+            forward_id,
+            generation,
+            cancellation.clone(),
+            bound_port,
+            route_host.clone(),
+            route_hops,
+            Arc::clone(&stats),
+        )?;
+
+        let channel_timeout = route.final_timeout();
+        let timeout = route.operation_timeout();
+        let hop_index = route.final_hop_index();
+        let connection = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(NativeEngineError::new(
+                "native-dynamic-forward-cancelled",
+                "动态转发连接已取消",
+                true,
+            )),
+            result = tokio::time::timeout(timeout, connect_route(route)) => match result {
+                Ok(outcome) => outcome,
+                Err(_) => Err(NativeEngineError::new(
+                    "native-dynamic-forward-timeout",
+                    "动态转发 SSH 路由连接超时",
+                    true,
+                ).at_hop(hop_index)),
+            },
+        };
+        let connection_chain = match connection {
+            Ok(connection_chain) => Arc::new(connection_chain),
+            Err(error) => {
+                self.finish_dynamic_forward(forward_id, generation);
+                return Err(error);
+            }
+        };
+        stats.ready.store(1, Ordering::SeqCst);
+        let result = dynamic_forward_snapshot(
+            forward_id,
+            bound_port,
+            &route_host,
+            route_hops,
+            &stats,
+        );
+        let manager = self.clone();
+        tokio::spawn(async move {
+            run_native_dynamic_forward(
+                manager,
+                forward_id,
+                generation,
+                listener,
+                connection_chain,
+                channel_timeout,
+                cancellation,
+                stats,
+            )
+            .await;
+        });
+        Ok(result)
+    }
+
+    pub(crate) fn list_dynamic_forwards(
+        &self,
+    ) -> Result<Vec<NativeDynamicForwardSnapshot>, NativeEngineError> {
+        let forwards = self.lock_dynamic_forwards()?;
+        let mut snapshots = forwards
+            .iter()
+            .map(|(forward_id, forward)| {
+                dynamic_forward_snapshot(
+                    *forward_id,
+                    forward.bind_port,
+                    &forward.route_host,
+                    forward.route_hops,
+                    &forward.stats,
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|left, right| left.forward_id.cmp(&right.forward_id));
+        Ok(snapshots)
+    }
+
+    pub(crate) fn stop_dynamic_forward(&self, forward_id: &str) -> Result<(), NativeEngineError> {
+        let forward_id = parse_forward_id(forward_id)?;
+        let cancellation = self
+            .lock_dynamic_forwards()?
+            .get(&forward_id)
+            .map(|forward| forward.cancellation.clone())
+            .ok_or_else(|| {
+                NativeEngineError::new(
+                    "native-dynamic-forward-not-found",
+                    "动态转发不存在或已经停止",
+                    false,
+                )
+            })?;
+        cancellation.cancel();
+        Ok(())
+    }
+
     pub(crate) fn cancel(&self, operation_id: &str) -> Result<(), NativeEngineError> {
         let operation_id = parse_operation_id(operation_id)?;
         let operation = self
@@ -1084,6 +1282,16 @@ impl NativeEngineManager {
 
     fn finish_remote_forward(&self, forward_id: Uuid, generation: u64) {
         if let Ok(mut forwards) = self.inner.remote_forwards.lock()
+            && forwards
+                .get(&forward_id)
+                .is_some_and(|forward| forward.generation == generation)
+        {
+            forwards.remove(&forward_id);
+        }
+    }
+
+    fn finish_dynamic_forward(&self, forward_id: Uuid, generation: u64) {
+        if let Ok(mut forwards) = self.inner.dynamic_forwards.lock()
             && forwards
                 .get(&forward_id)
                 .is_some_and(|forward| forward.generation == generation)
@@ -1239,6 +1447,55 @@ impl NativeEngineManager {
         Ok(())
     }
 
+    fn reserve_dynamic_forward(
+        &self,
+        forward_id: Uuid,
+        generation: u64,
+        cancellation: CancellationToken,
+        bind_port: u16,
+        route_host: String,
+        route_hops: u8,
+        stats: Arc<DynamicForwardStats>,
+    ) -> Result<(), NativeEngineError> {
+        let mut forwards = self.lock_dynamic_forwards()?;
+        if forwards.len() >= MAX_DYNAMIC_FORWARDS {
+            return Err(NativeEngineError::new(
+                "native-dynamic-forward-capacity",
+                "同时运行的动态转发已达到上限",
+                true,
+            ));
+        }
+        if forwards.contains_key(&forward_id) {
+            return Err(NativeEngineError::new(
+                "native-dynamic-forward-conflict",
+                "动态转发标识已经在使用",
+                false,
+            ));
+        }
+        if forwards
+            .values()
+            .any(|forward| forward.bind_port == bind_port)
+        {
+            return Err(NativeEngineError::new(
+                "native-dynamic-forward-bind-conflict",
+                "动态转发回环端口已经在使用",
+                false,
+            ));
+        }
+        forwards.insert(
+            forward_id,
+            ActiveDynamicForward {
+                generation,
+                cancellation,
+                bind_port,
+                route_host,
+                route_hops,
+                stats,
+            },
+        );
+        Ok(())
+    }
+
     fn reserve_terminal(
         &self,
         session_id: Uuid,
@@ -1324,6 +1581,19 @@ impl NativeEngineManager {
             )
         })
     }
+
+    fn lock_dynamic_forwards(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<Uuid, ActiveDynamicForward>>, NativeEngineError>
+    {
+        self.inner.dynamic_forwards.lock().map_err(|_| {
+            NativeEngineError::new(
+                "native-dynamic-forward-state-corrupt",
+                "动态转发状态已损坏",
+                false,
+            )
+        })
+    }
 }
 
 impl Drop for OperationLease {
@@ -1362,6 +1632,12 @@ struct ValidatedRemoteForwardStart {
     route: ValidatedRoute,
     bind_port: u16,
     target_port: u16,
+}
+
+struct ValidatedDynamicForwardStart {
+    forward_id: Uuid,
+    route: ValidatedRoute,
+    bind_port: u16,
 }
 
 enum NativeAuth {
@@ -1466,6 +1742,18 @@ impl TryFrom<NativeRemoteForwardStartRequest> for ValidatedRemoteForwardStart {
             route: validate_route(request.route)?,
             bind_port: request.bind_port,
             target_port: request.target_port,
+        })
+    }
+}
+
+impl TryFrom<NativeDynamicForwardStartRequest> for ValidatedDynamicForwardStart {
+    type Error = NativeEngineError;
+
+    fn try_from(request: NativeDynamicForwardStartRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            forward_id: parse_forward_id(&request.forward_id)?,
+            route: validate_route(request.route)?,
+            bind_port: request.bind_port,
         })
     }
 }
@@ -2360,6 +2648,261 @@ async fn forward_local_connection(
     }
 }
 
+fn dynamic_forward_snapshot(
+    forward_id: Uuid,
+    bind_port: u16,
+    route_host: &str,
+    route_hops: u8,
+    stats: &DynamicForwardStats,
+) -> NativeDynamicForwardSnapshot {
+    NativeDynamicForwardSnapshot {
+        schema_version: SCHEMA_VERSION,
+        forward_id: forward_id.to_string(),
+        state: if stats.ready.load(Ordering::SeqCst) == 1 {
+            "active"
+        } else {
+            "starting"
+        },
+        bind_host: "127.0.0.1",
+        bind_port,
+        route_host: route_host.to_string(),
+        route_hops,
+        active_connections: stats.active_connections.load(Ordering::SeqCst),
+        accepted_connections: stats.accepted_connections.load(Ordering::SeqCst),
+        rejected_connections: stats.rejected_connections.load(Ordering::SeqCst),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_native_dynamic_forward(
+    manager: NativeEngineManager,
+    forward_id: Uuid,
+    generation: u64,
+    listener: TcpListener,
+    connection_chain: Arc<NativeConnectionChain>,
+    channel_timeout: Duration,
+    cancellation: CancellationToken,
+    stats: Arc<DynamicForwardStats>,
+) {
+    let capacity = Arc::new(Semaphore::new(MAX_DYNAMIC_FORWARD_CONNECTIONS));
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break,
+            completed = connections.join_next(), if !connections.is_empty() => {
+                let _ = completed;
+            }
+            accepted = listener.accept() => {
+                let Ok((local_stream, peer)) = accepted else {
+                    break;
+                };
+                let Ok(permit) = Arc::clone(&capacity).try_acquire_owned() else {
+                    stats.rejected_connections.fetch_add(1, Ordering::SeqCst);
+                    continue;
+                };
+                stats.accepted_connections.fetch_add(1, Ordering::SeqCst);
+                stats.active_connections.fetch_add(1, Ordering::SeqCst);
+                let connection_guard = ActiveDynamicForwardConnectionGuard {
+                    stats: Arc::clone(&stats),
+                };
+                let connection_chain = Arc::clone(&connection_chain);
+                let cancellation = cancellation.clone();
+                let stats = Arc::clone(&stats);
+                connections.spawn(async move {
+                    let _permit = permit;
+                    let _connection_guard = connection_guard;
+                    forward_dynamic_connection(
+                        connection_chain,
+                        local_stream,
+                        peer.port(),
+                        channel_timeout,
+                        cancellation,
+                        stats,
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    connection_chain
+        .disconnect_all("native dynamic forward stopped")
+        .await;
+    manager.finish_dynamic_forward(forward_id, generation);
+}
+
+async fn forward_dynamic_connection(
+    connection_chain: Arc<NativeConnectionChain>,
+    mut local_stream: TcpStream,
+    originator_port: u16,
+    channel_timeout: Duration,
+    cancellation: CancellationToken,
+    stats: Arc<DynamicForwardStats>,
+) {
+    let target = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return,
+        result = tokio::time::timeout(
+            SOCKS5_HANDSHAKE_TIMEOUT,
+            negotiate_socks5_connect(&mut local_stream),
+        ) => match result {
+            Ok(Ok(target)) => target,
+            Ok(Err(())) => {
+                stats.rejected_connections.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+            Err(_) => {
+                let _ = write_socks5_reply(&mut local_stream, 0x01).await;
+                stats.rejected_connections.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+        },
+    };
+    let Ok(session) = connection_chain.final_session() else {
+        let _ = write_socks5_reply(&mut local_stream, 0x01).await;
+        stats.rejected_connections.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let channel = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return,
+        result = tokio::time::timeout(
+            channel_timeout,
+            session.channel_open_direct_tcpip(
+                target.host,
+                u32::from(target.port),
+                "127.0.0.1",
+                u32::from(originator_port),
+            ),
+        ) => match result {
+            Ok(Ok(channel)) => channel,
+            Ok(Err(_)) | Err(_) => {
+                let _ = write_socks5_reply(&mut local_stream, 0x01).await;
+                stats.rejected_connections.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+        },
+    };
+    if write_socks5_reply(&mut local_stream, 0x00).await.is_err() {
+        stats.rejected_connections.fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    let mut remote_stream = channel.into_stream();
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {}
+        _ = copy_bidirectional(&mut local_stream, &mut remote_stream) => {}
+    }
+}
+
+async fn negotiate_socks5_connect<S>(stream: &mut S) -> Result<Socks5ConnectTarget, ()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut greeting = [0_u8; 2];
+    stream.read_exact(&mut greeting).await.map_err(|_| ())?;
+    let method_count = usize::from(greeting[1]);
+    if greeting[0] != 0x05 || method_count == 0 || method_count > MAX_SOCKS5_METHODS {
+        let _ = stream.write_all(&[0x05, 0xff]).await;
+        return Err(());
+    }
+    let mut methods = [0_u8; MAX_SOCKS5_METHODS];
+    stream
+        .read_exact(&mut methods[..method_count])
+        .await
+        .map_err(|_| ())?;
+    if !methods[..method_count].contains(&0x00) {
+        let _ = stream.write_all(&[0x05, 0xff]).await;
+        return Err(());
+    }
+    stream.write_all(&[0x05, 0x00]).await.map_err(|_| ())?;
+
+    let mut request = [0_u8; 4];
+    stream.read_exact(&mut request).await.map_err(|_| ())?;
+    if request[0] != 0x05 || request[2] != 0x00 {
+        let _ = write_socks5_reply(stream, 0x01).await;
+        return Err(());
+    }
+    if request[1] != 0x01 {
+        let _ = write_socks5_reply(stream, 0x07).await;
+        return Err(());
+    }
+    let host = match request[3] {
+        0x01 => {
+            let mut octets = [0_u8; 4];
+            stream.read_exact(&mut octets).await.map_err(|_| ())?;
+            Ipv4Addr::from(octets).to_string()
+        }
+        0x03 => {
+            let mut length = [0_u8; 1];
+            stream.read_exact(&mut length).await.map_err(|_| ())?;
+            let length = usize::from(length[0]);
+            if length == 0 || length > MAX_HOST_BYTES {
+                let _ = write_socks5_reply(stream, 0x08).await;
+                return Err(());
+            }
+            let mut domain = vec![0_u8; length];
+            stream.read_exact(&mut domain).await.map_err(|_| ())?;
+            let domain = match String::from_utf8(domain) {
+                Ok(domain) => domain,
+                Err(_) => {
+                    let _ = write_socks5_reply(stream, 0x08).await;
+                    return Err(());
+                }
+            };
+            if !validate_socks5_domain(&domain) {
+                let _ = write_socks5_reply(stream, 0x08).await;
+                return Err(());
+            }
+            domain
+        }
+        0x04 => {
+            let mut octets = [0_u8; 16];
+            stream.read_exact(&mut octets).await.map_err(|_| ())?;
+            Ipv6Addr::from(octets).to_string()
+        }
+        _ => {
+            let _ = write_socks5_reply(stream, 0x08).await;
+            return Err(());
+        }
+    };
+    let mut port = [0_u8; 2];
+    stream.read_exact(&mut port).await.map_err(|_| ())?;
+    let port = u16::from_be_bytes(port);
+    if port == 0 {
+        let _ = write_socks5_reply(stream, 0x01).await;
+        return Err(());
+    }
+    Ok(Socks5ConnectTarget { host, port })
+}
+
+async fn write_socks5_reply<S>(stream: &mut S, reply: u8) -> Result<(), ()>
+where
+    S: AsyncWrite + Unpin,
+{
+    stream
+        .write_all(&[0x05, reply, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        .await
+        .map_err(|_| ())
+}
+
+fn validate_socks5_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= MAX_HOST_BYTES
+        && domain.is_ascii()
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 fn validate_remote_forward_port(
     requested_port: u16,
     allocated_port: u32,
@@ -3027,7 +3570,7 @@ fn native_client_config(timeout: Duration) -> client::Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, duplex};
 
     fn hop() -> NativeRouteHopRequest {
         NativeRouteHopRequest {
@@ -3555,6 +4098,270 @@ mod tests {
             };
         }
         assert_eq!(stats.active_connections.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn dynamic_forward_requests_and_lifecycle_are_bounded() {
+        let request = NativeDynamicForwardStartRequest {
+            forward_id: Uuid::new_v4().to_string(),
+            route: NativeRouteRequest { hops: vec![hop()] },
+            bind_port: 0,
+        };
+        let validated = ValidatedDynamicForwardStart::try_from(request).unwrap();
+        assert_eq!(validated.bind_port, 0);
+
+        for forbidden in [
+            "bindHost",
+            "targetHost",
+            "targetPort",
+            "credentialRef",
+            "password",
+        ] {
+            let mut value = serde_json::json!({
+                "forwardId": Uuid::new_v4().to_string(),
+                "route": {"hops": [{
+                    "hopId": Uuid::new_v4().to_string(),
+                    "host": "host.example",
+                    "port": 22,
+                    "username": "operator",
+                    "hostKeySha256": format!("SHA256:{}", "A".repeat(43)),
+                    "timeoutSeconds": 15,
+                    "credentialRef": "ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212"
+                }]},
+                "bindPort": 0
+            });
+            value[forbidden] = serde_json::json!("forbidden");
+            assert!(serde_json::from_value::<NativeDynamicForwardStartRequest>(value).is_err());
+        }
+
+        let capacity = Arc::new(Semaphore::new(MAX_DYNAMIC_FORWARD_CONNECTIONS));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_DYNAMIC_FORWARD_CONNECTIONS {
+            permits.push(Arc::clone(&capacity).try_acquire_owned().unwrap());
+        }
+        assert!(Arc::clone(&capacity).try_acquire_owned().is_err());
+        drop(permits);
+
+        let manager = NativeEngineManager::default();
+        let mut ids = Vec::new();
+        for index in 0..MAX_DYNAMIC_FORWARDS {
+            let forward_id = Uuid::from_u128(index as u128 + 4_000);
+            ids.push(forward_id);
+            manager
+                .reserve_dynamic_forward(
+                    forward_id,
+                    index as u64 + 1,
+                    CancellationToken::new(),
+                    40_000 + index as u16,
+                    "host.example".to_string(),
+                    2,
+                    Arc::new(DynamicForwardStats::default()),
+                )
+                .unwrap();
+        }
+        let error = manager
+            .reserve_dynamic_forward(
+                Uuid::from_u128(4_999),
+                99,
+                CancellationToken::new(),
+                41_000,
+                "host.example".to_string(),
+                1,
+                Arc::new(DynamicForwardStats::default()),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "native-dynamic-forward-capacity");
+        let snapshots = manager.list_dynamic_forwards().unwrap();
+        assert_eq!(snapshots.len(), MAX_DYNAMIC_FORWARDS);
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.bind_host == "127.0.0.1")
+        );
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.state == "starting")
+        );
+        manager.stop_dynamic_forward(&ids[0].to_string()).unwrap();
+        assert!(
+            manager
+                .lock_dynamic_forwards()
+                .unwrap()
+                .get(&ids[0])
+                .unwrap()
+                .cancellation
+                .is_cancelled()
+        );
+        for (index, forward_id) in ids.into_iter().enumerate() {
+            manager.finish_dynamic_forward(forward_id, index as u64 + 1);
+        }
+        assert!(manager.list_dynamic_forwards().unwrap().is_empty());
+
+        let reused_id = Uuid::from_u128(5_000);
+        let stats = Arc::new(DynamicForwardStats::default());
+        manager
+            .reserve_dynamic_forward(
+                reused_id,
+                100,
+                CancellationToken::new(),
+                42_000,
+                "host.example".to_string(),
+                2,
+                Arc::clone(&stats),
+            )
+            .unwrap();
+        let duplicate_id = manager
+            .reserve_dynamic_forward(
+                reused_id,
+                101,
+                CancellationToken::new(),
+                42_001,
+                "other.example".to_string(),
+                1,
+                Arc::new(DynamicForwardStats::default()),
+            )
+            .unwrap_err();
+        assert_eq!(duplicate_id.code, "native-dynamic-forward-conflict");
+        let conflict = manager
+            .reserve_dynamic_forward(
+                Uuid::from_u128(5_001),
+                101,
+                CancellationToken::new(),
+                42_000,
+                "other.example".to_string(),
+                1,
+                Arc::new(DynamicForwardStats::default()),
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, "native-dynamic-forward-bind-conflict");
+        stats.ready.store(1, Ordering::SeqCst);
+        stats.accepted_connections.store(3, Ordering::SeqCst);
+        stats.rejected_connections.store(2, Ordering::SeqCst);
+        let mut snapshots = manager.list_dynamic_forwards().unwrap();
+        let snapshot = snapshots.remove(0);
+        assert_eq!(snapshot.state, "active");
+        assert_eq!(snapshot.route_hops, 2);
+        assert_eq!(snapshot.accepted_connections, 3);
+        assert_eq!(snapshot.rejected_connections, 2);
+        manager.finish_dynamic_forward(reused_id, 99);
+        assert!(
+            manager
+                .lock_dynamic_forwards()
+                .unwrap()
+                .contains_key(&reused_id)
+        );
+        manager.finish_dynamic_forward(reused_id, 100);
+
+        stats.active_connections.store(1, Ordering::SeqCst);
+        {
+            let _guard = ActiveDynamicForwardConnectionGuard {
+                stats: Arc::clone(&stats),
+            };
+        }
+        assert_eq!(stats.active_connections.load(Ordering::SeqCst), 0);
+    }
+
+    async fn negotiate_socks_request(request: &[u8]) -> (Result<Socks5ConnectTarget, ()>, Vec<u8>) {
+        let (mut client, mut server) = duplex(512);
+        let negotiation = tokio::spawn(async move { negotiate_socks5_connect(&mut server).await });
+        client.write_all(request).await.unwrap();
+        let result = negotiation.await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        (result, response)
+    }
+
+    #[tokio::test]
+    async fn socks5_connect_parses_supported_address_types() {
+        let (result, response) = negotiate_socks_request(&[
+            0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x56, 0xcf,
+        ])
+        .await;
+        assert_eq!(response, [0x05, 0x00]);
+        assert_eq!(
+            result.unwrap(),
+            Socks5ConnectTarget {
+                host: "127.0.0.1".to_string(),
+                port: 22_223,
+            }
+        );
+
+        let domain = b"example.com";
+        let mut request = vec![0x05, 0x02, 0x02, 0x00, 0x05, 0x01, 0x00, 0x03];
+        request.push(domain.len() as u8);
+        request.extend_from_slice(domain);
+        request.extend_from_slice(&443_u16.to_be_bytes());
+        let (result, response) = negotiate_socks_request(&request).await;
+        assert_eq!(response, [0x05, 0x00]);
+        assert_eq!(
+            result.unwrap(),
+            Socks5ConnectTarget {
+                host: "example.com".to_string(),
+                port: 443,
+            }
+        );
+
+        let mut request = vec![0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x04];
+        request.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        request.extend_from_slice(&22_u16.to_be_bytes());
+        let (result, response) = negotiate_socks_request(&request).await;
+        assert_eq!(response, [0x05, 0x00]);
+        assert_eq!(
+            result.unwrap(),
+            Socks5ConnectTarget {
+                host: "::1".to_string(),
+                port: 22,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn socks5_connect_rejects_auth_commands_and_invalid_targets() {
+        assert!(validate_socks5_domain("example.com"));
+        assert!(validate_socks5_domain("localhost"));
+        assert!(!validate_socks5_domain("bad..example"));
+        assert!(!validate_socks5_domain("-bad.example"));
+        assert!(!validate_socks5_domain("bad_.example"));
+
+        let (result, response) = negotiate_socks_request(&[0x05, 0x01, 0x02]).await;
+        assert!(result.is_err());
+        assert_eq!(response, [0x05, 0xff]);
+
+        for command in [0x02, 0x03] {
+            let (result, response) = negotiate_socks_request(&[
+                0x05, 0x01, 0x00, 0x05, command, 0x00, 0x01, 127, 0, 0, 1, 0, 53,
+            ])
+            .await;
+            assert!(result.is_err());
+            assert_eq!(response[0..2], [0x05, 0x00]);
+            assert_eq!(
+                response[2..],
+                [0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+            );
+        }
+
+        let (result, response) =
+            negotiate_socks_request(&[0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x09]).await;
+        assert!(result.is_err());
+        assert_eq!(response[0..2], [0x05, 0x00]);
+        assert_eq!(response[3], 0x08);
+
+        let (result, response) = negotiate_socks_request(&[
+            0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x03, 0x01, 0xff, 0, 22,
+        ])
+        .await;
+        assert!(result.is_err());
+        assert_eq!(response[0..2], [0x05, 0x00]);
+        assert_eq!(response[3], 0x08);
+
+        let (result, response) = negotiate_socks_request(&[
+            0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0, 0,
+        ])
+        .await;
+        assert!(result.is_err());
+        assert_eq!(response[0..2], [0x05, 0x00]);
+        assert_eq!(response[3], 0x01);
     }
 
     #[test]
@@ -4186,6 +4993,63 @@ mod tests {
         })
         .await
         .expect("remote forward cancellation timeout");
+
+        let dynamic_forward_id = Uuid::new_v4();
+        let dynamic_forward = manager
+            .start_dynamic_forward(NativeDynamicForwardStartRequest {
+                forward_id: dynamic_forward_id.to_string(),
+                route: route(target_fingerprint.clone()),
+                bind_port: 0,
+            })
+            .await
+            .expect("two-hop dynamic forward start");
+        assert_eq!(dynamic_forward.state, "active");
+        assert_eq!(dynamic_forward.bind_host, "127.0.0.1");
+        assert_ne!(dynamic_forward.bind_port, 0);
+        let mut socks = TcpStream::connect((Ipv4Addr::LOCALHOST, dynamic_forward.bind_port))
+            .await
+            .expect("connect dynamic forward");
+        socks.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut method = [0_u8; 2];
+        socks.read_exact(&mut method).await.unwrap();
+        assert_eq!(method, [0x05, 0x00]);
+        let [port_high, port_low] = target_port.to_be_bytes();
+        socks
+            .write_all(&[
+                0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, port_high, port_low,
+            ])
+            .await
+            .unwrap();
+        let mut connect_reply = [0_u8; 10];
+        socks.read_exact(&mut connect_reply).await.unwrap();
+        assert_eq!(connect_reply[0], 0x05);
+        assert_eq!(connect_reply[1], 0x00);
+        let mut dynamic_banner = [0_u8; 64];
+        let dynamic_bytes = tokio::time::timeout(
+            Duration::from_secs(5),
+            socks.read(&mut dynamic_banner),
+        )
+        .await
+        .expect("dynamic forwarded banner timeout")
+        .expect("read dynamic forwarded banner");
+        assert!(dynamic_banner[..dynamic_bytes].starts_with(b"SSH-2.0-"));
+        drop(socks);
+        let dynamic_snapshots = manager.list_dynamic_forwards().unwrap();
+        assert_eq!(dynamic_snapshots.len(), 1);
+        assert!(dynamic_snapshots[0].accepted_connections >= 1);
+        manager
+            .stop_dynamic_forward(&dynamic_forward_id.to_string())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if manager.list_dynamic_forwards().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dynamic forward cancellation timeout");
 
         let session_id = Uuid::new_v4();
         let launch = manager

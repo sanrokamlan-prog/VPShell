@@ -608,6 +608,52 @@ fn stop_native_remote_forward(_forward_id: String) -> Result<(), String> {
     Err("原生远端转发在移动端预览中不可用".to_string())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+async fn start_native_dynamic_forward(
+    native: State<'_, native_engine::NativeEngineManager>,
+    request: native_engine::NativeDynamicForwardStartRequest,
+) -> Result<native_engine::NativeDynamicForwardSnapshot, native_engine::NativeEngineError> {
+    native.start_dynamic_forward(request).await
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn start_native_dynamic_forward(
+    _request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    Err("原生动态转发在移动端预览中不可用".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+fn list_native_dynamic_forwards(
+    native: State<'_, native_engine::NativeEngineManager>,
+) -> Result<Vec<native_engine::NativeDynamicForwardSnapshot>, native_engine::NativeEngineError> {
+    native.list_dynamic_forwards()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn list_native_dynamic_forwards() -> Result<Vec<serde_json::Value>, String> {
+    Err("原生动态转发在移动端预览中不可用".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+fn stop_native_dynamic_forward(
+    native: State<'_, native_engine::NativeEngineManager>,
+    forward_id: String,
+) -> Result<(), native_engine::NativeEngineError> {
+    native.stop_dynamic_forward(&forward_id)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn stop_native_dynamic_forward(_forward_id: String) -> Result<(), String> {
+    Err("原生动态转发在移动端预览中不可用".to_string())
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 async fn native_list_remote_files(
@@ -1283,6 +1329,9 @@ pub fn run() {
             start_native_remote_forward,
             list_native_remote_forwards,
             stop_native_remote_forward,
+            start_native_dynamic_forward,
+            list_native_dynamic_forwards,
+            stop_native_dynamic_forward,
             start_ssh_session,
             write_terminal,
             enable_shell_integration,

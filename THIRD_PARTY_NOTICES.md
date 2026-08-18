@@ -74,10 +74,12 @@ selected by the user. No upstream source was copied. The integration performs a 
 SSH/SFTP readiness check, an opt-in long-lived PTY/Shell terminal and a bounded file-panel directory
 browser that reuses one authenticated native connection. Application-managed routes use russh's public
 `direct-tcpip` channel stream and `connect_stream` APIs to establish a separately pinned and authenticated
-SSH session for each hop. Public channel and forwarding APIs carry independently implemented local and
-remote forwarding: local listeners are Rust-owned `127.0.0.1` sockets, while remote requests and client
-targets are both fixed to `127.0.0.1`; each has explicit capacity and cancellation. VPShell independently
-owns endpoint validation, route, listener/channel and connection lifecycle. Large transfers, external editing and remote
+SSH session for each hop. Public channel and forwarding APIs carry independently implemented local,
+remote and dynamic forwarding: local and SOCKS5 listeners are Rust-owned `127.0.0.1` sockets, while
+remote requests and client targets are both fixed to `127.0.0.1`; each has explicit capacity and
+cancellation. The SOCKS5 parser supports only no-authentication CONNECT and is VPShell-owned.
+VPShell independently owns endpoint validation, route, listener/channel and connection lifecycle.
+Large transfers, external editing and remote
 mutations remain on independent compatibility connections; the integration does not replace the default
 system OpenSSH engine. Both crates remain removable with that isolated module and its desktop-only capabilities.
 

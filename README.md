@@ -18,7 +18,7 @@
 ![VPShell 工作台](docs/assets/workspace.png)
 
 > [!IMPORTANT]
-> `v0.1.0-alpha.9` 是 Windows-first 技术预览版。本版包含跨重启传输恢复、远程文件操作、Linux 监控、Shell Integration、配置迁移和同步协议核心预览；Android 仅为独立预览工程。原生跳板与回环限定的本地/远端端口转发仍需外部兼容验收，端到端同步、中继、动态转发和 Android 真机验收尚未完成。当前版本不应作为生产密码或私钥管理器。
+> `v0.1.0-alpha.9` 是 Windows-first 技术预览版。本版包含跨重启传输恢复、远程文件操作、Linux 监控、Shell Integration、配置迁移和同步协议核心预览；Android 仅为独立预览工程。当前源码工作区已加入原生跳板、回环限定的本地/远端端口转发和无认证 SOCKS5 CONNECT 动态转发，仍等待完整 Actions 与外部兼容验收；端到端同步、中继和 Android 真机验收尚未完成。当前版本不应作为生产密码或私钥管理器。
 
 ## 参与 Alpha 测试
 
@@ -64,6 +64,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 - v0.2 工作树提供 OpenSSH、PuTTY、Xshell、SecureCRT、MobaXterm、Tabby 和 Termius 的显式来源迁移预览；Rust 只读扫描并逐字段报告映射、跳过和失败，密码、Token、私钥内容及其他应用 vault 不进入 IPC。
 - 连接前通过无凭据的系统 OpenSSH 握手和 `ssh-keygen` 检查 `known_hosts`，并只启用当前 `ssh` 二进制实际报告支持的安全 KEX；未知主机显示算法和 SHA256 指纹供明确确认，确认时只进行一次远端复核并在本地验证写入，已变化指纹硬拒绝，终端、SFTP 与采样共享信任结果。
 - Ed25519/RSA4096 密钥生成、OpenSSH 口令加密，以及把所选公钥安装到当前已连接主机。
+- 桌面原生 `russh` route 可显式启动固定 `127.0.0.1` 的本地、远端和 SOCKS5 动态转发；动态转发只实现无认证 CONNECT，拒绝 BIND、UDP ASSOCIATE、未知地址类型和无效目标，最多 8 条且每条最多 32 个连接。该源码能力仍等待当前提交 Actions 与真实多服务器兼容验收，系统 OpenSSH 继续是默认引擎。
 - 多终端 Compose 命令栏、命令历史检索和路径快捷输入。
 - 连接后可显式启用 bash/zsh Shell Integration；带随机会话令牌的有界控制帧上报 hostname/user/cwd，Rust 维护最多 8 层嵌套上下文，退出嵌套 shell 后回退到已知祖先。它是远端自报状态，不替代主机密钥验证。
 - Compose 安全广播由 Rust 冻结命令、目标会话和 Shell 上下文代际，两分钟单次预览后才发送；生产目标持续标记，认证交互与已知破坏性命令禁止广播，目标变化逐项跳过并分别报告成功/失败/跳过。Raw input 广播仍未实现。
@@ -161,10 +162,10 @@ Google Authenticator/TOTP 只用于未来自建 Gateway 的账户登录，不能
 
 调整 SSH keepalive、压缩或复用连接并不等于海外线路加速。真正的跨境选路需要中继节点、持续测速和可解释的路线选择。
 
-VPShell 当前实现 `Direct`、用户显式配置的原生逐跳 route，以及两端均限制回环的本地/远端端口转发。后续路线是：
+VPShell 当前源码实现 `Direct`、用户显式配置的原生逐跳 route、两端均限制回环的本地/远端端口转发，以及固定本机回环监听的 SOCKS5 CONNECT 动态转发。后续路线是：
 
 ```text
-Direct -> ProxyJump -> SOCKS/HTTP -> 用户自建 Relay -> 可选托管节点
+Direct -> ProxyJump -> SOCKS5 -> HTTP CONNECT -> 用户自建 Relay -> 可选托管节点
 ```
 
 中继只转发到目标的 SSH 密文字节，不终止最终 SSH，也不读取凭据。没有实际中继和公开实测指标前，项目不会把普通客户端优化宣传成“海外智能加速”。

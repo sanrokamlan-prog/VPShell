@@ -220,6 +220,19 @@ interface NativeRemoteForwardSnapshot {
   failedConnections: number;
 }
 
+interface NativeDynamicForwardSnapshot {
+  schemaVersion: number;
+  forwardId: string;
+  state: "starting" | "active";
+  bindHost: "127.0.0.1";
+  bindPort: number;
+  routeHost: string;
+  routeHops: number;
+  activeConnections: number;
+  acceptedConnections: number;
+  rejectedConnections: number;
+}
+
 interface NativeEngineErrorPayload {
   code?: string;
   message?: string;
@@ -492,7 +505,8 @@ function App() {
   const [nativeTerminalStartingIds, setNativeTerminalStartingIds] = useState<string[]>([]);
   const [nativeLocalForwards, setNativeLocalForwards] = useState<NativeLocalForwardSnapshot[]>([]);
   const [nativeRemoteForwards, setNativeRemoteForwards] = useState<NativeRemoteForwardSnapshot[]>([]);
-  const [nativeForwardMode, setNativeForwardMode] = useState<"local" | "remote">("local");
+  const [nativeDynamicForwards, setNativeDynamicForwards] = useState<NativeDynamicForwardSnapshot[]>([]);
+  const [nativeForwardMode, setNativeForwardMode] = useState<"local" | "remote" | "dynamic">("local");
   const [nativeLocalForwardBusy, setNativeLocalForwardBusy] = useState(false);
   const [nativeLocalForwardError, setNativeLocalForwardError] = useState<string | null>(null);
 
@@ -574,11 +588,13 @@ function App() {
       void Promise.all([
         invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards"),
         invoke<NativeRemoteForwardSnapshot[]>("list_native_remote_forwards"),
+        invoke<NativeDynamicForwardSnapshot[]>("list_native_dynamic_forwards"),
       ])
-        .then(([localForwards, remoteForwards]) => {
+        .then(([localForwards, remoteForwards, dynamicForwards]) => {
           if (!active) return;
           setNativeLocalForwards(localForwards);
           setNativeRemoteForwards(remoteForwards);
+          setNativeDynamicForwards(dynamicForwards);
           setNativeLocalForwardError(null);
         })
         .catch((error) => {
@@ -1152,12 +1168,14 @@ function App() {
   async function refreshNativeForwards() {
     if (!isDesktopRuntime()) return;
     try {
-      const [localForwards, remoteForwards] = await Promise.all([
+      const [localForwards, remoteForwards, dynamicForwards] = await Promise.all([
         invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards"),
         invoke<NativeRemoteForwardSnapshot[]>("list_native_remote_forwards"),
+        invoke<NativeDynamicForwardSnapshot[]>("list_native_dynamic_forwards"),
       ]);
       setNativeLocalForwards(localForwards);
       setNativeRemoteForwards(remoteForwards);
+      setNativeDynamicForwards(dynamicForwards);
       setNativeLocalForwardError(null);
     } catch (error) {
       setNativeLocalForwardError(invokeErrorMessage(error));
@@ -1262,6 +1280,52 @@ function App() {
     try {
       await invoke("stop_native_remote_forward", { forwardId });
       showToast("正在停止远端转发");
+      await refreshNativeForwards();
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function startNativeDynamicForward(form: HTMLFormElement) {
+    if (!hasActiveHost || nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    const data = new FormData(form);
+    const bindPort = Number(data.get("bindPort"));
+    if (!Number.isInteger(bindPort) || bindPort < 0 || bindPort > 65_535) {
+      setNativeLocalForwardError("SOCKS 端口必须在 0 到 65535 之间");
+      return;
+    }
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      const forward = await invoke<NativeDynamicForwardSnapshot>("start_native_dynamic_forward", {
+        request: {
+          forwardId: crypto.randomUUID(),
+          route: nativeRoute(activeHost, appState.hosts, appState.sshKeys),
+          bindPort,
+        },
+      });
+      setNativeDynamicForwards((current) => [
+        forward,
+        ...current.filter((item) => item.forwardId !== forward.forwardId),
+      ]);
+      form.reset();
+      showToast(`SOCKS5 已监听 ${forward.bindHost}:${forward.bindPort}`);
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function stopNativeDynamicForward(forwardId: string) {
+    if (nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      await invoke("stop_native_dynamic_forward", { forwardId });
+      showToast("正在停止 SOCKS5 转发");
       await refreshNativeForwards();
     } catch (error) {
       setNativeLocalForwardError(invokeErrorMessage(error));
@@ -1839,10 +1903,10 @@ function App() {
             <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
             {isDesktopRuntime() ? (
               <button
-                className={`icon-button ${nativeLocalForwards.length + nativeRemoteForwards.length ? "forward-active" : ""}`}
+                className={`icon-button ${nativeLocalForwards.length + nativeRemoteForwards.length + nativeDynamicForwards.length ? "forward-active" : ""}`}
                 type="button"
-                title={`端口转发（本地 ${nativeLocalForwards.length} · 远端 ${nativeRemoteForwards.length}）`}
-                aria-label={`端口转发（本地 ${nativeLocalForwards.length} · 远端 ${nativeRemoteForwards.length}）`}
+                title={`端口转发（本地 ${nativeLocalForwards.length} · 远端 ${nativeRemoteForwards.length} · SOCKS ${nativeDynamicForwards.length}）`}
+                aria-label={`端口转发（本地 ${nativeLocalForwards.length} · 远端 ${nativeRemoteForwards.length} · SOCKS ${nativeDynamicForwards.length}）`}
                 disabled={!hasActiveHost}
                 onClick={() => setDialog("local-forward")}
               >
@@ -2384,6 +2448,7 @@ function App() {
           <div className="engine-selector forward-mode-switch" role="group" aria-label="转发模式">
             <button type="button" className={nativeForwardMode === "local" ? "active" : ""} aria-pressed={nativeForwardMode === "local"} onClick={() => { setNativeForwardMode("local"); setNativeLocalForwardError(null); }}><Cable size={14} /> 本地</button>
             <button type="button" className={nativeForwardMode === "remote" ? "active" : ""} aria-pressed={nativeForwardMode === "remote"} onClick={() => { setNativeForwardMode("remote"); setNativeLocalForwardError(null); }}><RadioTower size={14} /> 远端</button>
+            <button type="button" className={nativeForwardMode === "dynamic" ? "active" : ""} aria-pressed={nativeForwardMode === "dynamic"} onClick={() => { setNativeForwardMode("dynamic"); setNativeLocalForwardError(null); }}><Network size={14} /> SOCKS</button>
           </div>
           {nativeForwardMode === "local" ? (
             <>
@@ -2414,7 +2479,7 @@ function App() {
                 </div>
               ) : <div className="local-forward-empty"><Cable size={18} /><span>没有运行中的本地转发</span></div>}
             </>
-          ) : (
+          ) : nativeForwardMode === "remote" ? (
             <>
               <form
                 id="remote-forward-form"
@@ -2442,6 +2507,34 @@ function App() {
                   ))}
                 </div>
               ) : <div className="local-forward-empty"><RadioTower size={18} /><span>没有运行中的远端转发</span></div>}
+            </>
+          ) : (
+            <>
+              <form
+                id="dynamic-forward-form"
+                className="form-grid local-forward-form"
+                onSubmit={(event) => { event.preventDefault(); void startNativeDynamicForward(event.currentTarget); }}
+              >
+                <label className="field span-2"><span>SOCKS 端口</span><input name="bindPort" type="number" defaultValue="0" min="0" max="65535" required /></label>
+                <label className="field span-2"><span>监听地址</span><input value="127.0.0.1" readOnly /></label>
+                <label className="field span-2"><span>协议</span><input value="SOCKS5 CONNECT" readOnly /></label>
+                <button className="primary-button local-forward-start" type="submit" disabled={nativeLocalForwardBusy}><Play size={14} /> 启动</button>
+              </form>
+              <div className="local-forward-heading"><strong>运行中的 SOCKS5 转发</strong><span>{nativeDynamicForwards.length} / 8</span></div>
+              {nativeDynamicForwards.length ? (
+                <div className="local-forward-list" aria-live="polite">
+                  {nativeDynamicForwards.map((forward) => (
+                    <div className="local-forward-row" key={forward.forwardId}>
+                      <span className={`session-state ${forward.state === "active" ? "connected" : "connecting"}`} />
+                      <div>
+                        <strong><code>{forward.bindHost}:{forward.bindPort}</code> <ChevronRight size={13} /> 按请求连接</strong>
+                        <small>经 {forward.routeHost}（{forward.routeHops} 跳） · 当前 {forward.activeConnections} · 已接收 {forward.acceptedConnections} · 已拒绝 {forward.rejectedConnections}</small>
+                      </div>
+                      <button className="icon-button compact danger" type="button" title="停止 SOCKS5 转发" aria-label="停止 SOCKS5 转发" disabled={nativeLocalForwardBusy} onClick={() => void stopNativeDynamicForward(forward.forwardId)}><Square size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="local-forward-empty"><Network size={18} /><span>没有运行中的 SOCKS5 转发</span></div>}
             </>
           )}
           {nativeLocalForwardError ? <p className="local-forward-error" role="alert"><AlertTriangle size={14} /> {nativeLocalForwardError}</p> : null}

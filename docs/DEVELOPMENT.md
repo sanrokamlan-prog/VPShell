@@ -263,8 +263,9 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - probe 与长期终端共用 `route.hops[]`：必须有 1–4 个有序 hop，hop UUID 与 host/port 端点不可重复；每跳分别验证 host/user/port、SHA256 pin、5–60 秒超时及唯一认证来源。route 结构验证不能读取秘密，连接到某跳时才解析该跳引用；首跳 TCP、后续 `direct-tcpip` channel stream 上的新 SSH 会话必须分别完成 pin 和认证。稳定错误只允许附带 `hopIndex`，失败或取消必须关闭整条已建立连接链。
 - 长期终端最多 16 个，PTY 行列限制 2–1000，单次输入最多 64 KiB；读写任务分离，各使用 64 项有界队列。每批原生输出必须携带非零单调 `deliveryId`，xterm 解析回调再调用 `ack_native_terminal_output`；Rust 在回执前暂停事件桥，并以同一编号重投直到确认或 30 秒 fail closed。前端必须去重，同一连接重启时清空编号状态；各标签的终端实例在后台保持挂载，只用 `visibility` 隐藏，不能因切换标签卸载消费者。这样队列和 SSH window 才能对慢消费者形成背压而不丢弃终端字节。该确认 command 只在桌面 capability 中，不能携带输出或秘密。连接中可按 session UUID 取消，PTY/Shell 明确确认后才登记成功；输出、退出、取消和异常事件只按匹配代际处理，复用标签不会被迟到任务移除或误报退出。
 - 原生文件坞浏览只接受 `sessionId` 和受限绝对路径/`~`/`.`，不得再次接收 host、凭据引用或私钥路径。每个长期连接只有 16 项 SFTP 请求队列，单目录最多返回 1,000 项；首次浏览懒启动一个持续子系统，失败后关闭并在下次请求重建，终端取消时统一清理。浏览之外的上传下载、外部编辑和文件变更继续使用独立兼容连接，以免大流量阻塞交互终端，并保留 TransferManager/预览令牌的现有安全边界。
-- Linux CI 启动仅监听回环的临时 OpenSSH，禁用密码、交互认证和 root，使用一次性 Ed25519 用户密钥，实际完成 host-key pin、公钥认证、同一连接两次 SFTP 目录读取，并打开 PTY、调整尺寸、验证双向终端字节和取消。双 sshd fixture 还必须以受限 `PermitOpen`/`PermitListen` 真实覆盖本地与远端回环转发、OS 分配端口、banner 字节和取消清理。其他平台负责编译/单测；真实多版本服务器、长时间流控、网络故障和性能仍是后续兼容矩阵。
-- 系统 OpenSSH 仍为默认，只有用户对未连接标签显式选择 `russh` 才启用长期原生终端及共享目录浏览；FIDO/U2F、agent、PKCS#11、GSSAPI、Pageant 等未覆盖认证继续使用兼容引擎。删除方案是移除三个桌面原生命令 capability、`native_engine.rs` 和两项依赖；升级或扩大用途前必须通过锁文件、四平台编译、真实 OpenSSH/SFTP/PTY 和安全回归，并保留系统 OpenSSH 回退。
+- Linux CI 启动仅监听回环的临时 OpenSSH，禁用密码、交互认证和 root，使用一次性 Ed25519 用户密钥，实际完成 host-key pin、公钥认证、同一连接两次 SFTP 目录读取，并打开 PTY、调整尺寸、验证双向终端字节和取消。双 sshd fixture 还必须以受限 `PermitOpen`/`PermitListen` 真实覆盖本地与远端回环转发、OS 分配端口、banner 字节和取消清理，并通过动态回环 listener 完成 SOCKS5 无认证 method/CONNECT 握手后读取同一真实 banner。协议单测必须覆盖 IPv4、域名、IPv6、无可接受认证方法、非 CONNECT、无效域名和零端口；其他平台负责编译/单测。真实多版本服务器、长时间流控、网络故障和性能仍是后续兼容矩阵。
+- 动态转发请求只能包含 UUID、已验证 route 和端口；Rust 固定绑定 `127.0.0.1`，最多 8 条、每条 32 个连接，握手固定 10 秒并沿用最终 hop 的通道超时。WebView 不能提交目标或秘密，也不能解析 SOCKS；BIND、UDP ASSOCIATE、认证协商和非 CONNECT 能力保持 fail closed。Android manifest/capability 不得出现三项动态转发命令。
+- 系统 OpenSSH 仍为默认，只有用户对未连接标签显式选择 `russh` 才启用长期原生终端及共享目录浏览；FIDO/U2F、agent、PKCS#11、GSSAPI、Pageant 等未覆盖认证继续使用兼容引擎。删除方案是移除相应桌面原生命令 capability、`native_engine.rs` 和两项依赖；升级或扩大用途前必须通过锁文件、四平台编译、真实 OpenSSH/SFTP/PTY 和安全回归，并保留系统 OpenSSH 回退。
 
 ### 10.9 B8 协议回归矩阵（v0.3 工作树）
 
