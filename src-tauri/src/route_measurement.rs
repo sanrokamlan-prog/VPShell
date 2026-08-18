@@ -14,9 +14,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::native_engine::{
-    NativeEngineManager, NativeRouteRequest, validate_measurement_route,
-};
+use crate::native_engine::{NativeEngineManager, NativeRouteRequest, validate_measurement_route};
 
 const SCHEMA_VERSION: u16 = 1;
 const MAX_CANDIDATES: usize = 4;
@@ -115,7 +113,6 @@ impl RouteMeasurementError {
     fn invalid(message: &'static str) -> Self {
         Self::new("route-measurement-invalid-request", message, false)
     }
-
 }
 
 #[derive(Clone, Default)]
@@ -475,8 +472,8 @@ fn validate_start_request(
 }
 
 fn parse_campaign_id(value: &str) -> Result<Uuid, RouteMeasurementError> {
-    let parsed = Uuid::parse_str(value)
-        .map_err(|_| RouteMeasurementError::invalid("路线测量标识无效"))?;
+    let parsed =
+        Uuid::parse_str(value).map_err(|_| RouteMeasurementError::invalid("路线测量标识无效"))?;
     if value.len() != 36 || parsed.to_string() != value {
         return Err(RouteMeasurementError::invalid("路线测量标识无效"));
     }
@@ -486,15 +483,13 @@ fn parse_campaign_id(value: &str) -> Result<Uuid, RouteMeasurementError> {
 fn validate_candidate_id(value: &str) -> Result<(), RouteMeasurementError> {
     if value.is_empty()
         || value.len() > 32
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         || value.starts_with('-')
         || value.ends_with('-')
     {
-        return Err(RouteMeasurementError::invalid(
-            "路线测量候选标识格式无效",
-        ));
+        return Err(RouteMeasurementError::invalid("路线测量候选标识格式无效"));
     }
     Ok(())
 }
@@ -520,10 +515,12 @@ fn recompute_selection(state: &mut CampaignState) {
     let mut eligible = evaluations
         .iter()
         .filter_map(|(candidate_id, evaluation)| {
-            evaluation
-                .snapshot
-                .eligible
-                .then(|| (candidate_id.clone(), evaluation.score_ms.unwrap_or(u64::MAX)))
+            evaluation.snapshot.eligible.then(|| {
+                (
+                    candidate_id.clone(),
+                    evaluation.score_ms.unwrap_or(u64::MAX),
+                )
+            })
         })
         .collect::<Vec<_>>();
     eligible.sort_by(|(left_id, left_score), (right_id, right_score)| {
@@ -548,8 +545,7 @@ fn recompute_selection(state: &mut CampaignState) {
             .iter()
             .find(|(candidate_id, _)| candidate_id == previous_id)
         && previous_score.saturating_mul(100)
-            <= best_score
-                .saturating_mul(100 + SWITCH_HYSTERESIS_PERCENT)
+            <= best_score.saturating_mul(100 + SWITCH_HYSTERESIS_PERCENT)
     {
         state.selection_reason_code = if previous_id == best_id {
             "lowest-observed-score"
@@ -654,11 +650,7 @@ fn percentile(values: &[u64], percentile: usize) -> Option<u64> {
     if values.is_empty() {
         return None;
     }
-    let rank = values
-        .len()
-        .saturating_mul(percentile)
-        .saturating_add(99)
-        / 100;
+    let rank = values.len().saturating_mul(percentile).saturating_add(99) / 100;
     values.get(rank.saturating_sub(1)).copied()
 }
 
@@ -824,7 +816,10 @@ mod tests {
             record_sample(&mut candidate, sample, 5);
         }
         assert_eq!(candidate.samples.len(), 5);
-        assert_eq!(candidate.samples.front().map(|sample| sample.sampled_at_ms), Some(1));
+        assert_eq!(
+            candidate.samples.front().map(|sample| sample.sampled_at_ms),
+            Some(1)
+        );
         let evaluation = evaluate_candidate("direct", &candidate).snapshot;
         assert_eq!(evaluation.success_rate_percent, 80);
         assert_eq!(evaluation.median_duration_ms, Some(110));
