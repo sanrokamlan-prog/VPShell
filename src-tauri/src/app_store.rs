@@ -1387,9 +1387,7 @@ fn path_history_objects(
             let Some(local_id) = item.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if local_id.is_empty()
-                || local_id.len() > 128
-                || local_id.chars().any(char::is_control)
+            if local_id.is_empty() || local_id.len() > 128 || local_id.chars().any(char::is_control)
             {
                 continue;
             }
@@ -1426,7 +1424,9 @@ fn path_history_sync_fields(
             FieldValue::Text(text("path")?.to_string()),
         ),
     ]);
-    validate_path_history_projection_fields(&fields).is_ok().then_some(fields)
+    validate_path_history_projection_fields(&fields)
+        .is_ok()
+        .then_some(fields)
 }
 
 fn queue_command_history_sync_changes(
@@ -1602,8 +1602,7 @@ fn queue_path_history_sync_changes(
                 path_history_sync_fields(next_host_id, next, &host_entity_ids)
             })
             .is_some();
-        let was_syncable =
-            path_history_sync_fields(host_id, item, &host_entity_ids).is_some();
+        let was_syncable = path_history_sync_fields(host_id, item, &host_entity_ids).is_some();
         if was_synced && was_syncable && !remains_syncable {
             changes.push((entity_id.clone(), "delete", None, None));
         }
@@ -2018,10 +2017,9 @@ fn validate_command_history_projection_fields(
                 "kind" | "value" | "hostId" | "remotePath" | "createdAt"
             )
         });
-    let kind_matches = matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "command");
-    if !matches_shape
-        || !kind_matches
-        || !entity_fields_are_syncable(&EntityKind::History, fields)
+    let kind_matches =
+        matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "command");
+    if !matches_shape || !kind_matches || !entity_fields_are_syncable(&EntityKind::History, fields)
     {
         return Err("远端命令历史同步投影字段未通过协议验证".to_string());
     }
@@ -2035,7 +2033,8 @@ fn validate_path_history_projection_fields(
         && fields
             .keys()
             .all(|field| matches!(field.as_str(), "kind" | "value" | "hostId" | "createdAt"));
-    let kind_matches = matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "path");
+    let kind_matches =
+        matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "path");
     let path_matches = matches!(fields.get("value"), Some(FieldValue::Text(value))
         if value.len() <= 4096
             && (value == "~" || value.starts_with('/') || value.starts_with("~/"))
@@ -2050,9 +2049,7 @@ fn validate_path_history_projection_fields(
     Ok(())
 }
 
-fn validate_history_projection_fields(
-    fields: &BTreeMap<String, FieldValue>,
-) -> Result<(), String> {
+fn validate_history_projection_fields(fields: &BTreeMap<String, FieldValue>) -> Result<(), String> {
     match fields.get("kind") {
         Some(FieldValue::Text(value)) if value == "command" => {
             validate_command_history_projection_fields(fields)
@@ -4860,7 +4857,11 @@ mod tests {
             serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
         let paths = projected["pathHistory"]["host-1"].as_array().unwrap();
         assert_eq!(paths.len(), 3);
-        assert!(paths.iter().any(|item| item["path"] == "/srv/releases/next"));
+        assert!(
+            paths
+                .iter()
+                .any(|item| item["path"] == "/srv/releases/next")
+        );
         assert!(paths.iter().any(|item| item["path"] == "/srv/token=secret"));
         assert!(paths.iter().any(|item| item["path"] == "/srv/legacy"));
 

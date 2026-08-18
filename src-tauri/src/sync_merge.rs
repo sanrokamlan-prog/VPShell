@@ -1300,9 +1300,9 @@ pub(crate) fn entity_fields_are_syncable(
         }
         Some(FieldValue::Text(kind)) if kind == "path" => {
             fields.len() == 4
-                && fields
-                    .keys()
-                    .all(|field| matches!(field.as_str(), "kind" | "value" | "hostId" | "createdAt"))
+                && fields.keys().all(|field| {
+                    matches!(field.as_str(), "kind" | "value" | "hostId" | "createdAt")
+                })
                 && matches!(fields.get("value"), Some(FieldValue::Text(value))
                     if value == "~" || value.starts_with('/') || value.starts_with("~/"))
         }
@@ -2377,23 +2377,14 @@ mod tests {
         ]);
         assert!(entity_fields_are_syncable(&EntityKind::History, &fields));
         let mut relative = fields.clone();
-        relative.insert(
-            "value".to_string(),
-            FieldValue::Text("srv/releases".into()),
-        );
-        assert!(!entity_fields_are_syncable(
-            &EntityKind::History,
-            &relative,
-        ));
+        relative.insert("value".to_string(), FieldValue::Text("srv/releases".into()));
+        assert!(!entity_fields_are_syncable(&EntityKind::History, &relative,));
         let mut secret = fields.clone();
         secret.insert(
             "value".to_string(),
             FieldValue::Text("/srv/token=secret".into()),
         );
-        assert!(!entity_fields_are_syncable(
-            &EntityKind::History,
-            &secret,
-        ));
+        assert!(!entity_fields_are_syncable(&EntityKind::History, &secret,));
         let mut incomplete = fields;
         incomplete.remove("createdAt");
         assert!(!entity_fields_are_syncable(
