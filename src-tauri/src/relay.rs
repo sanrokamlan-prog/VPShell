@@ -214,7 +214,10 @@ impl RelayTokenSet {
         if tokens.is_empty() || tokens.len() > MAX_ACTIVE_TOKENS {
             return Err("relay-token-set-invalid");
         }
-        let key_ids = tokens.iter().map(RelayToken::key_id).collect::<HashSet<_>>();
+        let key_ids = tokens
+            .iter()
+            .map(RelayToken::key_id)
+            .collect::<HashSet<_>>();
         if key_ids.len() != tokens.len() {
             return Err("relay-token-set-invalid");
         }
@@ -1508,12 +1511,9 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(old_error.code(), "relay-server-proof-invalid");
-        let current = connect_via_relay(
-            &client_config(revoked_endpoint, target),
-            &new_token,
-        )
-        .await
-        .unwrap();
+        let current = connect_via_relay(&client_config(revoked_endpoint, target), &new_token)
+            .await
+            .unwrap();
         drop(current);
 
         revoked_cancel.cancel();
@@ -1670,13 +1670,8 @@ mod tests {
             auth_attempts_per_minute: 1,
             ..RelayLimits::default()
         };
-        let (endpoint, relay_cancel) = start_relay(
-            target.clone(),
-            token_set(&[12]),
-            limits,
-            Arc::clone(&audit),
-        )
-        .await;
+        let (endpoint, relay_cancel) =
+            start_relay(target.clone(), token_set(&[12]), limits, Arc::clone(&audit)).await;
         let wrong = token(13);
         assert!(
             connect_via_relay(&client_config(endpoint.clone(), target.clone()), &wrong)
@@ -1710,13 +1705,8 @@ mod tests {
             max_connections: 1,
             ..RelayLimits::default()
         };
-        let (endpoint, relay_cancel) = start_relay(
-            target.clone(),
-            token_set(&[14]),
-            limits,
-            Arc::clone(&audit),
-        )
-        .await;
+        let (endpoint, relay_cancel) =
+            start_relay(target.clone(), token_set(&[14]), limits, Arc::clone(&audit)).await;
         let first = connect_via_relay(
             &client_config(endpoint.clone(), target.clone()),
             &relay_token,
