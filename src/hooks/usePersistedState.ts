@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 export interface AppStoreSnapshot {
@@ -67,10 +67,15 @@ export function usePersistedState<T>(
   });
   const revision = useRef(0);
   const ready = useRef(!isDesktopRuntime());
+  const localMutationGeneration = useRef(0);
+  const localStateDirty = useRef(false);
   const saveQueue = useRef(Promise.resolve());
   const suppressPersistedJson = useRef<string | null>(null);
 
   const applyAppStoreSnapshot = useCallback((snapshot: AppStoreSnapshot) => {
+    if (ready.current && (localStateDirty.current || snapshot.revision < revision.current)) {
+      return false;
+    }
     let next = initialValue;
     if (snapshot.stateJson) {
       const parsed = JSON.parse(snapshot.stateJson) as T;
@@ -81,10 +86,18 @@ export function usePersistedState<T>(
     const nextJson = JSON.stringify(next);
     if (nextJson === undefined) throw new Error("Rust 返回了不可序列化的本地状态");
     suppressPersistedJson.current = nextJson;
+    localStateDirty.current = false;
     setValue(next);
     setStatus({ ready: true, saving: false, recoveryNote: snapshot.recoveryNote });
     legacy.current = { value: next, stateJson: undefined };
+    return true;
   }, [initialValue, migrate]);
+
+  const setPersistedValue = useCallback((update: SetStateAction<T>) => {
+    localMutationGeneration.current += 1;
+    localStateDirty.current = true;
+    setValue(update);
+  }, []);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -118,6 +131,7 @@ export function usePersistedState<T>(
       if (suppress) return;
     }
     setStatus((current) => ({ ...current, saving: true, error: undefined }));
+    const savingGeneration = localMutationGeneration.current;
     const timer = window.setTimeout(() => {
       saveQueue.current = saveQueue.current
         .catch(() => undefined)
@@ -126,6 +140,9 @@ export function usePersistedState<T>(
             request: { stateJson, expectedRevision: revision.current },
           });
           revision.current = result.revision;
+          if (savingGeneration === localMutationGeneration.current) {
+            localStateDirty.current = false;
+          }
           setStatus((current) => ({ ...current, ready: true, saving: false, error: undefined }));
         })
         .catch((error) => {
@@ -135,5 +152,5 @@ export function usePersistedState<T>(
     return () => window.clearTimeout(timer);
   }, [value]);
 
-  return [value, setValue, status, applyAppStoreSnapshot] as const;
+  return [value, setPersistedValue, status, applyAppStoreSnapshot] as const;
 }

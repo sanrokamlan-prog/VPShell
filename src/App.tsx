@@ -666,6 +666,33 @@ function App() {
   useEffect(() => {
     if (!isDesktopRuntime()) return undefined;
     let active = true;
+    let stopListening: (() => void) | undefined;
+    void listen<SyncCycleResult>("desktop-sync-cycle", (event) => {
+      if (!active) return;
+      setDesktopSyncStatus(event.payload.status);
+      setDesktopSyncError(event.payload.status.lastErrorCode ?? null);
+      try {
+        if (!applyAppStoreSnapshot(event.payload.appStore)) {
+          setDesktopSyncError(event.payload.status.lastErrorCode ?? "local-state-busy");
+        }
+      } catch (error) {
+        setDesktopSyncError(invokeErrorMessage(error));
+      }
+    }).then((unlisten) => {
+      if (!active) unlisten();
+      else stopListening = unlisten;
+    }).catch((error) => {
+      if (active) setDesktopSyncError(invokeErrorMessage(error));
+    });
+    return () => {
+      active = false;
+      stopListening?.();
+    };
+  }, [applyAppStoreSnapshot]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
+    let active = true;
     const refresh = () => {
       void Promise.all([
         invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards"),
@@ -2029,7 +2056,9 @@ function App() {
     try {
       const result = await invoke<SyncCycleResult>("run_sync_once");
       const status = result.status;
-      applyAppStoreSnapshot(result.appStore);
+      if (!applyAppStoreSnapshot(result.appStore)) {
+        throw new Error("本地状态仍有未提交更改；Rust 快照未覆盖当前编辑");
+      }
       setDesktopSyncStatus(status);
       setDesktopSyncError(null);
       if (status.lastErrorCode) {

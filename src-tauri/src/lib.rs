@@ -59,6 +59,7 @@ mod sync_provider;
 mod sync_provider_ext;
 #[allow(dead_code)] // The coordinator/UI phases consume recovery and encrypted export APIs.
 mod sync_recovery;
+mod sync_scheduler;
 mod transfer_manager;
 
 pub(crate) const CREDENTIAL_SERVICE: &str = "com.sanro.vpshell.credentials";
@@ -1426,18 +1427,28 @@ fn desktop_sync_status(
 
 #[tauri::command]
 async fn configure_local_folder_sync(
+    app: tauri::AppHandle,
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    scheduler: State<'_, sync_scheduler::AutomaticSyncScheduler>,
     store: State<'_, app_store::AppStore>,
     request: sync_coordinator::ConfigureLocalFolderSyncRequest,
 ) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    sync_scheduler::AutomaticSyncScheduler::ensure_supported()?;
     let coordinator = coordinator.inner().clone();
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        coordinator.configure_local_folder(request)?;
-        coordinator.status_with_app_store(&store)
+    let worker_coordinator = coordinator.clone();
+    let worker_store = store.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        worker_coordinator.configure_local_folder(request)?;
+        worker_coordinator.status_with_app_store(&worker_store)
     })
     .await
-    .map_err(|error| format!("Local Folder 同步配置任务异常结束: {error}"))?
+    .map_err(|error| format!("Local Folder 同步配置任务异常结束: {error}"))??;
+    if let Err(error) = scheduler.start(app, coordinator.clone(), store) {
+        let _ = coordinator.detach_session();
+        return Err(error);
+    }
+    Ok(status)
 }
 
 #[derive(Serialize)]
@@ -1481,8 +1492,10 @@ fn cancel_sync(
 #[tauri::command]
 fn lock_sync(
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    scheduler: State<'_, sync_scheduler::AutomaticSyncScheduler>,
     store: State<'_, app_store::AppStore>,
 ) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    scheduler.stop()?;
     coordinator.detach_session()?;
     coordinator.status_with_app_store(store.inner())
 }
@@ -1650,6 +1663,7 @@ pub fn run() {
         .manage(remote_monitor::RemoteMonitorManager::default())
         .manage(safe_broadcast::SafeBroadcastManager::default())
         .manage(migration::MigrationManager::default())
+        .manage(sync_scheduler::AutomaticSyncScheduler::default())
         .setup(|app| {
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {

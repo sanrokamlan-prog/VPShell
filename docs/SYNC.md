@@ -1,6 +1,6 @@
 # VPShell 加密同步设计
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 已接入显式初始化/解锁和手动单周期；AppState 主机公开字段、安全自建脚本、终端字体族/字号/行高及自动上传编辑文件/包传输两个行为偏好已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。主机 credential/key/path/trust pin，脚本描述、分类和未通过秘密扫描的内容，自定义字体资产/名称，以及设备本地编辑器路径不进入 operation，远端投影也不会替换这些本机数据。历史、背景、其他尚未建模设置、自动触发和冲突解决 UI、WebDAV/扩展 provider 产品凭据、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；AppState 主机公开字段、安全自建脚本、终端字体族/字号/行高及自动上传编辑文件/包传输两个行为偏好已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。主机 credential/key/path/trust pin，脚本描述、分类和未通过秘密扫描的内容，自定义字体资产/名称，以及设备本地编辑器路径不进入 operation，远端投影也不会替换这些本机数据。历史、背景、其他尚未建模设置和冲突解决 UI、WebDAV/扩展 provider 产品凭据、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
 
 ### 当前 v1 密码学边界
 
@@ -53,7 +53,7 @@ TLS 仍然必须启用，但 TLS 只保护传输链路，不能替代客户端�
 | 本地业务存储 | WebView `localStorage` 明文 JSON（legacy） | Rust 管理的 SQLite schema v1 快照 + 有界事件域；同步前再做 E2EE 对象化 |
 | Provider | 桌面 Local Folder 已接入；WebDAV 与扩展 provider 仍只有内部接口/adapter | 可由用户配置、解锁和自动调度的 provider |
 | 二级密码 | Local Folder bootstrap 已用 Argon2id keyslot 包裹随机 VMK，密码不持久化；轮换/恢复 UI 未接线 | Argon2id 派生 KEK，包裹随机 Vault Master Key |
-| 同步动作 | 桌面可显式运行单周期，Android 只读状态可见；主机公开字段、安全自建脚本、终端字体族/字号/行高及两个应用行为偏好已接入本地入队与远端事务投影，其他域与自动调度未接线 | 启动/网络恢复/业务变更/手动触发的自动调度与完整冲突处理 |
+| 同步动作 | 桌面可显式运行单周期，并在解锁期间由 Rust 执行启动/业务变化防抖/周期/失败复查；Android 只读状态可见；主机公开字段、安全自建脚本、终端字体族/字号/行高及两个应用行为偏好已接入本地入队与远端事务投影 | 补齐其他业务域、系统网络事件直连触发与完整冲突处理；应用关闭后不伪装为后台服务 |
 | 冲突 | 无 | 事件并集、字段级 LWW、tombstone、冲突中心 |
 | TOTP | 只有 Gateway 条件开关 | 只用于自建 Gateway 账户登录 |
 | 凭据同步 | 只有开关 | 默认关闭的独立凭据密钥域 |
@@ -327,6 +327,8 @@ periodic/startup/manual trigger
 
 同步 worker 支持指数退避和抖动；离线不阻塞本地业务。启动、网络恢复、业务变更防抖、定时器和“立即同步”都可触发。单个 provider 同一 vault 只运行一个逻辑 worker，避免本机重复竞争。
 
+当前桌面 `AutomaticSyncScheduler` 在 Local Folder 解锁成功后启动，2 秒后做首次检查；changefeed/pending 计数变化稳定 2 秒后触发，空闲时每 5 分钟检查远端，仍有 pending 或可重试错误时 30 秒复查。永久错误、显式取消和恢复阻止暂停自动周期，锁定先使 scheduler generation 失效再销毁 provider/VMK。手动周期与自动周期共用协调器单飞门。周期事件只包含 value-free 状态和 Rust AppStore snapshot；前端在本地脏代际或 revision 回退时拒绝应用，不能覆盖尚未提交的 WebView 编辑。它不是应用退出后的操作系统后台任务，也尚未接入平台网络变化事件。
+
 状态必须可解释：`未配置`、`已锁定`、`等待网络`、`正在上传`、`正在合并`、`存在冲突`、`疑似回滚`、`认证失败`。不能只显示一个永远绿色的云图标。
 
 ### 13.2 新设备恢复
@@ -387,7 +389,7 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：桌面 Local Folder 已接通初始化/解锁、主机公开字段、安全自建脚本、终端字体族/字号/行高和两个应用行为偏好的双向事务交接及手动单周期；仍需历史/背景/其他尚未建模设置业务域入队、自动触发、WebDAV 产品入口、真实外部服务器兼容矩阵及断网退避测试。
+3. **MVP provider**：桌面 Local Folder 已接通初始化/解锁、主机公开字段、安全自建脚本、终端字体族/字号/行高和两个应用行为偏好的双向事务交接，以及手动与解锁期自动单周期；仍需历史/背景/其他尚未建模设置业务域入队、WebDAV 产品入口、真实外部服务器兼容矩阵及断网退避测试。
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心和远端路径作用域已接入协调器事务；仍需冲突详情/解决 UI 和多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
 6. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。

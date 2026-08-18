@@ -65,7 +65,7 @@ pub(crate) struct InitializeAppStoreRequest {
     legacy_state_json: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppStoreSnapshot {
     schema_version: i64,
