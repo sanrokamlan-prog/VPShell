@@ -844,6 +844,14 @@ impl SyncJournal {
         })
     }
 
+    pub(crate) fn setting_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let entities = state.setting_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
     pub(crate) fn acknowledge_reconciliation(&self) -> JournalResult<()> {
         self.transaction(|transaction| {
             transaction

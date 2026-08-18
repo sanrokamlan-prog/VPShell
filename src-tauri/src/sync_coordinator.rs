@@ -530,6 +530,18 @@ impl SyncCoordinatorManager {
                 now_ms,
             )
             .map_err(|_| "app-state-writeback".to_string())?;
+        let projection = self
+            .journal
+            .setting_merge_projection()
+            .map_err(journal_code)?;
+        app_store
+            .apply_remote_setting_projection(
+                vault_id,
+                projection.revision,
+                &projection.entities,
+                now_ms,
+            )
+            .map_err(|_| "app-state-writeback".to_string())?;
         self.journal.prune(now_ms).map_err(journal_code)?;
         Ok(CycleCounts {
             uploaded,
@@ -566,6 +578,9 @@ impl SyncCoordinatorManager {
                 .acknowledge_entity_sync_change(vault_id, &change.operation_id)
                 .map_err(|_| "app-state-handoff".to_string())?;
         }
+        app_store
+            .ensure_setting_sync_change(now_ms)
+            .map_err(|_| "app-state-handoff".to_string())?;
         Ok(())
     }
 
@@ -954,7 +969,7 @@ mod tests {
             "commandHistory": [], "connectionHistory": [], "pathHistory": {},
             "sync": {"enabled": true, "provider": "local", "endpoint": "", "remotePath": "/vpshell", "username": "", "totpEnabled": false, "syncSecrets": false},
             "wallpaper": {"source": "none", "value": "", "opacity": 0.2},
-            "terminalAppearance": {"fontFamily": "monospace", "fontSize": 13, "lineHeight": 1.25},
+            "terminalAppearance": {"fontFamily": "Cascadia Code", "fontSize": 13, "lineHeight": 1.25},
             "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false},
             "onboardingCompleted": true
         })
@@ -1093,18 +1108,54 @@ mod tests {
         field: &str,
         value: &str,
     ) -> Vec<u8> {
+        operation_field_patch(
+            device_id,
+            sequence,
+            entity_kind,
+            entity_id,
+            field,
+            serde_json::json!({ "type": "text", "value": value }),
+        )
+    }
+
+    fn operation_integer_patch(
+        device_id: &str,
+        sequence: u64,
+        entity_kind: &str,
+        entity_id: &str,
+        field: &str,
+        value: i64,
+    ) -> Vec<u8> {
+        operation_field_patch(
+            device_id,
+            sequence,
+            entity_kind,
+            entity_id,
+            field,
+            serde_json::json!({ "type": "integer", "value": value }),
+        )
+    }
+
+    fn operation_field_patch(
+        device_id: &str,
+        sequence: u64,
+        entity_kind: &str,
+        entity_id: &str,
+        field: &str,
+        value: serde_json::Value,
+    ) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "formatVersion": 1,
             "operationId": Uuid::new_v4().to_string(),
             "deviceId": device_id,
             "sequence": sequence,
-            "hlc": { "physicalMs": 1000 + sequence as i64, "logical": 0 },
+            "hlc": { "physicalMs": 10_000 + sequence as i64, "logical": 0 },
             "payload": {
                 "kind": "patch",
                 "payload": {
                     "entityKind": entity_kind,
                     "entityId": entity_id,
-                    "fields": { (field): { "type": "text", "value": value } },
+                    "fields": { (field): value },
                     "observedFields": { (field): null },
                     "observedTombstone": null
                 }
@@ -1291,6 +1342,90 @@ mod tests {
                 !encoded
                     .windows("local description".len())
                     .any(|window| { window == "local description".as_bytes() })
+            );
+        }
+    }
+
+    #[test]
+    fn cycle_syncs_terminal_appearance_without_local_font_asset_metadata() {
+        let root = TempDir::new("app-state-setting");
+        let store = test_app_store(&root);
+        let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
+        state["terminalAppearance"] = serde_json::json!({
+            "fontFamily": "JetBrains Mono",
+            "fontSize": 16,
+            "lineHeight": 1.4,
+            "customFontName": "device-only-font.ttf"
+        });
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let setting_entity = store
+            .pending_entity_sync_changes(128)
+            .unwrap()
+            .into_iter()
+            .find(|change| change.entity_kind == crate::sync_merge::EntityKind::Setting)
+            .unwrap()
+            .entity_id;
+
+        let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let vault_id = Uuid::new_v4().to_string();
+        let remote_device = Uuid::new_v4().to_string();
+        let vault_key = VaultKey::generate().unwrap();
+        let remote = encrypt_sync_object(
+            &vault_key,
+            &vault_id,
+            SyncObjectKind::Event,
+            &Uuid::new_v4().to_string(),
+            Some(&remote_device),
+            Some(1),
+            &operation_integer_patch(
+                &remote_device,
+                1,
+                "setting",
+                &setting_entity,
+                "fontSize",
+                20,
+            ),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider.insert(
+            &format!("vpshell/v1/{vault_id}/segments/{remote_device}/1.oseg"),
+            remote,
+        );
+        coordinator
+            .attach_session(provider.clone(), vault_key, &vault_id)
+            .unwrap();
+
+        let status = coordinator.run_once(&store, 1_000).unwrap();
+        assert_eq!(status.last_uploaded_objects, 2);
+        assert_eq!(status.last_downloaded_objects, 1);
+        assert_eq!(status.open_conflicts, 1);
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            state["terminalAppearance"]["fontFamily"],
+            "JetBrains Mono"
+        );
+        assert_eq!(state["terminalAppearance"]["fontSize"], 20);
+        assert_eq!(state["terminalAppearance"]["lineHeight"], 1.4);
+        assert_eq!(
+            state["terminalAppearance"]["customFontName"],
+            "device-only-font.ttf"
+        );
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+        for encoded in provider.objects.lock().unwrap().values() {
+            assert!(
+                !encoded
+                    .windows("device-only-font.ttf".len())
+                    .any(|window| window == "device-only-font.ttf".as_bytes())
             );
         }
     }

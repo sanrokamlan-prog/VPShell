@@ -38,7 +38,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 
 | 运维痛点 | VPShell 方向 | `v0.1.0-alpha.7` |
 | --- | --- | :---: |
-| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **部分接线**：密码学、恢复/导出、设备 registry、Local/WebDAV provider、持久 outbox/replay、确定性 merge 与 Rust 协调器内核已实现；桌面 Local Folder 可显式初始化/解锁并运行单周期，主机公开字段已进入事务 changefeed 和加密 outbox；远端安全回写、其他业务域、自动触发、其他 provider 与冲突解决 UI 仍未完成 |
+| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **部分接线**：密码学、恢复/导出、设备 registry、Local/WebDAV provider、持久 outbox/replay、确定性 merge 与 Rust 协调器内核已实现；桌面 Local Folder 可显式初始化/解锁并运行单周期，主机公开字段、安全自建脚本和终端字体族/字号/行高已接入双向事务交接；历史、背景、自动触发、其他 provider 与冲突解决 UI 仍未完成 |
 | 大量小文件/目录传输缓慢 | 自动探测 `tar + zstd`，缺少远端能力时回退 SFTP | **已实现**：直连后端 |
 | 命令、路径和参数反复复制 | 不设产品条数上限的事件历史、快速检索和参数模板 | **部分实现**：本地历史与最近连接 |
 | 操作时忘记当前主机 | 常驻配置 IP、环境标记、Shell Integration 上报 hostname/cwd | **v0.2 工作区**：显式 bash/zsh 探针与 8 层自报上下文栈 |
@@ -77,7 +77,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 - 首次启动自动显示分步使用指南，逐项标明添加、导入、连接、SFTP、广播、密钥、设置和升级按钮；右上角问号可随时重新打开。
 - 删除的主机、历史和路径进入 30 天回收站，可恢复或永久删除；关联系统凭据仅在永久删除或到期且未被其他主机引用时清理。
 
-当前连接和传输只支持直连；取消会在安全检查点停止工作并清理已知临时路径，最终提交阶段可能已经来不及取消。`v0.1.0-alpha.7` 发布产物仍不支持暂停、断点续传、应用重启后的持久任务恢复或文件坞变更操作；当前 v0.2 工作区已实现跨重启恢复、带 Rust 预览令牌和二次确认的文件坞操作，以及 Rust 管理的有界 Linux 监控历史与暂停/频率控制，等待下一版发布。远端监控仍仅支持 Linux，历史只保留在当前应用进程中。Local Folder 同步只开放显式解锁后的手动单周期，当前仅接通主机公开字段和安全自建脚本，尚无其他业务域或自动调度。完整边界见 [架构文档](docs/ARCHITECTURE.md#2-v010-已实现)。
+当前连接和传输只支持直连；取消会在安全检查点停止工作并清理已知临时路径，最终提交阶段可能已经来不及取消。`v0.1.0-alpha.7` 发布产物仍不支持暂停、断点续传、应用重启后的持久任务恢复或文件坞变更操作；当前 v0.2 工作区已实现跨重启恢复、带 Rust 预览令牌和二次确认的文件坞操作，以及 Rust 管理的有界 Linux 监控历史与暂停/频率控制，等待下一版发布。远端监控仍仅支持 Linux，历史只保留在当前应用进程中。Local Folder 同步只开放显式解锁后的手动单周期，当前接通主机公开字段、安全自建脚本和终端字体族/字号/行高；自定义字体资产/名称、历史、背景和自动调度尚未接线。完整边界见 [架构文档](docs/ARCHITECTURE.md#2-v010-已实现)。
 
 ## 下载与安装
 
@@ -275,7 +275,7 @@ Alpha 发布后的重点验证：
 - 设备 registry 最多 32 台，只记录公开签名键和非敏感标签；撤销单调、最后活动设备不可撤销、已撤销设备不能发布 registry。撤销不能抹除已复制的 VMK，疑似泄露时仍必须轮换主密钥并全量重加密；设备 operation 签名、registry 验证和管理 UI 尚未接线；
 - 独立凭据 vault 策略默认关闭，需活动设备显式启用并逐设备授权；CVK 与业务 VMK 分离，使用 `credentials` keyslot/AAD/HKDF 域。SSH 密码、私钥口令、OpenSSH 私钥和 access token 只进入 Rust 内存中的清零载荷与认证密文，本机 credential reference 不进入对象、错误、日志或事件；系统钥匙串写回、CVK 恢复/轮换和 UI 尚未接线；
 - SFTP、S3-compatible 与自建 Gateway 已通过专用 Rust transport trait 接入同一不可变 provider：严格配置、分页/key/大小、取消、条件创建、同名核对和提交后回读由公共适配层强制。SFTP 配置必须固定 host-key SHA-256，S3/Gateway endpoint 必须 HTTPS；Gateway 密码/TOTP 只传入一次登录调用，provider 会话不保存 TOTP。真实 SFTP 会话、S3 SigV4、Gateway HTTP 客户端与外部兼容矩阵仍未接线；
-- AppState 主机公开字段和安全自建脚本已接入 operation/outbox 事务入队与合并结果回写；历史、设置、背景等业务域、自动调度、WebDAV 产品凭据和冲突中心解决 UI 仍待实现；
+- AppState 主机公开字段、安全自建脚本和终端字体族/字号/行高已接入 operation/outbox 事务入队与合并结果回写；自定义字体资产/名称、历史、背景、其余设置、自动调度、WebDAV 产品凭据和冲突中心解决 UI 仍待实现；
 - TOTP 只保护 Gateway 登录，不替代二级同步密码、恢复密钥或 E2EE 数据密钥。
 
 ### Android Preview - 移动端

@@ -684,6 +684,10 @@ impl MergeState {
         self.entity_projection(EntityKind::Script)
     }
 
+    pub(crate) fn setting_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::Setting)
+    }
+
     fn apply_patch(&mut self, payload: &PatchPayload, stamp: MergeStamp) -> MergeResult<()> {
         let key = entity_key(&payload.entity_kind, &payload.entity_id);
         if !self.entities.contains_key(&key) && self.entities.len() >= MAX_ENTITIES {
@@ -1769,6 +1773,16 @@ mod tests {
         assert_eq!(
             state.entity_fields(&EntityKind::Setting, HOST_ID).unwrap()["fontSize"],
             FieldValue::Integer(16)
+        );
+        assert_eq!(
+            state.setting_projection().unwrap(),
+            vec![MergedEntityProjection {
+                entity_id: HOST_ID.to_string(),
+                fields: Some(BTreeMap::from([(
+                    "fontSize".to_string(),
+                    FieldValue::Integer(16),
+                )])),
+            }]
         );
         let background = state
             .entity_fields(&EntityKind::Background, HOST_ID)

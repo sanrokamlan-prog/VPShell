@@ -108,10 +108,11 @@
 | 完成 | 桌面 Local Folder 产品入口：不可变 bootstrap、显式初始化/解锁、手动单周期、取消/锁定和 value-free 状态；PR #1 run `32104797505` 全绿 |
 | 完成 | AppState 主机公开字段保存事务 changefeed、稳定实体映射、observed merge operation、加密 outbox 与跨库幂等确认已接线；PR #1 run `32107931488` 全绿 |
 | 完成 | 远端主机 merge 按 vault/revision/hash 可重试投影到 AppState，保留本机秘密、无回声 changefeed，并把新 snapshot/revision 接回桌面状态；PR #1 run `32111238560` 全绿 |
-| 进行中 | 安全自建脚本的事务 changefeed、具名加密 operation/outbox、远端可重试投影与本机不安全脚本保护已接线，等待 Actions |
-| 待实现 | 历史/设置/背景等其他业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
+| 完成 | 安全自建脚本的事务 changefeed、具名加密 operation/outbox、远端可重试投影与本机不安全脚本保护；PR #1 run `32115066343` 全绿 |
+| 进行中 | 终端字体族/字号/行高的固定设置实体、事务 changefeed、加密 operation/outbox、独立可重试投影与防回声指纹已接线，等待 Actions；自定义字体资产/名称保持本机 |
+| 待实现 | 历史/背景/其余设置等业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口及主机公开字段双向 operation/投影链路均已通过 Actions；安全自建脚本双向链路正在验证，其他业务域、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口、主机公开字段及安全自建脚本双向 operation/投影链路均已通过 Actions；终端外观窄设置链路正在验证，历史/背景/其余设置、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
 
 ## Phase C：Android Preview
 
@@ -219,7 +220,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 安全自建脚本 operation 与 AppState 投影（待 Actions） | `vpshell-state.sqlite3` 升级 schema v4，changefeed 以 `entity_kind` 区分 host/script，并为脚本建立独立稳定 UUID 映射和投影水位。仅 `custom=true` 且通过严格协议/秘密扫描的 name/body/source/risk/parameters 进入 operation；内置脚本、description/category 与不安全内容保持本机，安全脚本转为不安全时只发布 tombstone。通用 journal handoff 对 operation ID 同时绑定实体类型/身份/payload；协调器在同一周期加密上传主机与脚本 change，并以独立 vault/revision/hash 事务投影脚本。远端更新保留本机描述/分类，本机不安全或非自建脚本拒绝远端更新和删除，远端风险不降低本机风险，非法/不完整投影整事务回滚且不生成回声 change。聚焦测试覆盖安全字段筛选、不安全转换 tombstone、稳定身份、元数据/受保护脚本、风险不降级、v3 迁移、幂等与回滚，以及真实协调器周期中的双对象加密、远端正文冲突胜出和本机元数据不出密文。 |
 | 2026-08-18 | B9 安全自建脚本本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest/唯一项/handler/capability 完整对齐、Android 运行 Sync capability disabled 且只保留状态读取、schema v4 与 v3 升级测试、三项脚本聚焦测试和通用 journal 实体类型内容绑定静态契约、无旧 host-only 符号、无新增日志宏及无 `node_modules`/`target` 检查通过；根分区交接前 50%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、SDK 或项目依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | B9 安全自建脚本首轮 Actions 与编译/格式修复 | 提交 `d8a923d` 的 PR #1 run `32114369849` 已全部进入终态：frontend 生产构建 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告 `app_store.rs` 五段和 `sync_coordinator.rs` 一段相同排版差异后失败，未执行 locked check/test 与 Linux 真实 fixture。Android 越过桌面格式门禁后在 aarch64 Rust 编译发现四个相同 `E0502`：最终风险值借用 `script` 内字符串期间又修改该 map。修复先将不降级后的风险复制为拥有所有权的 `String`，再修改脚本；同时严格按 Ubuntu/Windows runner 的完整六段差异机械应用格式，不改变其他行为。修复后 `git diff --check`、严格 JSON、91-command manifest/handler/capability、Android Sync disabled、六段 runner 格式形态、拥有所有权的风险值及无 `node_modules`/`target` 检查通过，根分区保持 50%。VPS 不下载 Cargo/rustfmt、SDK 或依赖，等待修复提交后的完整矩阵。 |
+| 2026-08-18 | B9 安全自建脚本 operation 与 AppState 投影（Actions 完成） | 编译/格式修复提交 `17e6960` 的 PR #1 run `32115066343` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture 及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 终端外观窄设置 operation 与 AppState 投影（待 Actions） | `vpshell-state.sqlite3` 升级 schema v5，将 `setting` 纳入 durable changefeed，并以固定 UUID 表示跨设备唯一终端外观实体。状态保存只入队完整 fontFamily/fontSize/lineHeight，行高按百分之一整数编码；产品默认值首次初始化不制造冗余 operation，改回默认值仍会入队。协调器通过通用 journal 生成带 observed stamp 的具名加密 operation/outbox，并读取独立 setting merge 投影；业务库以单独 vault/revision/hash 水位、固定实体、恰好三个字段、完整类型/范围和本地 changefeed 清空为前提事务回写，同时更新内容指纹阻止下一次普通保存形成回声。`customFontName` 与字体资产保持本机，非法实体、删除、缺字段或额外 setting 字段 fail closed。v4 升级若旧 changefeed 已满会保留本地状态并延期，协调器移交出空间后按指纹一次性补入，不隔离旧库或永久漏传。聚焦测试覆盖固定公开字段/恢复默认/非法步长、迁移延期恢复、远端幂等/防回声/额外字段回滚/v4 行保留、merge setting 投影及真实协调器周期的双本地密文、远端整数冲突和本机字体名称不出密文。 |
+| 2026-08-18 | B9 终端外观窄设置本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest 唯一项/handler/capability 并集完整对齐、Android 仅只读 `android_sync_status` 且运行 Sync capability 继续 disabled、schema v5/固定设置实体/独立水位与恢复补入链静态闭合、五项新增 AppStore/coordinator 聚焦测试及 merge projection 断言存在、无新增日志宏、无 `.codex-roadmap-complete`、无 `node_modules`/`target` 检查通过；根分区起止均为 50%。VPS 无 Cargo/rustfmt，未下载工具链、SDK 或依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送安全自建脚本编译/格式修复；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后进入下一个真实未完成业务域 operation。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送终端外观窄设置同步；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后进入历史/背景/其余设置中的下一个可安全落地业务域，不以缺少删除语义的 append-only 历史合并冒充完整历史同步。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

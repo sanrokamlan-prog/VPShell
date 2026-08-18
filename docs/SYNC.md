@@ -1,6 +1,6 @@
 # VPShell 加密同步设计
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 已接入显式初始化/解锁和手动单周期；AppState 主机公开字段与安全自建脚本已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。主机 credential/key/path/trust pin 以及脚本描述、分类和未通过秘密扫描的内容不进入 operation，远端投影也不会替换本机秘密或受保护脚本。历史、设置、背景等其他业务域入队、自动触发和冲突解决 UI、WebDAV/扩展 provider 产品凭据、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 已接入显式初始化/解锁和手动单周期；AppState 主机公开字段、安全自建脚本及终端字体族/字号/行高已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。主机 credential/key/path/trust pin，脚本描述、分类和未通过秘密扫描的内容，以及自定义字体资产/名称不进入 operation，远端投影也不会替换这些本机数据。历史、背景、其余设置、自动触发和冲突解决 UI、WebDAV/扩展 provider 产品凭据、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
 
 ### 当前 v1 密码学边界
 
@@ -53,7 +53,7 @@ TLS 仍然必须启用，但 TLS 只保护传输链路，不能替代客户端�
 | 本地业务存储 | WebView `localStorage` 明文 JSON（legacy） | Rust 管理的 SQLite schema v1 快照 + 有界事件域；同步前再做 E2EE 对象化 |
 | Provider | 桌面 Local Folder 已接入；WebDAV 与扩展 provider 仍只有内部接口/adapter | 可由用户配置、解锁和自动调度的 provider |
 | 二级密码 | Local Folder bootstrap 已用 Argon2id keyslot 包裹随机 VMK，密码不持久化；轮换/恢复 UI 未接线 | Argon2id 派生 KEK，包裹随机 Vault Master Key |
-| 同步动作 | 桌面可显式运行单周期，Android 只读状态可见；主机公开字段和安全自建脚本已接入本地入队与远端事务投影，其他域与自动调度未接线 | 启动/网络恢复/业务变更/手动触发的自动调度与完整冲突处理 |
+| 同步动作 | 桌面可显式运行单周期，Android 只读状态可见；主机公开字段、安全自建脚本和终端字体族/字号/行高已接入本地入队与远端事务投影，其他域与自动调度未接线 | 启动/网络恢复/业务变更/手动触发的自动调度与完整冲突处理 |
 | 冲突 | 无 | 事件并集、字段级 LWW、tombstone、冲突中心 |
 | TOTP | 只有 Gateway 条件开关 | 只用于自建 Gateway 账户登录 |
 | 凭据同步 | 只有开关 | 默认关闭的独立凭据密钥域 |
@@ -81,11 +81,11 @@ BEGIN;
 COMMIT;
 ```
 
-手动 worker 读取 changefeed 后，在独立 `vpshell-sync.sqlite3` 的一个事务内生成带 observed stamp 的具名 operation、AEAD 加密、更新 merge state、推进设备 seq/HLC 并写 outbox；journal 提交成功后才按 operation ID 从业务库确认 change。若进程在两个提交之间退出，下次运行会解密并核对 journal 中同 ID operation 的实体类型、身份与公开 payload，相同则幂等确认，不同则 fail closed。这样不依赖虚假的跨库事务，也不会出现已保存业务状态永久漏传。changefeed 只含白名单公开字段；本地主机和自建脚本 ID 分别通过持久随机 UUID 映射到协议实体。主机 credentialRef、私钥/路径、host-key pin、Token 和 provider 凭据不会写入其中；脚本只允许 name/body/source/risk/parameters，description/category/内置脚本不进入同步，正文、来源或参数未通过秘密扫描时不入队。原先安全的脚本变为不安全时只发布 tombstone，不上传新内容。
+手动 worker 读取 changefeed 后，在独立 `vpshell-sync.sqlite3` 的一个事务内生成带 observed stamp 的具名 operation、AEAD 加密、更新 merge state、推进设备 seq/HLC 并写 outbox；journal 提交成功后才按 operation ID 从业务库确认 change。若进程在两个提交之间退出，下次运行会解密并核对 journal 中同 ID operation 的实体类型、身份与公开 payload，相同则幂等确认，不同则 fail closed。这样不依赖虚假的跨库事务，也不会出现已保存业务状态永久漏传。changefeed 只含白名单公开字段；本地主机和自建脚本 ID 分别通过持久随机 UUID 映射到协议实体，终端外观使用固定协议 UUID 以便独立初始化的设备收敛。主机 credentialRef、私钥/路径、host-key pin、Token 和 provider 凭据不会写入其中；脚本只允许 name/body/source/risk/parameters，description/category/内置脚本不进入同步，正文、来源或参数未通过秘密扫描时不入队。原先安全的脚本变为不安全时只发布 tombstone，不上传新内容。终端外观只允许完整的 fontFamily/fontSize/lineHeight，行高以百分之一整数编码；自定义字体文件和 `customFontName` 保持本机。
 
 当前 `sync_outbox.rs` 使用独立 `vpshell-sync.sqlite3` schema v2 落实 journal 内原子边界，并持久保存随机本机 device ID 与单调 HLC。调用者只能通过 Rust 内部闭包修改同一个 SQLite transaction；闭包不得执行网络、文件写入或其他不可回滚副作用。`sync_operations` 只保存已通过 v1 严格解析的加密信封，`sync_outbox` 保存状态/次数/租约/稳定错误码，业务明文、密码、私钥、credential ref、Token 和 provider 凭据不进入 journal。未发布最多 10,000 对象/256 MiB，整个 journal 最多 50,000 对象/384 MiB，数据库文件启动硬限制 512 MiB；已发布本地对象保留 30 天，远端 receipt 保留 90 天，但每设备持久高水位不会清理。
 
-远端 receipt 与 merge state 提交后，协调器从 journal 分别读取完整主机和脚本投影，再交给 `vpshell-state.sqlite3` schema v4 的独立事务。业务库要求 vault 绑定一致、没有尚未交给 journal 的本地 change，并为两个实体域分别以 `(merge_revision, projection_hash)` 拒绝回退或同 revision 换内容。主机公开字段只覆盖公开字段，本机 credential/key path/host-key pin 和其他运行字段保留；新远端主机先获得持久本机 ID，jump route 必须能映射到最多三台仍活动的实体。脚本投影只创建或更新 `custom=true` 的白名单字段，保留现有 description/category；本机不安全或非自建脚本拒绝远端更新和删除，远端风险等级不能降低本机风险。缺少必需字段、悬空/已删除路线、无效脚本或超过 AppState 上限时对应投影事务整体回滚。专用投影写入不生成 changefeed，前端接受返回的 AppState snapshot/revision 时跳过一次自动保存，因此不会形成回声 operation。两个数据库之间以及主机/脚本两个业务事务之间崩溃时不伪称原子：下次周期即使远端对象已有 receipt，也会从持久 merge state 重试尚未记录 revision 的投影。
+远端 receipt 与 merge state 提交后，协调器从 journal 分别读取完整主机、脚本和终端外观投影，再交给 `vpshell-state.sqlite3` schema v5 的独立事务。业务库要求 vault 绑定一致、没有尚未交给 journal 的本地 change，并为三个实体域分别以 `(merge_revision, projection_hash)` 拒绝回退或同 revision 换内容。主机公开字段只覆盖公开字段，本机 credential/key path/host-key pin 和其他运行字段保留；新远端主机先获得持久本机 ID，jump route 必须能映射到最多三台仍活动的实体。脚本投影只创建或更新 `custom=true` 的白名单字段，保留现有 description/category；本机不安全或非自建脚本拒绝远端更新和删除，远端风险等级不能降低本机风险。终端外观只接受唯一固定实体和恰好三个完整字段，保留 `customFontName`，并在同一事务更新内容指纹防止下一次普通保存形成回声。缺少必需字段、额外设置字段、悬空/已删除路线、无效脚本或超过 AppState 上限时对应投影事务整体回滚。专用投影写入不生成 changefeed，前端接受返回的 AppState snapshot/revision 时跳过一次自动保存。两个数据库之间以及三个业务投影事务之间崩溃时不伪称原子：下次周期即使远端对象已有 receipt，也会从持久 merge state 重试尚未记录 revision 的投影。
 
 worker claim 使用两分钟租约；进程中断后的过期租约不会立即重放，而是进入 `retry_wait`。网络、超时、限流和远端暂不可用按 2/4/8/16/32 秒退避，最多六次且单次最长五分钟；协议、认证、不可变冲突和完整性错误直接进入 `permanent_failure`。取消进入 `paused`，只能显式恢复且不重置尝试次数；`published` 是不可逆终态。损坏、截断或超过 512 MiB 的 journal 最多保留两个隔离备份，新库写入 `reconcile-required`；协调器会保持停止并只报告状态，远端核对和显式解除流程未接线前不能自动继续上传。
 
@@ -387,7 +387,7 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：桌面 Local Folder 已接通初始化/解锁、主机公开字段和安全自建脚本双向事务交接及手动单周期；仍需历史/设置/背景等业务域入队、自动触发、WebDAV 产品入口、真实外部服务器兼容矩阵及断网退避测试。
+3. **MVP provider**：桌面 Local Folder 已接通初始化/解锁、主机公开字段、安全自建脚本和终端字体族/字号/行高双向事务交接及手动单周期；仍需历史/背景/其余设置业务域入队、自动触发、WebDAV 产品入口、真实外部服务器兼容矩阵及断网退避测试。
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心和远端路径作用域已接入协调器事务；仍需冲突详情/解决 UI 和多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
 6. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。

@@ -215,7 +215,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 
 - `sync_outbox` 复用已审计的精确锁定 `rusqlite 0.40.2` bundled 配置，不新增依赖、网络或 Tauri capability。它使用独立数据库，避免把 24 MiB 加密对象挤入 UI 状态快照库。
 - `enqueue_local`/`apply_remote` 的业务闭包只允许执行传入 SQLite transaction 上可回滚的 SQL；禁止在闭包内访问 provider、写文件、启动进程或发送事件。错误必须回滚业务数据、operation、outbox/receipt 和 head 的全部变化。
-- journal 与 AppState 是两个数据库。远端 receipt/merge 提交后只能以完整投影、单调 merge revision 和内容哈希交给业务库；业务事务必须核对 vault 且在本地 changefeed 非空时延迟，禁止覆盖尚未入 journal 的修改。主机与脚本使用独立投影水位，避免一个域先落地后阻塞另一个域重试。公开字段投影不得删除或替换本机 credential/key path/host-key pin、脚本 description/category 或未通过秘密扫描的自建脚本，专用回写不得生成新的本地 operation；同 revision 不同内容、悬空 jump route、无完整连接身份或无完整脚本字段一律 fail closed。前端只能接受 Rust 返回的完整 snapshot/revision，并跳过该 snapshot 的一次自动保存。
+- journal 与 AppState 是两个数据库。远端 receipt/merge 提交后只能以完整投影、单调 merge revision 和内容哈希交给业务库；业务事务必须核对 vault 且在本地 changefeed 非空时延迟，禁止覆盖尚未入 journal 的修改。主机、脚本与终端外观使用独立投影水位，避免一个域先落地后阻塞另一个域重试。公开字段投影不得删除或替换本机 credential/key path/host-key pin、脚本 description/category、未通过秘密扫描的自建脚本或自定义字体资产/名称，专用回写不得生成新的本地 operation；同 revision 不同内容、悬空 jump route、无完整连接身份/脚本字段，或终端外观不是固定实体的完整 fontFamily/fontSize/lineHeight 时一律 fail closed。前端只能接受 Rust 返回的完整 snapshot/revision，并跳过该 snapshot 的一次自动保存。
 - 测试使用注入的毫秒时间，不依赖 sleep；必须覆盖租约过期、每次退避、六次上限、暂停/恢复、发布终态、事务回滚、损坏/未来 schema、保留不删除未发布工作、序号缺口/回退以及无序号对象换 key/身份重放。
 
 ### 10.5 确定性 merge 规则（v0.3 工作树）
@@ -251,7 +251,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - 桌面 Local Folder 只接受已存在、非符号链接的专用目录。用户必须明确选择“初始化新 vault”或“解锁已有 vault”；解锁缺失 bootstrap 时不得隐式创建，初始化已有 bootstrap 时不得覆盖。
 - `vpshell/v1/bootstrap.json` 是不可变 schema-v1 对象，只包含 canonical vault UUID 和 Argon2id 认证 keyslot。二级密码进入 Rust 后立即由清零容器拥有，不得持久化、序列化、调试、记录或返回前端；状态响应只包含阶段、计数、代际和稳定错误码。
 - 配置与 Argon2id 解锁、手动单周期均在 blocking worker 执行；取消使当前 provider token 与 generation 同时失效，锁定清除运行时 provider/VMK。五个桌面命令只能进入 `capabilities/default.json`，Android capability 必须持续排除。
-- 当前入口不会把 AppState 快照直接上传。主机公开字段和通过秘密扫描的 `custom=true` 脚本会经业务库 changefeed、具名 operation、加密 outbox 与独立远端投影交接；内置脚本及 description/category 不同步，安全脚本变为不安全时只发 tombstone，本机不安全脚本拒绝远端覆盖/删除。历史、设置、背景等业务域、自动调度、冲突解决、WebDAV 产品凭据和真实多设备矩阵必须作为后续独立项完成。
+- 当前入口不会把 AppState 快照直接上传。主机公开字段、通过秘密扫描的 `custom=true` 脚本及终端字体族/字号/行高会经业务库 changefeed、具名 operation、加密 outbox 与独立远端投影交接；内置脚本及 description/category 不同步，安全脚本变为不安全时只发 tombstone，本机不安全脚本拒绝远端覆盖/删除。自定义字体资产/名称、历史、背景、其余设置、自动调度、冲突解决、WebDAV 产品凭据和真实多设备矩阵必须作为后续独立项完成。
 
 ### 10.10 Android Preview 共享契约（Phase C）
 
