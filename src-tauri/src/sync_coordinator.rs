@@ -27,9 +27,7 @@ use crate::{
         PutObjectOutcome, SyncObjectMetadata, SyncObjectProvider, WebDavCredentials,
         WebDavProvider,
     },
-    sync_provider_credentials::{
-        read_webdav_credential, validate_webdav_credential_reference,
-    },
+    sync_provider_credentials::{read_webdav_credential, validate_webdav_credential_reference},
 };
 
 const COORDINATOR_SCHEMA_VERSION: u16 = 1;
@@ -476,9 +474,7 @@ impl SyncCoordinatorManager {
                 )
             }
             _ => {
-                return Err(
-                    "WebDAV 用户名和系统凭据引用必须同时提供，或同时留空".to_string(),
-                );
+                return Err("WebDAV 用户名和系统凭据引用必须同时提供，或同时留空".to_string());
             }
         };
         let provider: Arc<dyn SyncObjectProvider> = Arc::new(

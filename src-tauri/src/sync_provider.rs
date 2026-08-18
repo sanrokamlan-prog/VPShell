@@ -491,10 +491,7 @@ impl WebDavCredentials {
                 "WebDAV 凭据字段超出限制",
             ));
         }
-        Ok(Self {
-            username,
-            password,
-        })
+        Ok(Self { username, password })
     }
 }
 
