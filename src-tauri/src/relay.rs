@@ -239,12 +239,10 @@ impl RelayLimits {
             || self.auth_attempts_per_minute == 0
             || self.auth_attempts_per_minute > 6000
             || !(1024..=1024 * 1024 * 1024 * 1024).contains(&self.max_session_bytes)
-            || !(Duration::from_secs(5)..=Duration::from_secs(3600))
-                .contains(&self.idle_timeout)
+            || !(Duration::from_secs(5)..=Duration::from_secs(3600)).contains(&self.idle_timeout)
             || !(Duration::from_secs(30)..=Duration::from_secs(24 * 60 * 60))
                 .contains(&self.max_session_duration)
-            || !(Duration::from_secs(1)..=Duration::from_secs(60))
-                .contains(&self.handshake_timeout)
+            || !(Duration::from_secs(1)..=Duration::from_secs(60)).contains(&self.handshake_timeout)
             || !(Duration::from_secs(1)..=Duration::from_secs(60))
                 .contains(&self.target_connect_timeout)
         {
@@ -408,11 +406,7 @@ impl RelayServerState {
     }
 
     fn target_id(&self, target: &RelayTarget) -> String {
-        hashed_id(
-            b"target",
-            &self.audit_salt,
-            target.authority().as_bytes(),
-        )
+        hashed_id(b"target", &self.audit_salt, target.authority().as_bytes())
     }
 
     fn audit(&self, event: &RelayAuditEvent) -> bool {
@@ -544,7 +538,11 @@ async fn handle_connection(
         );
         return;
     }
-    if client.write_all(&encode_hello(&server_nonce)).await.is_err() {
+    if client
+        .write_all(&encode_hello(&server_nonce))
+        .await
+        .is_err()
+    {
         record_rejection(
             &state,
             request_id,
@@ -554,7 +552,11 @@ async fn handle_connection(
         );
         return;
     }
-    let request = match timeout(state.config.limits.handshake_timeout, read_request(&mut client)).await
+    let request = match timeout(
+        state.config.limits.handshake_timeout,
+        read_request(&mut client),
+    )
+    .await
     {
         Ok(Ok(request)) => request,
         _ => {
@@ -801,8 +803,7 @@ async fn read_request(stream: &mut TcpStream) -> Result<ParsedRequest, &'static 
         .read_exact(&mut prefix)
         .await
         .map_err(|_| "relay-request-invalid")?;
-    if &prefix[..4] != MAGIC
-        || u16::from_be_bytes([prefix[4], prefix[5]]) != RELAY_PROTOCOL_VERSION
+    if &prefix[..4] != MAGIC || u16::from_be_bytes([prefix[4], prefix[5]]) != RELAY_PROTOCOL_VERSION
     {
         return Err("relay-version-unsupported");
     }
@@ -818,8 +819,8 @@ async fn read_request(stream: &mut TcpStream) -> Result<ParsedRequest, &'static 
         .read_exact(&mut suffix)
         .await
         .map_err(|_| "relay-request-invalid")?;
-    let host = std::str::from_utf8(&suffix[..target_length])
-        .map_err(|_| "relay-request-invalid")?;
+    let host =
+        std::str::from_utf8(&suffix[..target_length]).map_err(|_| "relay-request-invalid")?;
     let port = u16::from_be_bytes([suffix[target_length], suffix[target_length + 1]]);
     let target = RelayTarget {
         host: normalize_host(host)?,
@@ -1090,10 +1091,8 @@ impl RelayClientConfig {
                 .relay_endpoint
                 .bytes()
                 .any(|byte| byte.is_ascii_control())
-            || !(Duration::from_secs(1)..=Duration::from_secs(60))
-                .contains(&self.connect_timeout)
-            || !(Duration::from_secs(1)..=Duration::from_secs(60))
-                .contains(&self.handshake_timeout)
+            || !(Duration::from_secs(1)..=Duration::from_secs(60)).contains(&self.connect_timeout)
+            || !(Duration::from_secs(1)..=Duration::from_secs(60)).contains(&self.handshake_timeout)
         {
             return Err(RelayClientError::new("relay-client-config-invalid"));
         }
@@ -1141,14 +1140,10 @@ pub async fn connect_via_relay(
         .await
         .map_err(|_| RelayClientError::new("relay-handshake-timeout"))?
         .map_err(|_| RelayClientError::new("relay-handshake-failed"))?;
-    if &hello[..4] != MAGIC
-        || u16::from_be_bytes([hello[4], hello[5]]) != RELAY_PROTOCOL_VERSION
-    {
+    if &hello[..4] != MAGIC || u16::from_be_bytes([hello[4], hello[5]]) != RELAY_PROTOCOL_VERSION {
         return Err(RelayClientError::new("relay-version-unsupported"));
     }
-    let server_nonce: [u8; NONCE_BYTES] = hello[6..]
-        .try_into()
-        .expect("fixed server nonce range");
+    let server_nonce: [u8; NONCE_BYTES] = hello[6..].try_into().expect("fixed server nonce range");
     let mut client_nonce = [0_u8; NONCE_BYTES];
     getrandom::fill(&mut client_nonce)
         .map_err(|_| RelayClientError::new("relay-random-unavailable"))?;
@@ -1396,20 +1391,15 @@ mod tests {
         )
         .await;
         let wrong = token(10);
-        let wrong_error = connect_via_relay(
-            &client_config(endpoint.clone(), target.clone()),
-            &wrong,
-        )
-        .await
-        .unwrap_err();
+        let wrong_error =
+            connect_via_relay(&client_config(endpoint.clone(), target.clone()), &wrong)
+                .await
+                .unwrap_err();
         assert_eq!(wrong_error.code(), "relay-server-proof-invalid");
         let denied = RelayTarget::parse("127.0.0.1:1").unwrap();
-        let denied_error = connect_via_relay(
-            &client_config(endpoint, denied),
-            &relay_token,
-        )
-        .await
-        .unwrap_err();
+        let denied_error = connect_via_relay(&client_config(endpoint, denied), &relay_token)
+            .await
+            .unwrap_err();
         assert_eq!(denied_error.code(), "relay-target-denied");
         let outcomes = audit
             .events
@@ -1706,7 +1696,11 @@ mod tests {
             })
             .unwrap();
         drop(audit);
-        assert!(fs::read_to_string(&audit_path).unwrap().contains("invalid-request"));
+        assert!(
+            fs::read_to_string(&audit_path)
+                .unwrap()
+                .contains("invalid-request")
+        );
         fs::set_permissions(&audit_path, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(
             JsonLineAudit::file(&audit_path).err(),

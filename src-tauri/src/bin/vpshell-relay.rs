@@ -1,9 +1,5 @@
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use std::{
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::Path, sync::Arc, time::Duration};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use tokio::net::TcpListener;
@@ -53,23 +49,13 @@ async fn run() -> Result<(), &'static str> {
             while let Some(argument) = arguments.next() {
                 match argument.as_str() {
                     "--allow-target" => targets.push(RelayTarget::parse(
-                        &arguments
-                            .next()
-                            .ok_or("relay-cli-arguments-invalid")?,
+                        &arguments.next().ok_or("relay-cli-arguments-invalid")?,
                     )?),
                     "--audit-file" => {
-                        audit_path = Some(
-                            arguments
-                                .next()
-                                .ok_or("relay-cli-arguments-invalid")?,
-                        )
+                        audit_path = Some(arguments.next().ok_or("relay-cli-arguments-invalid")?)
                     }
-                    "--max-connections" => {
-                        limits.max_connections = parse_number(&mut arguments)?
-                    }
-                    "--max-per-ip" => {
-                        limits.max_connections_per_ip = parse_number(&mut arguments)?
-                    }
+                    "--max-connections" => limits.max_connections = parse_number(&mut arguments)?,
+                    "--max-per-ip" => limits.max_connections_per_ip = parse_number(&mut arguments)?,
                     "--auth-per-minute" => {
                         limits.auth_attempts_per_minute = parse_number(&mut arguments)?
                     }
@@ -170,9 +156,7 @@ fn required_path(
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn parse_socket_addr(value: &str) -> Result<std::net::SocketAddr, &'static str> {
-    value
-        .parse()
-        .map_err(|_| "relay-listener-address-invalid")
+    value.parse().map_err(|_| "relay-listener-address-invalid")
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

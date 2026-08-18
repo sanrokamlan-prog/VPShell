@@ -33,10 +33,10 @@ mod migration;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod native_engine;
 mod network_tools;
-mod remote_file_ops;
-mod remote_monitor;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod relay;
+mod remote_file_ops;
+mod remote_monitor;
 mod safe_broadcast;
 mod security_regression;
 mod shell_integration;
