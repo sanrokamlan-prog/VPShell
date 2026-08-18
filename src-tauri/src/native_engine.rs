@@ -1114,13 +1114,8 @@ impl NativeEngineManager {
             }
         };
         stats.ready.store(1, Ordering::SeqCst);
-        let result = dynamic_forward_snapshot(
-            forward_id,
-            bound_port,
-            &route_host,
-            route_hops,
-            &stats,
-        );
+        let result =
+            dynamic_forward_snapshot(forward_id, bound_port, &route_host, route_hops, &stats);
         let manager = self.clone();
         tokio::spawn(async move {
             run_native_dynamic_forward(
@@ -2895,8 +2890,14 @@ fn validate_socks5_domain(domain: &str) -> bool {
         && domain.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
-                && label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-                && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
                 && label
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
@@ -4335,10 +4336,7 @@ mod tests {
             .await;
             assert!(result.is_err());
             assert_eq!(response[0..2], [0x05, 0x00]);
-            assert_eq!(
-                response[2..],
-                [0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
-            );
+            assert_eq!(response[2..], [0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
         }
 
         let (result, response) =
@@ -4347,10 +4345,9 @@ mod tests {
         assert_eq!(response[0..2], [0x05, 0x00]);
         assert_eq!(response[3], 0x08);
 
-        let (result, response) = negotiate_socks_request(&[
-            0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x03, 0x01, 0xff, 0, 22,
-        ])
-        .await;
+        let (result, response) =
+            negotiate_socks_request(&[0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x03, 0x01, 0xff, 0, 22])
+                .await;
         assert!(result.is_err());
         assert_eq!(response[0..2], [0x05, 0x00]);
         assert_eq!(response[3], 0x08);
@@ -5015,9 +5012,7 @@ mod tests {
         assert_eq!(method, [0x05, 0x00]);
         let [port_high, port_low] = target_port.to_be_bytes();
         socks
-            .write_all(&[
-                0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, port_high, port_low,
-            ])
+            .write_all(&[0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, port_high, port_low])
             .await
             .unwrap();
         let mut connect_reply = [0_u8; 10];
@@ -5025,13 +5020,11 @@ mod tests {
         assert_eq!(connect_reply[0], 0x05);
         assert_eq!(connect_reply[1], 0x00);
         let mut dynamic_banner = [0_u8; 64];
-        let dynamic_bytes = tokio::time::timeout(
-            Duration::from_secs(5),
-            socks.read(&mut dynamic_banner),
-        )
-        .await
-        .expect("dynamic forwarded banner timeout")
-        .expect("read dynamic forwarded banner");
+        let dynamic_bytes =
+            tokio::time::timeout(Duration::from_secs(5), socks.read(&mut dynamic_banner))
+                .await
+                .expect("dynamic forwarded banner timeout")
+                .expect("read dynamic forwarded banner");
         assert!(dynamic_banner[..dynamic_bytes].starts_with(b"SSH-2.0-"));
         drop(socks);
         let dynamic_snapshots = manager.list_dynamic_forwards().unwrap();
