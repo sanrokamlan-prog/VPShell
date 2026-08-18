@@ -85,6 +85,16 @@ Large transfers, external editing and remote
 mutations remain on independent compatibility connections; the integration does not replace the default
 system OpenSSH engine. Both crates remain removable with that isolated module and its desktop-only capabilities.
 
+## Optional external Mosh program
+
+VPShell can launch a separately installed `mosh` client for an explicit desktop direct terminal mode.
+Mosh is GPL-3.0 and is not a linked dependency or bundled component of VPShell; this repository does not
+contain or adapt its source, protocol implementation, assets or tests. Users and distributors install and
+license Mosh independently, and the remote host must separately provide `mosh-server`. Removing the
+`start_mosh_session` command and its UI option removes this integration without changing VPShell data or
+credential formats. The integration supplies only fixed SSH bootstrap policy and UDP port-range arguments;
+it does not redistribute Mosh or alter its license obligations.
+
 Projects reviewed only for behavior or architecture are not third-party code dependencies. Their
 license boundaries and the decisions derived from that review are recorded in
 [`docs/OPEN_SOURCE_REFERENCES.md`](docs/OPEN_SOURCE_REFERENCES.md).

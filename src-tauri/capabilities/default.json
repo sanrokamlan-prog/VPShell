@@ -43,6 +43,7 @@
     "allow-get-native-route-measurement-snapshot",
     "allow-stop-native-route-measurement",
     "allow-start-ssh-session",
+    "allow-start-mosh-session",
     "allow-write-terminal",
     "allow-enable-shell-integration",
     "allow-preview-broadcast",

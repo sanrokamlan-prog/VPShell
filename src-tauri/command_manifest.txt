@@ -16,6 +16,7 @@ start_native_route_measurement
 get_native_route_measurement_snapshot
 stop_native_route_measurement
 start_ssh_session
+start_mosh_session
 write_terminal
 enable_shell_integration
 preview_broadcast

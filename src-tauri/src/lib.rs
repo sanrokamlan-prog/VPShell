@@ -89,7 +89,7 @@ struct TerminalHandle {
 }
 
 enum TerminalTransport {
-    OpenSsh {
+    SystemPty {
         writer: Box<dyn Write + Send>,
         master: Box<dyn MasterPty + Send>,
         killer: Box<dyn ChildKiller + Send + Sync>,
@@ -109,11 +109,14 @@ struct TerminalManager {
 }
 
 const OPENSSH_ENGINE_NAME: &str = "openssh";
+const MOSH_ENGINE_NAME: &str = "mosh";
 const MIN_TERMINAL_CELLS: u16 = 2;
 const MAX_TERMINAL_CELLS: u16 = 1000;
 const MAX_SSH_HOST_BYTES: usize = 253;
 const MAX_SSH_USERNAME_BYTES: usize = 128;
 const MAX_SSH_IDENTITY_PATH_BYTES: usize = 4096;
+const MOSH_UDP_PORT_START: u16 = 60_000;
+const MOSH_UDP_PORT_END: u16 = 61_000;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -141,9 +144,31 @@ struct ValidatedStartSshRequest {
     rows: u16,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StartMoshRequest {
+    session_id: Option<String>,
+    host: String,
+    port: u16,
+    username: String,
+    identity_file: Option<String>,
+    credential_ref: Option<String>,
+    identity_passphrase_ref: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    udp_port_start: u16,
+    udp_port_end: u16,
+}
+
+struct ValidatedStartMoshRequest {
+    ssh: ValidatedStartSshRequest,
+    udp_port_start: u16,
+    udp_port_end: u16,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StartSshResponse {
+struct SystemTerminalStartResponse {
     schema_version: u16,
     engine: &'static str,
     session_id: String,
@@ -336,9 +361,62 @@ impl TryFrom<StartSshRequest> for ValidatedStartSshRequest {
     }
 }
 
-fn openssh_terminal_arguments(request: &ValidatedStartSshRequest, kex: &str) -> Vec<String> {
+impl TryFrom<StartMoshRequest> for ValidatedStartMoshRequest {
+    type Error = String;
+
+    fn try_from(request: StartMoshRequest) -> Result<Self, Self::Error> {
+        if request.udp_port_start != MOSH_UDP_PORT_START
+            || request.udp_port_end != MOSH_UDP_PORT_END
+        {
+            return Err("Mosh UDP 端口范围必须为 60000 到 61000".to_string());
+        }
+        let ssh = ValidatedStartSshRequest::try_from(StartSshRequest {
+            session_id: request.session_id,
+            host: request.host,
+            port: request.port,
+            username: request.username,
+            identity_file: request.identity_file,
+            credential_ref: request.credential_ref,
+            identity_passphrase_ref: request.identity_passphrase_ref,
+            cols: request.cols,
+            rows: request.rows,
+        })?;
+        if !ssh.host.bytes().all(is_safe_mosh_host_byte)
+            || !ssh.username.bytes().all(is_safe_mosh_username_byte)
+        {
+            return Err("Mosh 主机地址或用户名包含不安全字符".to_string());
+        }
+        if ssh
+            .identity_file
+            .as_deref()
+            .is_some_and(|path| !path.bytes().all(is_safe_mosh_ssh_byte))
+        {
+            return Err("Mosh 私钥路径只能包含 ASCII 字母、数字及安全路径字符".to_string());
+        }
+        Ok(Self {
+            ssh,
+            udp_port_start: request.udp_port_start,
+            udp_port_end: request.udp_port_end,
+        })
+    }
+}
+
+fn is_safe_mosh_host_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(byte, b'-' | b'_' | b'.' | b':' | b'[' | b']' | b'%')
+}
+
+fn is_safe_mosh_username_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+')
+}
+
+fn is_safe_mosh_ssh_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':' | b',' | b'=' | b'@' | b'+')
+}
+
+fn openssh_policy_arguments(request: &ValidatedStartSshRequest, kex: &str) -> Vec<String> {
     let mut arguments = vec![
-        "-tt".to_string(),
         "-o".to_string(),
         "ServerAliveInterval=30".to_string(),
         "-o".to_string(),
@@ -377,11 +455,43 @@ fn openssh_terminal_arguments(request: &ValidatedStartSshRequest, kex: &str) -> 
     if request.credential_ref.is_some() || request.identity_passphrase_ref.is_some() {
         arguments.extend(["-o".to_string(), "NumberOfPasswordPrompts=1".to_string()]);
     }
+    arguments
+}
+
+fn openssh_terminal_arguments(request: &ValidatedStartSshRequest, kex: &str) -> Vec<String> {
+    let mut arguments = vec!["-tt".to_string()];
+    arguments.extend(openssh_policy_arguments(request, kex));
     arguments.extend([
         "--".to_string(),
         format!("{}@{}", request.username, request.host),
     ]);
     arguments
+}
+
+fn mosh_terminal_arguments(
+    request: &ValidatedStartMoshRequest,
+    kex: &str,
+) -> Result<Vec<String>, String> {
+    let ssh_arguments = std::iter::once("ssh".to_string())
+        .chain(openssh_policy_arguments(&request.ssh, kex))
+        .collect::<Vec<_>>();
+    if ssh_arguments.iter().any(|argument| {
+        argument.is_empty() || !argument.bytes().all(is_safe_mosh_ssh_byte)
+    }) {
+        return Err("Mosh SSH bootstrap 参数包含不安全字符".to_string());
+    }
+    let ssh_command = ssh_arguments.join(" ");
+    Ok(vec![
+        "--predict=adaptive".to_string(),
+        format!(
+            "--port={}:{}",
+            request.udp_port_start, request.udp_port_end
+        ),
+        "--server=mosh-server".to_string(),
+        format!("--ssh={ssh_command}"),
+        "--".to_string(),
+        format!("{}@{}", request.ssh.username, request.ssh.host),
+    ])
 }
 
 /// Entry point used when OpenSSH starts the VPShell executable as SSH_ASKPASS.
@@ -912,10 +1022,72 @@ fn start_ssh_session(
     app: tauri::AppHandle,
     manager: State<'_, TerminalManager>,
     request: StartSshRequest,
-) -> Result<StartSshResponse, String> {
+) -> Result<SystemTerminalStartResponse, String> {
     let request = ValidatedStartSshRequest::try_from(request)?;
-    let session_id = request.session_id.clone();
+    let mut command = CommandBuilder::new("ssh");
+    let kex = file_transfer::openssh_kex_algorithms()?;
+    for argument in openssh_terminal_arguments(&request, &kex) {
+        command.arg(argument);
+    }
+    configure_ssh_askpass(
+        &mut command,
+        request.credential_ref.as_deref(),
+        request.identity_passphrase_ref.as_deref(),
+    )?;
+    command.env("TERM", "xterm-256color");
+    spawn_system_terminal(
+        app,
+        manager,
+        request.session_id,
+        request.rows,
+        request.cols,
+        command,
+        OPENSSH_ENGINE_NAME,
+        "OpenSSH",
+    )
+}
 
+#[tauri::command]
+fn start_mosh_session(
+    app: tauri::AppHandle,
+    manager: State<'_, TerminalManager>,
+    request: StartMoshRequest,
+) -> Result<SystemTerminalStartResponse, String> {
+    let request = ValidatedStartMoshRequest::try_from(request)?;
+    let mut command = CommandBuilder::new("mosh");
+    let kex = file_transfer::openssh_kex_algorithms()?;
+    for argument in mosh_terminal_arguments(&request, &kex)? {
+        command.arg(argument);
+    }
+    configure_ssh_askpass(
+        &mut command,
+        request.ssh.credential_ref.as_deref(),
+        request.ssh.identity_passphrase_ref.as_deref(),
+    )?;
+    command.env("TERM", "xterm-256color");
+    spawn_system_terminal(
+        app,
+        manager,
+        request.ssh.session_id,
+        request.ssh.rows,
+        request.ssh.cols,
+        command,
+        MOSH_ENGINE_NAME,
+        "Mosh；请确认本机已安装 mosh、远端已安装 mosh-server，并放行 UDP 60000–61000",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_system_terminal(
+    app: tauri::AppHandle,
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+    rows: u16,
+    cols: u16,
+    command: CommandBuilder,
+    engine: &'static str,
+    launch_name: &'static str,
+) -> Result<SystemTerminalStartResponse, String> {
     if lock_sessions(&manager)?.contains_key(&session_id) {
         return Err("该终端会话已经连接".to_string());
     }
@@ -924,31 +1096,17 @@ fn start_ssh_session(
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
-            rows: request.rows,
-            cols: request.cols,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
         .map_err(|error| format!("无法创建终端: {error}"))?;
 
-    let mut command = CommandBuilder::new("ssh");
-    let kex = file_transfer::openssh_kex_algorithms()?;
-    for argument in openssh_terminal_arguments(&request, &kex) {
-        command.arg(argument);
-    }
-
-    configure_ssh_askpass(
-        &mut command,
-        request.credential_ref.as_deref(),
-        request.identity_passphrase_ref.as_deref(),
-    )?;
-
-    command.env("TERM", "xterm-256color");
-
     let mut child = pair
         .slave
         .spawn_command(command)
-        .map_err(|error| format!("无法启动 OpenSSH: {error}"))?;
+        .map_err(|error| format!("无法启动 {launch_name}: {error}"))?;
     drop(pair.slave);
 
     let mut reader = pair
@@ -965,7 +1123,7 @@ fn start_ssh_session(
     lock_sessions(&manager)?.insert(
         session_id.clone(),
         TerminalHandle {
-            transport: TerminalTransport::OpenSsh {
+            transport: TerminalTransport::SystemPty {
                 writer,
                 master: pair.master,
                 killer,
@@ -1055,9 +1213,9 @@ fn start_ssh_session(
         }
     });
 
-    Ok(StartSshResponse {
+    Ok(SystemTerminalStartResponse {
         schema_version: 1,
-        engine: OPENSSH_ENGINE_NAME,
+        engine,
         session_id,
     })
 }
@@ -1077,7 +1235,7 @@ fn enable_shell_integration(
         .map_err(|_| "Shell Integration 状态已损坏".to_string())?
         .activation_command();
     match &mut session.transport {
-        TerminalTransport::OpenSsh { writer, .. } => {
+        TerminalTransport::SystemPty { writer, .. } => {
             writer
                 .write_all(command.as_bytes())
                 .map_err(|error| format!("写入 Shell Integration 启用命令失败: {error}"))?;
@@ -1210,7 +1368,7 @@ fn write_to_session(
 
 fn write_terminal_handle(session: &mut TerminalHandle, data: &[u8]) -> Result<(), String> {
     match &mut session.transport {
-        TerminalTransport::OpenSsh { writer, .. } => {
+        TerminalTransport::SystemPty { writer, .. } => {
             writer
                 .write_all(data)
                 .map_err(|error| format!("终端写入失败: {error}"))?;
@@ -1359,7 +1517,7 @@ fn resize_terminal(
         .get(&session_id)
         .ok_or_else(|| "终端会话不存在或已关闭".to_string())?;
     match &session.transport {
-        TerminalTransport::OpenSsh { master, .. } => master
+        TerminalTransport::SystemPty { master, .. } => master
             .resize(PtySize {
                 rows: rows.max(2),
                 cols: cols.max(2),
@@ -1381,7 +1539,7 @@ fn stop_terminal(manager: State<'_, TerminalManager>, session_id: String) -> Res
         .remove(&session_id)
         .ok_or_else(|| "终端会话不存在或已关闭".to_string())?;
     match &mut session.transport {
-        TerminalTransport::OpenSsh { killer, .. } => killer
+        TerminalTransport::SystemPty { killer, .. } => killer
             .kill()
             .map_err(|error| format!("关闭终端失败: {error}")),
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -1487,6 +1645,7 @@ pub fn run() {
             get_native_route_measurement_snapshot,
             stop_native_route_measurement,
             start_ssh_session,
+            start_mosh_session,
             write_terminal,
             enable_shell_integration,
             preview_broadcast,
@@ -1562,7 +1721,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        StartSshRequest, StartSshResponse, TerminalOutputEvent, ValidatedStartSshRequest,
+        StartMoshRequest, StartSshRequest, SystemTerminalStartResponse, TerminalOutputEvent,
+        ValidatedStartMoshRequest, ValidatedStartSshRequest, mosh_terminal_arguments,
         openssh_terminal_arguments, select_askpass_reference,
     };
 
@@ -1577,6 +1737,24 @@ mod tests {
             identity_passphrase_ref: Some("key-018f1f55-26f8-7a9f-9cd8-4d7558482213".to_string()),
             cols: Some(120),
             rows: Some(32),
+        }
+    }
+
+    fn mosh_request() -> StartMoshRequest {
+        StartMoshRequest {
+            session_id: Some("018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string()),
+            host: "host.example".to_string(),
+            port: 22,
+            username: "operator".to_string(),
+            identity_file: Some("/tmp/vpshell-mosh-key".to_string()),
+            credential_ref: Some("ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212".to_string()),
+            identity_passphrase_ref: Some(
+                "key-018f1f55-26f8-7a9f-9cd8-4d7558482213".to_string(),
+            ),
+            cols: Some(120),
+            rows: Some(32),
+            udp_port_start: 60_000,
+            udp_port_end: 61_000,
         }
     }
 
@@ -1683,8 +1861,8 @@ mod tests {
     }
 
     #[test]
-    fn openssh_response_identifies_the_effective_engine() {
-        let value = serde_json::to_value(StartSshResponse {
+    fn system_terminal_response_identifies_the_effective_engine() {
+        let value = serde_json::to_value(SystemTerminalStartResponse {
             schema_version: 1,
             engine: "openssh",
             session_id: "018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string(),
@@ -1693,6 +1871,81 @@ mod tests {
         assert_eq!(value["schemaVersion"], 1);
         assert_eq!(value["engine"], "openssh");
         assert_eq!(value["sessionId"], "018f1f55-26f8-7a9f-9cd8-4d7558482211");
+    }
+
+    #[test]
+    fn mosh_request_and_bootstrap_are_fixed_bounded_and_value_free() {
+        let validated = ValidatedStartMoshRequest::try_from(mosh_request()).unwrap();
+        let arguments = mosh_terminal_arguments(&validated, "curve25519-sha256").unwrap();
+        assert!(arguments.contains(&"--predict=adaptive".to_string()));
+        assert!(arguments.contains(&"--port=60000:61000".to_string()));
+        assert!(arguments.contains(&"--server=mosh-server".to_string()));
+        assert_eq!(arguments[arguments.len() - 2], "--");
+        assert_eq!(arguments.last().unwrap(), "operator@host.example");
+        let ssh = arguments
+            .iter()
+            .find(|argument| argument.starts_with("--ssh="))
+            .unwrap();
+        assert!(ssh.contains("StrictHostKeyChecking=yes"));
+        assert!(ssh.contains("KexAlgorithms=curve25519-sha256"));
+        assert!(ssh.contains("NumberOfPasswordPrompts=1"));
+        assert!(!ssh.contains("ProxyCommand"));
+        assert!(!ssh.contains("ssh-018f1f55"));
+        assert!(!ssh.contains("key-018f1f55"));
+        assert!(mosh_terminal_arguments(&validated, "unsafe kex").is_err());
+
+        let mut invalid = mosh_request();
+        invalid.udp_port_start = 59_999;
+        assert!(ValidatedStartMoshRequest::try_from(invalid).is_err());
+        let mut invalid = mosh_request();
+        invalid.udp_port_end = 61_001;
+        assert!(ValidatedStartMoshRequest::try_from(invalid).is_err());
+        let mut invalid = mosh_request();
+        invalid.host = "-oProxyCommand=bad".to_string();
+        assert!(ValidatedStartMoshRequest::try_from(invalid).is_err());
+        let mut invalid = mosh_request();
+        invalid.host = "host.example;unsafe".to_string();
+        assert!(ValidatedStartMoshRequest::try_from(invalid).is_err());
+        let mut invalid = mosh_request();
+        invalid.username = "operator$(unsafe)".to_string();
+        assert!(ValidatedStartMoshRequest::try_from(invalid).is_err());
+        let mut invalid = mosh_request();
+        invalid.identity_file = Some("/tmp/key';unsafe".to_string());
+        assert!(ValidatedStartMoshRequest::try_from(invalid).is_err());
+        assert!(
+            serde_json::from_value::<StartMoshRequest>(serde_json::json!({
+                "host": "host.example",
+                "port": 22,
+                "username": "operator",
+                "udpPortStart": 60000,
+                "udpPortEnd": 61000,
+                "server": "unsafe-command"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<StartMoshRequest>(serde_json::json!({
+                "host": "host.example",
+                "port": 22,
+                "username": "operator",
+                "udpPortStart": 60000,
+                "udpPortEnd": 61000,
+                "password": "forbidden"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn mosh_response_is_explicitly_distinct_from_ssh() {
+        let value = serde_json::to_value(SystemTerminalStartResponse {
+            schema_version: 1,
+            engine: "mosh",
+            session_id: "018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string(),
+        })
+        .unwrap();
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["engine"], "mosh");
     }
 
     #[test]
@@ -1732,6 +1985,104 @@ mod tests {
             combined
                 .windows(b"VPSHELL_SYSTEM_OPENSSH_OK".len())
                 .any(|window| window == b"VPSHELL_SYSTEM_OPENSSH_OK")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_mosh_terminal_when_configured() {
+        use std::{
+            io::Read,
+            sync::mpsc,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+        let Ok(host) = std::env::var("VPSHELL_NATIVE_TEST_HOST") else {
+            return;
+        };
+        let port = std::env::var("VPSHELL_NATIVE_TEST_PORT")
+            .expect("Mosh bootstrap test port")
+            .parse()
+            .expect("numeric Mosh bootstrap test port");
+        let username =
+            std::env::var("VPSHELL_NATIVE_TEST_USER").expect("Mosh bootstrap test username");
+        let identity_file = std::env::var("VPSHELL_NATIVE_TEST_IDENTITY_FILE")
+            .expect("Mosh bootstrap test identity file");
+        let request = ValidatedStartMoshRequest::try_from(StartMoshRequest {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            host,
+            port,
+            username,
+            identity_file: Some(identity_file),
+            credential_ref: None,
+            identity_passphrase_ref: None,
+            cols: Some(120),
+            rows: Some(32),
+            udp_port_start: 60_000,
+            udp_port_end: 61_000,
+        })
+        .expect("validated Mosh fixture request");
+        let kex = super::file_transfer::openssh_kex_algorithms().expect("Mosh SSH KEX policy");
+        let mut arguments = mosh_terminal_arguments(&request, &kex)
+            .expect("validated Mosh fixture arguments");
+        arguments.extend([
+            "sh".to_string(),
+            "-lc".to_string(),
+            "printf 'VPSHELL_MOSH_OK\\n'; sleep 5".to_string(),
+        ]);
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: request.ssh.rows,
+                cols: request.ssh.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open Mosh fixture PTY");
+        let mut command = CommandBuilder::new("mosh");
+        for argument in arguments {
+            command.arg(argument);
+        }
+        command.env("TERM", "xterm-256color");
+        command.env("LANG", "C.UTF-8");
+        command.env("LC_ALL", "C.UTF-8");
+        let mut child = pair
+            .slave
+            .spawn_command(command)
+            .expect("start real Mosh fixture");
+        drop(pair.slave);
+        let mut killer = child.clone_killer();
+        let mut reader = pair.master.try_clone_reader().expect("clone Mosh reader");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            while let Ok(length) = reader.read(&mut buffer) {
+                if length == 0 || sender.send(buffer[..length].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let marker = b"VPSHELL_MOSH_OK";
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut output = Vec::new();
+        while Instant::now() < deadline
+            && !output.windows(marker.len()).any(|window| window == marker)
+        {
+            match receiver.recv_timeout(Duration::from_millis(500)) {
+                Ok(chunk) => output.extend_from_slice(&chunk),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let _ = killer.kill();
+        let _ = child.wait();
+        assert!(
+            output.windows(marker.len()).any(|window| window == marker),
+            "real Mosh fixture did not produce its marker"
         );
     }
 }

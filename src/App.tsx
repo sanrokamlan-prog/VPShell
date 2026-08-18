@@ -195,6 +195,12 @@ interface OpenSshTerminalStartResult {
   sessionId: string;
 }
 
+interface MoshTerminalStartResult {
+  schemaVersion: number;
+  engine: "mosh";
+  sessionId: string;
+}
+
 interface NativeLocalForwardSnapshot {
   schemaVersion: number;
   forwardId: string;
@@ -1066,6 +1072,29 @@ function App() {
         await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
         throw new Error("原生终端返回了不受支持的会话结果");
       }
+    } else if (session.engine === "mosh") {
+      if (host.jumpRoute?.length) {
+        throw new Error("Mosh 是直连 UDP 交互模式，不支持跳板路线");
+      }
+      const result = await invoke<MoshTerminalStartResult>("start_mosh_session", {
+        request: {
+          sessionId: session.id,
+          host: host.host,
+          port: host.port,
+          username: host.username,
+          identityFile: host.identityFile,
+          credentialRef: host.credentialRef,
+          identityPassphraseRef,
+          cols: 120,
+          rows: 32,
+          udpPortStart: 60000,
+          udpPortEnd: 61000,
+        },
+      });
+      if (result.schemaVersion !== 1 || result.engine !== "mosh" || result.sessionId !== session.id) {
+        await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+        throw new Error("Mosh 返回了不受支持的会话结果");
+      }
     } else {
       await startOpenSshTerminal();
     }
@@ -1081,7 +1110,9 @@ function App() {
     }));
     const engineLabel = effectiveEngine === "russh"
       ? "原生 russh"
-      : usedCompatibilityFallback ? "OpenSSH 兼容回退" : "OpenSSH";
+      : effectiveEngine === "mosh"
+        ? "Mosh"
+        : usedCompatibilityFallback ? "OpenSSH 兼容回退" : "OpenSSH";
     showToast(`已通过 ${engineLabel} 连接 ${host.name}`);
   }
 
@@ -2267,6 +2298,15 @@ function App() {
                 >
                   <ShieldCheck size={12} /> 原生
                 </button>
+                <button
+                  className={activeSession.engine === "mosh" ? "active" : ""}
+                  type="button"
+                  title={activeJumpHosts.length ? "Mosh 不支持跳板路线" : "需要本机 mosh、远端 mosh-server 和 UDP 60000–61000"}
+                  disabled={activeSession.state === "connecting" || activeJumpHosts.length > 0}
+                  onClick={() => updateSession(activeSession.id, { engine: "mosh" })}
+                >
+                  <RadioTower size={12} /> Mosh
+                </button>
               </div>
             ) : null}
             {hasActiveHost ? <span>{activeHost.latency ? `${activeHost.latency} ms` : "未测速"}</span> : null}
@@ -2443,7 +2483,7 @@ function App() {
         </div>
 
         <footer className="statusbar">
-          <span><SquareTerminal size={13} /> {isAndroidRuntime() ? "Rust libssh2 移动引擎" : activeSession.engine === "russh" ? "Rust russh 原生引擎" : "OpenSSH 兼容引擎"}</span>
+          <span><SquareTerminal size={13} /> {isAndroidRuntime() ? "Rust libssh2 移动引擎" : activeSession.engine === "russh" ? "Rust russh 原生引擎" : activeSession.engine === "mosh" ? "Mosh UDP 交互模式" : "OpenSSH 兼容引擎"}</span>
           <span><Database size={13} /> SQLite {appStoreStatus.saving ? "保存中" : appStoreStatus.ready ? "已同步" : "初始化失败"}</span>
           <span className="status-spacer" />
           <span>UTF-8</span><span>xterm-256color</span><span>{activeSession.currentPath}</span>

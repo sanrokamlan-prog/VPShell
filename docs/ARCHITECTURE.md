@@ -22,7 +22,7 @@ v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 | --- | --- | --- |
 | 桌面框架 | Tauri 2、React 19、TypeScript、Vite；Windows/macOS/Linux CI；首个原生 runner Alpha Release 已发布 | 安装与升级仍需扩大实机覆盖；Windows 无 Authenticode，macOS Alpha 使用 ad-hoc 签名且未公证 |
 | 终端 | xterm.js，多标签会话，输入输出、窗口大小调整、断开连接，单终端 250,000 行 scrollback | scrollback 不是持久化的“无限历史” |
-| SSH | Rust 后端默认通过 `portable-pty` 启动系统 `ssh`；可选 `russh` route 提供逐跳 pin/认证、PTY/SFTP、本地/远端回环转发与 SOCKS5 CONNECT 动态转发 | 系统路径依赖 `ssh` 在 PATH 中；原生路径仍缺广泛服务器兼容验证，SOCKS5 不提供认证、BIND 或 UDP ASSOCIATE |
+| SSH | Rust 后端默认通过 `portable-pty` 启动系统 `ssh`；可选 `russh` route 提供逐跳 pin/认证、PTY/SFTP、本地/远端回环转发与 SOCKS5 CONNECT 动态转发；桌面直连可显式启动系统 Mosh | 系统路径依赖 `ssh`/可选 `mosh` 在 PATH 中；原生路径仍缺广泛服务器兼容验证，Mosh 需要远端 helper 与 UDP，SOCKS5 不提供认证、BIND 或 UDP ASSOCIATE |
 | 主机与会话 | 主机分组、环境标签、最近连接、会话切换；OpenSSH 采集 Linux `/proc` 概况；v0.2 工作树可显式启用 bash/zsh 自报上下文栈 | Integration 不支持 fish/PowerShell，也不把远端自报 hostname 当作已验证身份；监控仅支持 Linux |
 | 多终端输入 | v0.2 Compose 广播由 Rust 冻结目标/命令/上下文，所有目标均需预览，生产持续标记，认证和已知危险命令阻止 | 不是完整的原始按键同步；成功只表示 PTY 写入，不能结构化证明远端命令成功 |
 | 历史 | 命令、SFTP 路径和连接尝试历史由 Rust SQLite schema v1 快照/事件元数据管理；首次启动一次性迁移旧 WebView 状态 | SSH 进程启动不代表认证成功；SQLite 本地快照尚未作为同步包，终端内 `cd` 只由显式 Shell Integration 上报 |
@@ -349,6 +349,8 @@ Phase D 现在包含一个独立的 `vpshell-relay` Rust 参考服务和同一�
 当前 `route_measurement` 在用户显式启动后，复用原生引擎对同一目标的直连和已配置跳板候选执行完整逐跳认证、host-key pin 与最终 SFTP readiness probe。单个内存 campaign 最多 4 个候选、30–300 秒间隔、3–20 轮滚动窗口和 120 轮；Rust 记录成功率、中位数、P95 和失败惩罚，低于 80% 成功率的候选不进入推荐，并以 15% 滞后避免小差异反复切换。快照只包含候选 ID、统计量、推荐 reason code 和稳定错误/跳序号；停止、窗口关闭和代际变化都会取消，端点、用户名、credential reference、私钥路径和底层错误不进入结果或日志。
 
 该评估目前只提供建议，不自动修改主机 route，也不测量 DNS 分段、UDP 丢包/重传、吞吐或 Relay 目标路径。Relay 候选接入、持久历史、真实多区域指标和自动切换仍待独立实现；任何自动切换都必须显示原因并允许锁定直连或指定路线。
+
+Mosh 是与 route readiness 分离的用户显式交互模式。`start_mosh_session` 使用严格、拒绝未知字段的请求，复用系统终端的 UUID、2–1000 行列、PTY 输入/缩放/停止和代际清理；Rust 只以参数数组启动 PATH 中的 `mosh`。传给 Mosh 的 SSH bootstrap 字符串只拼接 Rust 固定且经安全字符验证的 OpenSSH 策略：`StrictHostKeyChecking=yes`、当前系统支持的安全 KEX、固定认证次数和用户选择的端口/私钥；Mosh 模式的 identity path 额外拒绝空格、引号、非 ASCII 和 shell 元字符，host/user/path 也已先验证，WebView 不能提供任意 SSH 参数、Mosh server 命令或预测模式。远端 helper 固定 `mosh-server`，UDP 范围固定 60000–61000，前端只允许无跳板直连。Mosh 不替代 SFTP、上传下载、外部编辑、监控或任何转发，也不成为原生失败的自动回退。系统缺少 `mosh`、远端缺少 helper 或 UDP 被阻断时由该标签明确失败，不降级主机密钥策略。
 
 没有真实多区域部署和公开指标时，界面只能称“直连”“代理”“跳板”或“路线评估”，不能宣称“海外智能加速”。`docs/RELAY.md` 记录自建服务的部署边界；当前已有系统 OpenSSH 直连、用户显式配置的原生逐跳 route、回环限定的本地/远端/SOCKS5 CONNECT 转发、可运行的自建 Relay 参考服务和显式的 readiness 选路建议，但没有自动选路或托管加速服务。单跳原生终端仅对 Rust 明确分类的密钥格式/RSA SHA-2 协商兼容性错误回退到同目标系统 OpenSSH；主机密钥、认证、取消、超时、安全输入错误和多跳 route 不回退。兼容引擎仍强制系统 known_hosts、严格主机密钥检查、安全 KEX 与受限 AskPass，WebView 不能注入额外 OpenSSH 参数。
 

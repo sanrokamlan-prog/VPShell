@@ -156,6 +156,8 @@
 - 路线评估请求必须拒绝非 canonical campaign UUID、空/超过 4 个候选、重复/非法 candidate ID、30 秒以下或 300 秒以上间隔、窗口/总轮数越界、未知字段和 hop 内明文 `password`。Android capability 必须排除 start/get/stop 三项命令。
 - 为同一测试目标配置可直连且可经跳板到达的两条 route；至少完成 3 轮，确认每轮都实际通过各自 host-key/pin 和认证并完成最终 SFTP readiness。错误 pin 应只返回对应候选与 `hopIndex` 的稳定错误码；快照不得包含 host、用户名、credentialRef、私钥路径或底层错误文本。
 - 人为使一条路线失败，确认成功率低于 80% 后不会被推荐；构造小于 15% 的评分波动，确认保持原建议并显示滞后原因。停止和关闭对话框均应取消在途连接且不再增加样本。该页面不得自动修改主机跳板配置，也不得显示 UDP 丢包、吞吐或“加速”结论。
+- Mosh 契约测试必须拒绝未知字段、选项式 host/user、无效 UUID/PTY、固定范围以外的 UDP 端口和任意 server/SSH 参数；生成参数必须固定 `mosh-server`、adaptive 与 60000–61000，SSH bootstrap 保留严格 host-key、安全 KEX 和至多一次 AskPass，credential/key reference 不得进入 argv。Android capability 必须排除 `start_mosh_session`。
+- Linux CI 使用现有回环 sshd、一次性 Ed25519 密钥和严格 known_hosts，实际启动本机 `mosh` 与远端 `mosh-server`，经 UDP 收到 marker 后有界停止。外部验收只在自有非生产节点执行：分别验证本机/远端缺少 Mosh、UDP firewall 拒绝、网络切换、休眠/恢复、长时间断网和终端 resize；Mosh 必须保持直连手动模式，不支持跳板，不替代 SFTP、传输、监控或转发，也不能作为自动加速结论。
 
 ### J. v0.2 工作区恢复验收（仅源码构建）
 

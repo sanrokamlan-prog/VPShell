@@ -149,6 +149,7 @@ mod tests {
             .collect::<HashSet<_>>();
         for forbidden in [
             "allow-start-ssh-session",
+            "allow-start-mosh-session",
             "allow-preview-broadcast",
             "allow-begin-external-edit",
             "allow-start-remote-monitor",
@@ -275,6 +276,28 @@ mod tests {
         assert!(frontend.contains("canFallbackNativeTerminalToOpenSsh(error)"));
         assert!(frontend.contains("result.engine !== \"openssh\""));
         assert!(!android.contains("allow-start-ssh-session"));
+    }
+
+    #[test]
+    fn mosh_is_explicit_fixed_range_and_desktop_only() {
+        let backend = include_str!("lib.rs");
+        let frontend = include_str!("../../src/App.tsx");
+        let desktop = include_str!("../capabilities/default.json");
+        let android = include_str!("../capabilities/android.json");
+        assert!(backend.contains("MOSH_UDP_PORT_START: u16 = 60_000"));
+        assert!(backend.contains("MOSH_UDP_PORT_END: u16 = 61_000"));
+        assert!(backend.contains("--server=mosh-server"));
+        assert!(backend.contains("--predict=adaptive"));
+        assert!(backend.contains("openssh_policy_arguments(&request.ssh, kex)"));
+        assert!(backend.contains("deny_unknown_fields"));
+        assert!(!backend.contains("MOSH_KEY"));
+        assert!(!backend.contains("println!"));
+        assert!(!backend.contains("eprintln!"));
+        assert!(frontend.contains("result.engine !== \"mosh\""));
+        assert!(frontend.contains("activeSession.engine === \"mosh\""));
+        assert!(desktop.contains("allow-start-mosh-session"));
+        assert!(!android.contains("allow-start-mosh-session"));
+        assert!(!android.contains("start-mosh-session"));
     }
 
     #[test]

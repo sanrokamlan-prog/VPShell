@@ -36,6 +36,7 @@ Actual third-party code used or adapted by VPShell is listed separately in
 | [Tauri Biometric plugin](https://github.com/tauri-apps/plugins-workspace/tree/db9c5998feff9384f9cbbefcbe0d45937c00a1fc/plugins/biometric) and AndroidX Biometric | MIT or Apache-2.0 / Apache-2.0 | Rust-owned system biometric/device-credential prompt and capability checks | Plugin 2.3.2 used through its public Rust API; AndroidX is transitive; no source copied; access-gate and removal boundaries recorded in `THIRD_PARTY_NOTICES.md` |
 | [russh](https://github.com/Eugeny/russh/tree/a3766cca2223f851df786e88f823ea08dabfbdea) and [russh-sftp](https://github.com/AspectUnk/russh-sftp/tree/e145c1f7ece99f41f558949ef59731f2cd1a9dfe) | Apache-2.0 / Apache-2.0 | Pure Rust desktop SSH handshake/authentication, mandatory host-key callback, PTY/Shell, SFTP, nested `direct-tcpip` streams and bounded local/remote/dynamic forwarding | Exact 0.62.7/2.4.0 dependencies used through public APIs; no source copied; scope is an explicit bounded probe, opt-in route terminal, shared directory browser and loopback-only local/remote/SOCKS5 CONNECT forwards, while system OpenSSH remains the default |
 | [MaidKit](https://github.com/Solsynth/MaidKit/tree/eaf4922072960158f04021ed866323e6c17209cd) | AGPL-3.0 | SSH-only non-intrusive management, dual-pane SFTP, services/containers/databases, jump/forwarding, audit, scripts and explicit agent action approval | Behavior and product decomposition reference only; no source, assets, text or implementation copied/adapted into Apache-2.0 VPShell |
+| [Mosh](https://github.com/mobile-shell/mosh/tree/decd9b705eb81626f694335b8d5940538beb06da) | GPL-3.0 | Separate interactive roaming terminal, SSH bootstrap, remote helper and bounded UDP port selection | Optional external executable and behavior reference only; no source, protocol implementation, assets or text copied/linked/bundled into Apache-2.0 VPShell |
 
 ## Adopted decisions
 
@@ -122,3 +123,7 @@ inventory and per-item partial results. No reviewed project's file-manager code 
   single public `digest` dependency. VPShell promotes the already locked crate to a direct dependency
   with default features disabled and uses only its public `Mac` API for independently specified Relay
   v1 request/response proofs. No upstream source, examples, vectors, protocol text or assets were copied.
+- 2026-08-18: Reviewed Mosh README/manual and wrapper interface at commit
+  `decd9b705eb81626f694335b8d5940538beb06da`; upstream is GPL-3.0. VPShell only launches the user's
+  separately installed `mosh` executable with independently constructed fixed arguments. No Mosh source,
+  protocol code, examples, tests, assets or documentation text was copied, adapted, linked or bundled.

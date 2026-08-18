@@ -281,7 +281,15 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - 每个样本必须复用 `native_engine` 的完整 route：逐跳独立解析凭据、认证前固定 host-key、最终实际完成 SFTP readiness 后才算成功。不能用 UI timer、mock 延迟、单独 ping 或未认证 TCP connect 冒充完整路线样本；候选并发仍受 campaign 数量硬限制。
 - 快照只返回 caller-owned candidate ID、样本计数、成功率、中位数、P95、评分、稳定 reason/error code 和可选 `hopIndex`。不得返回 host、username、credential reference、私钥路径、底层库错误或日志；请求严格拒绝未知字段和明文 `password`。
 - 推荐门槛固定为至少 3 个样本、至少 2 次成功和 80% 成功率；评分为 P95 readiness 加失败比例惩罚，候选按 ID 稳定打破同分。已选路线与最低分差异在 15% 内时保留原建议。该结果只是可解释建议，不能自动改写主机 route，也不能称作 UDP 丢包、吞吐、地区质量或加速测量。
-- 当前 UI 只比较同一目标的直连与已配置跳板 route。Relay 候选、持久历史、自动切换、Mosh 和真实多区域网络矩阵是后续独立项；扩大范围前必须保持取消/代际、秘密隔离和四平台编译测试。
+- 当前 UI 只比较同一目标的直连与已配置跳板 route。Relay 候选、持久历史、自动切换和真实多区域网络矩阵是后续独立项；Mosh 即使可用也保持独立手动模式，不能由该评分自动选择。扩大范围前必须保持取消/代际、秘密隔离和四平台编译测试。
+
+### 10.14 Mosh 独立交互模式（Phase D）
+
+- Mosh 是可选外部系统程序，不链接、内嵌或分发 GPL-3.0 上游源码。桌面用户必须显式选择；本机 `mosh`、远端 `mosh-server` 和 UDP firewall 由用户管理，VPShell 不下载软件、不修改服务器或 firewall。Windows 原生可用性、漫游、休眠和长时间断网必须外部验收。
+- `start_mosh_session` 只接受具名、拒绝未知字段的单目标请求，并复用系统终端对 canonical UUID、host/user/SSH port、私钥路径、credential reference 和 2–1000 PTY 行列的验证。UDP 只能是固定 60000–61000，远端 server 固定 `mosh-server`，预测固定 adaptive；不能从 WebView提交任意 server/client 路径、命令、SSH 参数、ProxyCommand、UDP 地址或 Mosh key。
+- Rust 用参数数组启动 `mosh`。其 `--ssh` 值只拼接固定且经 ASCII 安全字符验证的 OpenSSH 策略，包括 `StrictHostKeyChecking=yes`、当前系统支持的安全 KEX、SSH port、可选 identity 和至多一次受限 AskPass；Mosh identity path 额外拒绝空格、引号、非 ASCII 和 shell 元字符，credential/key reference 不进入 argv。首次连接仍必须先通过已有 host-key inspection，Mosh 不允许跳板 route，也不是 OpenSSH/russh 失败后的自动回退。
+- Mosh 会话复用 `TerminalManager` 的 PTY、输入、缩放、停止、输出事件和 generation 清理，但 response 的实际 engine 必须为 `mosh`。文件坞、上传下载、外部编辑、监控、本地/远端/SOCKS 转发继续使用独立 SSH/SFTP 路径，不能把 Mosh UDP 会话冒充共享 SSH transport。
+- 单测必须覆盖固定端口/server/predict、严格未知字段、host/username/identity 注入、安全参数字符、credential reference 不进 argv 和 engine response。Linux CI 在现有仅回环 sshd/一次性密钥/严格 known_hosts fixture 上安装发行版 Mosh，实际启动远端 helper、经 UDP 收到标记并有界终止；其他桌面平台执行编译和纯契约测试，Android capability 必须排除该命令。
 
 ### 10.9 B8 协议回归矩阵（v0.3 工作树）
 

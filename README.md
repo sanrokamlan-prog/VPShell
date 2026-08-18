@@ -46,7 +46,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 | 常用运维脚本四处散落 | 有来源、版本、风险和参数的可同步脚本中心 | **部分实现**：本地脚本中心 |
 | 不知道该运行什么排障命令 | 中文意图匹配、参数表单、风险分级和执行前预览 | **已实现**：22 项本地命令/工具 |
 | 本机与 VPS 线路难量化 | 路由追踪、限量 HTTP 下载、双向 UDP 吞吐/抖动/丢包 | **已实现**：本机网络诊断 |
-| 海外 SSH 高延迟 | 跳板/代理/自建中继测速选路，可选 Mosh | **部分实现**：原生终端支持已固定逐跳身份的应用内跳板和自建 Relay；路线评估可比较直连与已配置跳板的完整 SSH/SFTP readiness，但没有真实区域指标、自动切换、Mosh 或加速承诺 |
+| 海外 SSH 高延迟 | 跳板/代理/自建中继测速选路，可选 Mosh | **部分实现**：原生终端支持已固定逐跳身份的应用内跳板和自建 Relay；路线评估可比较直连与已配置跳板的完整 SSH/SFTP readiness；桌面直连可显式选择系统 Mosh，但没有真实区域指标、自动切换或加速承诺 |
 | 终端外观受限 | 本机或 URL 背景、可见度调节并随资料库同步 | **已实现**：本机/URL 背景 |
 
 ## 当前可用能力
@@ -65,6 +65,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 - 连接前通过无凭据的系统 OpenSSH 握手和 `ssh-keygen` 检查 `known_hosts`，并只启用当前 `ssh` 二进制实际报告支持的安全 KEX；未知主机显示算法和 SHA256 指纹供明确确认，确认时只进行一次远端复核并在本地验证写入，已变化指纹硬拒绝，终端、SFTP 与采样共享信任结果。
 - Ed25519/RSA4096 密钥生成、OpenSSH 口令加密，以及把所选公钥安装到当前已连接主机。
 - 桌面原生 `russh` route 可显式启动固定 `127.0.0.1` 的本地、远端和 SOCKS5 动态转发；动态转发只实现无认证 CONNECT，拒绝 BIND、UDP ASSOCIATE、未知地址类型和无效目标，最多 8 条且每条最多 32 个连接。源码已通过 Actions 的真实双 sshd fixture，真实多服务器兼容仍需外部验收，系统 OpenSSH 继续是默认引擎。
+- 桌面直连标签可显式选择 Mosh 独立交互模式。Rust 以固定参数启动本机 `mosh`，SSH bootstrap 继续强制本机 `known_hosts`、安全 KEX 和受限 AskPass，远端 helper 固定为 `mosh-server`，UDP 固定为 60000–61000。它不支持 VPShell 跳板 route，不复用 SFTP 或转发；本机/远端安装、UDP firewall、漫游和长时间断网恢复需用户在自有节点验收。
 - 多终端 Compose 命令栏、命令历史检索和路径快捷输入。
 - 连接后可显式启用 bash/zsh Shell Integration；带随机会话令牌的有界控制帧上报 hostname/user/cwd，Rust 维护最多 8 层嵌套上下文，退出嵌套 shell 后回退到已知祖先。它是远端自报状态，不替代主机密钥验证。
 - Compose 安全广播由 Rust 冻结命令、目标会话和 Shell 上下文代际，两分钟单次预览后才发送；生产目标持续标记，认证交互与已知破坏性命令禁止广播，目标变化逐项跳过并分别报告成功/失败/跳过。Raw input 广播仍未实现。
@@ -172,6 +173,8 @@ Direct -> ProxyJump -> SOCKS5 -> HTTP CONNECT -> 用户自建 Relay -> 可选托
 
 网络诊断的“路线评估”由 Rust 在用户显式启动后执行。它最多比较 4 个原生 route；当前界面为同一目标生成直连和已配置跳板两种候选，每轮都完成逐跳认证、host-key pin 和最终 SFTP readiness。单个 campaign 限 30–300 秒间隔、3–20 轮滚动窗口和最多 120 轮；评分由成功率、中位数、P95 与失败惩罚组成，80% 成功率以下不推荐，15% 切换滞后避免小幅波动反复改变建议。快照只返回候选 ID、统计量和稳定错误码，关闭对话框即取消。它不自动修改 route，也不代表 UDP 丢包、吞吐、地域质量或“加速”效果。
 
+Mosh 是终端顶部的独立桌面直连模式，不是路线评估结果或自动回退。使用前需自行安装本机 `mosh` 和远端 `mosh-server`，并在自有服务器 firewall 放行 UDP 60000–61000；VPShell 不安装软件或修改 firewall。首次连接仍先经过结构化 SSH host-key 检查，Mosh 的 SSH bootstrap 随后强制严格主机密钥策略。文件坞、上传下载、外部编辑和端口转发继续使用各自 SSH/SFTP 路径。
+
 ## 本地开发
 
 环境要求：Node.js 22+、Rust stable，以及 [Tauri 2 对应平台依赖](https://v2.tauri.app/start/prerequisites/)。Windows 需要 Microsoft C++ Build Tools 的 **Desktop development with C++** 工作负载。
@@ -222,6 +225,7 @@ VPShell 会持续审计成熟公开项目的模块边界和用户工作流，但
 - [WindTerm](https://github.com/kingToolbox/WindTerm)：认证完成后再按顺序启动 Shell、SFTP 和系统监控，减少并发失败与重复提示；
 - [Termora](https://github.com/TermoraDev/termora)：有界并发传输、远端互传、权限编辑和分层主机工作流；其 AGPL-3.0 实现只作行为参考；
 - [openFinalShell](https://github.com/kexue-aihao/openfinalshell)：仅用于核对 FinalShell 数据迁移和桌面工作流，不把兼容代码作为安全事实来源。
+- [Mosh](https://github.com/mobile-shell/mosh)：只参考独立交互模式和公开命令边界，并调用用户另行安装的程序；GPL-3.0 源码未复制、链接或打包。
 
 所有吸收项都要重新按 VPShell 的 Rust/Tauri 安全边界实现，并经过本项目测试与许可证检查。逐项目的许可证边界、代码复用状态和已采纳设计见 [OPEN_SOURCE_REFERENCES.md](docs/OPEN_SOURCE_REFERENCES.md)；实际使用或改编的第三方代码只记录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
