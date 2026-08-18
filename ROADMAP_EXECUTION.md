@@ -111,10 +111,11 @@
 | 完成 | 安全自建脚本的事务 changefeed、具名加密 operation/outbox、远端可重试投影与本机不安全脚本保护；PR #1 run `32115066343` 全绿 |
 | 完成 | 终端字体族/字号/行高的固定设置实体、事务 changefeed、加密 operation/outbox、独立可重试投影与防回声指纹已接线；自定义字体资产/名称保持本机；PR #1 run `32163627366` 全绿 |
 | 完成 | 自动上传编辑文件与包传输两个应用行为偏好使用独立固定设置实体接入同一 Rust-owned 双向链路；设备本地 `externalEditorPath` 不同步；PR #1 run `32169323520` 全绿 |
-| 进行中 | 桌面 vault 解锁期 Rust-owned 自动调度：启动/业务变更防抖、周期/失败复查、单飞、锁定代际停止和具名 snapshot 事件已实现，等待 Actions |
-| 待实现 | 历史/背景/其他尚未建模设置等业务域 operation、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
+| 完成 | 桌面 vault 解锁期 Rust-owned 自动调度：启动/业务变更防抖、周期/失败复查、单飞、锁定代际停止和具名 snapshot 事件；PR #1 run `32174731384` 全绿 |
+| 进行中 | 桌面持久冲突中心：有界分页/预览、revision 防陈旧、Rust-owned 候选解决、加密 outbox 原子入队和 AppState 重投影已实现，等待 Actions |
+| 待实现 | 历史/背景/其他尚未建模设置等业务域 operation、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口、主机公开字段、安全自建脚本、终端外观窄设置及两个应用行为偏好的双向 operation/投影链路均已通过 Actions；自动调度正在验证，历史/背景/其他尚未建模设置、真实外部 provider、多设备和完整冲突界面仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口、主机公开字段、安全自建脚本、终端外观窄设置、两个应用行为偏好的双向 operation/投影链路及自动调度均已通过 Actions；持久冲突中心正在验证，历史/背景/其他尚未建模设置、真实外部 provider 和多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -236,7 +237,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 自动同步调度首轮 Actions 与格式修复 | 提交 `c57f63d` 的 PR #1 run `32172058551` 已全部进入终态：frontend 生产构建与 Android aarch64 debug APK/Gradle gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告 `sync_scheduler.rs` 的 `complete` 签名同一处折行差异后失败，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按 Ubuntu job `95825285109`、Windows job `95825284970` 及两个 macOS job 的一致 runner diff 机械应用该格式，不改行为；修复后 `git diff --check`、runner 格式形态、6 项 scheduler 测试清单、无 `node_modules`/`target` 检查通过，根分区 52%。本机继续不下载 Cargo/rustfmt、SDK 或依赖，等待格式修复提交后的完整矩阵。 |
 | 2026-08-18 | B9 自动同步调度第二轮 Actions 与测试时间轴修复 | 格式修复提交 `7d827e5` 的 PR #1 run `32173538126` 已全部进入终态：frontend、Android aarch64 debug APK/Gradle gate、四个平台 `cargo fmt --check` 与 locked check 均 `COMPLETED/SUCCESS`；Ubuntu 249/250、Windows 243/244、macOS Intel 与 arm 248/249 个 Rust 测试通过，四个平台仅同一 `successful_cycles_use_periodic_or_pending_recheck_deadlines` 失败。根因是测试先把策略观测时钟推进到五分钟周期期限，再以更早的 `20ms` 复用同一实例测试待处理期限，正确触发时钟回退保护；生产策略无缺陷。修复将两个独立期限场景改用各自策略实例，不改变运行时代码；等待修复提交后的完整矩阵。 |
 | 2026-08-18 | B9 自动同步调度测试时间轴修复本机轻量门禁 | 严格 fail-fast 的 `git diff --check`、package/Tauri/desktop/Android capability 四份 JSON、六项 scheduler 测试清单、周期与 pending 两个独立策略实例、期限前一毫秒/期限时刻断言、Rust 文件行宽及无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区起止均为 52%。VPS 无 Cargo/rustfmt，未下载工具链、SDK 或依赖；完整 Rust test 与其余矩阵交给 PR #1 Actions。 |
+| 2026-08-18 | B9 桌面解锁期自动同步调度（Actions 完成） | 测试时间轴修复提交 `c025c94` 的 PR #1 run `32174731384` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 桌面持久冲突中心（待 Actions） | 新增只在已解锁桌面会话开放的分页冲突 IPC，每页硬上限 50，候选预览硬上限 2048 bytes，不返回 merge stamp/device ID；WebView 只能回传 snapshot revision、conflict ID 和 0/1 索引，不能注入任意解决值。Rust 在同一 SQLite 事务重读持久候选、推进本机 seq/HLC、应用 resolution、加密 event 并原子入 outbox，陈旧 revision/已解决冲突/越界候选 fail closed；随后按 merge revision 重投影 AppState。读取/解决均与配置、锁定和同步共用单飞门；Android capability 未加入两个命令且 Sync 继续 disabled。聚焦测试覆盖长预览截断/哈希与身份元数据排除、分页边界、冻结候选、陈旧 revision 原子回滚、密文无候选明文，以及真实协调器周期中的列表、解决、AppState 投影和后续发布。 |
+| 2026-08-18 | B9 桌面持久冲突中心本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android capability 四份严格 JSON、93-command manifest 唯一项/handler/capability 并集完整对齐、Android 新增冲突命令与运行 Sync 命令禁权、锁定/单飞/分页/revision/冻结候选/加密原子 outbox/AppState 重试静态链路、三层聚焦测试与无新增日志宏、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区起止均为 52%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、SDK 或依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 和 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送自动同步调度的测试时间轴修复；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后进入历史/背景/其他尚未建模设置中的下一个可安全落地业务域，不以缺少删除语义的 append-only 历史合并冒充完整历史同步。平台网络变化直接触发、应用关闭后的系统后台行为、真实断网恢复矩阵均如实保留为后续/外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送桌面持久冲突中心；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后进入历史/背景/其他尚未建模设置中的下一个可安全落地业务域，不以缺少删除语义的 append-only 历史合并冒充完整历史同步，也不在缺少分块/安全安装时宣称背景同步完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实断网恢复矩阵均如实保留为后续/外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

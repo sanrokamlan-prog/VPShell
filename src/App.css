@@ -2697,6 +2697,120 @@ button.sync-status {
   overflow-wrap: anywhere;
 }
 
+.sync-conflict-center {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.sync-conflict-header,
+.sync-conflict-header > div,
+.sync-conflict-pagination,
+.sync-conflict-identity {
+  display: flex;
+  align-items: center;
+}
+
+.sync-conflict-header {
+  min-height: 40px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.sync-conflict-header > div {
+  min-width: 0;
+  gap: 7px;
+}
+
+.sync-conflict-header strong {
+  font-size: 11px;
+}
+
+.sync-conflict-header span,
+.sync-conflict-identity span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.sync-conflict-pagination button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+}
+
+.sync-conflict-pagination span {
+  min-width: 42px;
+  text-align: center;
+}
+
+.sync-conflict-list {
+  display: grid;
+}
+
+.sync-conflict-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sync-conflict-item:last-child {
+  border-bottom: 0;
+}
+
+.sync-conflict-identity {
+  min-width: 0;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-conflict-identity strong,
+.sync-conflict-identity span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sync-conflict-alternatives {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sync-conflict-alternatives button {
+  display: grid;
+  min-width: 0;
+  min-height: 76px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  grid-template-rows: 1fr auto;
+  align-items: start;
+  gap: 5px 7px;
+  padding: 9px;
+  text-align: left;
+  white-space: normal;
+}
+
+.sync-conflict-alternatives button > span {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.sync-conflict-alternatives button small {
+  grid-column: 2;
+  color: var(--text-faint);
+  font-size: 8px;
+  letter-spacing: 0;
+}
+
 .sync-options {
   display: grid;
   gap: 1px;
@@ -3889,6 +4003,10 @@ button.sync-status {
 
   .sync-readonly-status > div:last-of-type {
     border-bottom: 0;
+  }
+
+  .sync-conflict-alternatives {
+    grid-template-columns: 1fr;
   }
 
   .field,

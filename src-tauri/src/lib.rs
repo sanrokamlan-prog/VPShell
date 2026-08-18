@@ -1426,6 +1426,17 @@ fn desktop_sync_status(
 }
 
 #[tauri::command]
+async fn list_sync_conflicts(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    request: sync_coordinator::ListSyncConflictsRequest,
+) -> Result<sync_coordinator::SyncConflictCenterSnapshot, String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || coordinator.list_conflicts(request))
+        .await
+        .map_err(|error| format!("同步冲突读取任务异常结束: {error}"))?
+}
+
+#[tauri::command]
 async fn configure_local_folder_sync(
     app: tauri::AppHandle,
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
@@ -1456,6 +1467,29 @@ async fn configure_local_folder_sync(
 struct RunSyncOnceResult {
     status: sync_coordinator::SyncCoordinatorStatus,
     app_store: app_store::AppStoreSnapshot,
+}
+
+#[tauri::command]
+async fn resolve_sync_conflict(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    store: State<'_, app_store::AppStore>,
+    request: sync_coordinator::ResolveSyncConflictRequest,
+) -> Result<RunSyncOnceResult, String> {
+    let coordinator = coordinator.inner().clone();
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(i64::MAX);
+        let status = coordinator.resolve_conflict(&store, request, now_ms)?;
+        let app_store = store.snapshot()?;
+        Ok(RunSyncOnceResult { status, app_store })
+    })
+    .await
+    .map_err(|error| format!("同步冲突解决任务异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -1741,8 +1775,10 @@ pub fn run() {
             initialize_app_store,
             save_app_state,
             desktop_sync_status,
+            list_sync_conflicts,
             configure_local_folder_sync,
             run_sync_once,
+            resolve_sync_conflict,
             cancel_sync,
             lock_sync,
             install_wallpaper_asset,

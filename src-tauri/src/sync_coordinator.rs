@@ -20,6 +20,7 @@ use crate::{
         Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
         create_password_keyslot, open_password_keyslot,
     },
+    sync_merge::MergeConflictSnapshot,
     sync_outbox::{AttemptFailure, JournalErrorCode, RemoteApplyOutcome, SyncJournal},
     sync_provider::{
         LocalFolderProvider, ProviderCancellation, ProviderError, ProviderErrorCode,
@@ -93,6 +94,31 @@ pub(crate) struct SyncCoordinatorStatus {
     pub(crate) last_completed_at_ms: Option<i64>,
     pub(crate) last_uploaded_objects: u32,
     pub(crate) last_downloaded_objects: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ListSyncConflictsRequest {
+    offset: u16,
+    limit: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncConflictCenterSnapshot {
+    schema_version: u16,
+    merge_revision: u64,
+    total: usize,
+    offset: usize,
+    conflicts: Vec<MergeConflictSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ResolveSyncConflictRequest {
+    expected_revision: u64,
+    conflict_id: String,
+    alternative_index: u8,
 }
 
 struct CoordinatorSession {
@@ -235,6 +261,75 @@ impl SyncCoordinatorManager {
             .pending_objects
             .saturating_add(app_store.pending_entity_sync_change_count()?);
         Ok(status)
+    }
+
+    pub(crate) fn list_conflicts(
+        &self,
+        request: ListSyncConflictsRequest,
+    ) -> Result<SyncConflictCenterSnapshot, String> {
+        let _guard = self.begin_configuration()?;
+        {
+            let runtime = self.lock_runtime()?;
+            if runtime.session.is_none() {
+                return Err("同步 vault 尚未解锁".to_string());
+            }
+        }
+        let offset = usize::from(request.offset);
+        let snapshot = self
+            .journal
+            .conflict_snapshot(offset, usize::from(request.limit))
+            .map_err(journal_code)?;
+        Ok(SyncConflictCenterSnapshot {
+            schema_version: COORDINATOR_SCHEMA_VERSION,
+            merge_revision: snapshot.revision,
+            total: snapshot.total,
+            offset,
+            conflicts: snapshot.conflicts,
+        })
+    }
+
+    pub(crate) fn resolve_conflict(
+        &self,
+        app_store: &AppStore,
+        request: ResolveSyncConflictRequest,
+        now_ms: i64,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        if now_ms < 0 {
+            return Err("同步冲突解决时间不能为负数".to_string());
+        }
+        let _guard = self.begin_configuration()?;
+        let (vault_key, vault_id) = {
+            let runtime = self.lock_runtime()?;
+            let session = runtime
+                .session
+                .as_ref()
+                .ok_or_else(|| "同步 vault 尚未解锁".to_string())?;
+            (Arc::clone(&session.vault_key), session.vault_id.clone())
+        };
+        let result = self
+            .journal
+            .enqueue_local_conflict_resolution(
+                vault_key.as_ref(),
+                &vault_id,
+                request.expected_revision,
+                &request.conflict_id,
+                request.alternative_index,
+                now_ms,
+            )
+            .map_err(journal_code)?;
+        let projection_error = self
+            .apply_app_state_projections(app_store, &vault_id, now_ms)
+            .err();
+        {
+            let mut runtime = self.lock_runtime()?;
+            runtime.phase = if result.open_conflicts > 0 {
+                SyncCoordinatorPhase::Conflicts
+            } else {
+                SyncCoordinatorPhase::Idle
+            };
+            runtime.last_error_code = projection_error.map(|_| "app-state-writeback".to_string());
+        }
+        self.status_with_app_store(app_store)
     }
 
     pub(crate) fn cancel(&self) -> Result<(), String> {
@@ -509,6 +604,20 @@ impl SyncCoordinatorManager {
             }
         }
         self.check_generation(generation, cancellation)?;
+        self.apply_app_state_projections(app_store, vault_id, now_ms)?;
+        self.journal.prune(now_ms).map_err(journal_code)?;
+        Ok(CycleCounts {
+            uploaded,
+            downloaded,
+        })
+    }
+
+    fn apply_app_state_projections(
+        &self,
+        app_store: &AppStore,
+        vault_id: &str,
+        now_ms: i64,
+    ) -> Result<(), String> {
         let projection = self.journal.host_merge_projection().map_err(journal_code)?;
         app_store
             .apply_remote_host_projection(
@@ -542,11 +651,7 @@ impl SyncCoordinatorManager {
                 now_ms,
             )
             .map_err(|_| "app-state-writeback".to_string())?;
-        self.journal.prune(now_ms).map_err(journal_code)?;
-        Ok(CycleCounts {
-            uploaded,
-            downloaded,
-        })
+        Ok(())
     }
 
     fn drain_app_state_changes(
@@ -1195,6 +1300,14 @@ mod tests {
         assert_eq!(store.pending_entity_sync_changes(128).unwrap().len(), 1);
 
         let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
+        assert!(
+            coordinator
+                .list_conflicts(ListSyncConflictsRequest {
+                    offset: 0,
+                    limit: 10,
+                })
+                .is_err()
+        );
         let provider = Arc::new(MemoryProvider::default());
         let vault_id = Uuid::new_v4().to_string();
         coordinator
@@ -1355,11 +1468,72 @@ mod tests {
         assert_eq!(state["scripts"][0]["description"], "local description");
         assert_eq!(state["scripts"][0]["category"], "local category");
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+        let conflicts = coordinator
+            .list_conflicts(ListSyncConflictsRequest {
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(conflicts.total, 1);
+        assert_eq!(conflicts.conflicts.len(), 1);
+        assert_eq!(
+            conflicts.conflicts[0].alternatives[0].preview.as_deref(),
+            Some("echo local")
+        );
+        assert!(
+            coordinator
+                .resolve_conflict(
+                    &store,
+                    ResolveSyncConflictRequest {
+                        expected_revision: conflicts.merge_revision - 1,
+                        conflict_id: conflicts.conflicts[0].conflict_id.clone(),
+                        alternative_index: 0,
+                    },
+                    20_000,
+                )
+                .is_err()
+        );
+        assert_eq!(coordinator.status().unwrap().open_conflicts, 1);
+        let resolved = coordinator
+            .resolve_conflict(
+                &store,
+                ResolveSyncConflictRequest {
+                    expected_revision: conflicts.merge_revision,
+                    conflict_id: conflicts.conflicts[0].conflict_id.clone(),
+                    alternative_index: 0,
+                },
+                20_001,
+            )
+            .unwrap();
+        assert_eq!(resolved.open_conflicts, 0);
+        assert_eq!(resolved.pending_objects, 1);
+        assert_eq!(
+            coordinator
+                .list_conflicts(ListSyncConflictsRequest {
+                    offset: 0,
+                    limit: 10,
+                })
+                .unwrap()
+                .total,
+            0
+        );
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
+        assert_eq!(state["scripts"][0]["command"], "echo local");
+        let status = coordinator.run_once(&store, 20_002).unwrap();
+        assert_eq!(status.last_uploaded_objects, 1);
+        assert_eq!(status.open_conflicts, 0);
         for encoded in provider.objects.lock().unwrap().values() {
             assert!(
                 !encoded
                     .windows("local description".len())
                     .any(|window| { window == "local description".as_bytes() })
+            );
+            assert!(
+                !encoded
+                    .windows("echo local".len())
+                    .any(|window| window == b"echo local")
             );
         }
     }
@@ -1934,6 +2108,14 @@ mod tests {
                 .is_err()
         );
         assert!(coordinator.run_once(&test_app_store(&root), 2_000).is_err());
+        assert!(
+            coordinator
+                .list_conflicts(ListSyncConflictsRequest {
+                    offset: 0,
+                    limit: 10,
+                })
+                .is_err()
+        );
         assert!(coordinator.detach_session().is_err());
         assert!(
             coordinator

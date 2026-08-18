@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            91,
+            93,
             "command manifest contains duplicates or changed count"
         );
 
@@ -160,8 +160,10 @@ mod tests {
             "allow-sync-attach-session",
             "allow-sync-acknowledge-reconciliation",
             "allow-desktop-sync-status",
+            "allow-list-sync-conflicts",
             "allow-configure-local-folder-sync",
             "allow-run-sync-once",
+            "allow-resolve-sync-conflict",
             "allow-cancel-sync",
             "allow-lock-sync",
             "allow-native-engine-probe",
@@ -238,8 +240,10 @@ mod tests {
         let frontend = include_str!("../../src/App.tsx");
         for command in [
             "desktop_sync_status",
+            "list_sync_conflicts",
             "configure_local_folder_sync",
             "run_sync_once",
+            "resolve_sync_conflict",
             "cancel_sync",
             "lock_sync",
         ] {

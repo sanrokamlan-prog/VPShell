@@ -12,6 +12,8 @@ const MAX_FIELDS_PER_PATCH: usize = 64;
 const MAX_ENTITIES: usize = 10_000;
 const MAX_HISTORY_EVENTS: usize = 50_000;
 const MAX_CONFLICTS: usize = 1_000;
+const MAX_CONFLICT_PAGE: usize = 50;
+const MAX_CONFLICT_PREVIEW_BYTES: usize = 2_048;
 const MAX_APPLIED_OPERATIONS: usize = 50_000;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
 
@@ -430,6 +432,28 @@ pub(crate) struct MergeConflict {
     resolution_stamp: Option<MergeStamp>,
 }
 
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConflictAlternativeSnapshot {
+    pub(crate) index: u8,
+    pub(crate) value_type: String,
+    pub(crate) preview: Option<String>,
+    pub(crate) byte_length: u64,
+    pub(crate) content_hash: Option<String>,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergeConflictSnapshot {
+    pub(crate) conflict_id: String,
+    pub(crate) entity_kind: EntityKind,
+    pub(crate) entity_id: String,
+    pub(crate) field: String,
+    pub(crate) reason: ConflictReason,
+    pub(crate) alternatives: [ConflictAlternativeSnapshot; 2],
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EntityRecord {
@@ -623,6 +647,40 @@ impl MergeState {
             .filter(|conflict| conflict.resolution_stamp.is_none())
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn conflict_snapshot(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> MergeResult<(usize, Vec<MergeConflictSnapshot>)> {
+        if offset > MAX_CONFLICTS || limit == 0 || limit > MAX_CONFLICT_PAGE {
+            return Err(MergeError::new(
+                MergeErrorCode::InvalidInput,
+                "同步冲突分页范围无效",
+            ));
+        }
+        let open = self.open_conflicts();
+        let total = open.len();
+        let snapshots = open
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|conflict| {
+                Ok(MergeConflictSnapshot {
+                    conflict_id: conflict.conflict_id,
+                    entity_kind: conflict.entity_kind,
+                    entity_id: conflict.entity_id,
+                    field: conflict.field,
+                    reason: conflict.reason,
+                    alternatives: [
+                        conflict_alternative_snapshot(0, &conflict.alternatives[0])?,
+                        conflict_alternative_snapshot(1, &conflict.alternatives[1])?,
+                    ],
+                })
+            })
+            .collect::<MergeResult<Vec<_>>>()?;
+        Ok((total, snapshots))
     }
 
     pub(crate) fn history(&self) -> Vec<HistoryEvent> {
@@ -939,6 +997,124 @@ impl MergeState {
             .insert(conflict.conflict_id.clone(), conflict);
         Ok(())
     }
+}
+
+fn bounded_conflict_preview(value: &str) -> (String, bool) {
+    if value.len() <= MAX_CONFLICT_PREVIEW_BYTES {
+        return (value.to_string(), false);
+    }
+    let mut end = MAX_CONFLICT_PREVIEW_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
+}
+
+fn conflict_alternative_snapshot(
+    index: u8,
+    alternative: &ConflictAlternative,
+) -> MergeResult<ConflictAlternativeSnapshot> {
+    let Some(value) = &alternative.value else {
+        return Ok(ConflictAlternativeSnapshot {
+            index,
+            value_type: "deleted".to_string(),
+            preview: None,
+            byte_length: 0,
+            content_hash: None,
+            truncated: false,
+        });
+    };
+    let encoded = serde_json::to_vec(value).map_err(|_| {
+        MergeError::new(
+            MergeErrorCode::CorruptState,
+            "无法编码同步冲突候选",
+        )
+    })?;
+    let (value_type, display) = match value {
+        FieldValue::Text(value) => ("text", Some(value.clone())),
+        FieldValue::Integer(value) => ("integer", Some(value.to_string())),
+        FieldValue::Flag(value) => ("flag", Some(value.to_string())),
+        FieldValue::TextList(value) => (
+            "text-list",
+            Some(serde_json::to_string(value).map_err(|_| {
+                MergeError::new(
+                    MergeErrorCode::CorruptState,
+                    "无法编码同步冲突列表候选",
+                )
+            })?),
+        ),
+        FieldValue::BlobRef(value) => ("blob-ref", Some(value.clone())),
+        FieldValue::Clear => ("clear", None),
+    };
+    let (preview, truncated) = display
+        .as_deref()
+        .map(bounded_conflict_preview)
+        .map(|(preview, truncated)| (Some(preview), truncated))
+        .unwrap_or((None, false));
+    Ok(ConflictAlternativeSnapshot {
+        index,
+        value_type: value_type.to_string(),
+        preview,
+        byte_length: encoded.len() as u64,
+        content_hash: Some(sha256_hex(&encoded)),
+        truncated,
+    })
+}
+
+pub(crate) fn build_local_conflict_resolution_operation(
+    state: &MergeState,
+    operation_id: &str,
+    device_id: &str,
+    sequence: u64,
+    physical_ms: i64,
+    logical: u16,
+    conflict_id: &str,
+    alternative_index: u8,
+) -> MergeResult<MergeOperation> {
+    validate_uuid(operation_id, "operation")?;
+    validate_uuid(device_id, "device")?;
+    validate_hash(conflict_id, "conflict")?;
+    let conflict = state.conflicts.get(conflict_id).ok_or_else(|| {
+        MergeError::new(
+            MergeErrorCode::ConflictMissing,
+            "要解决的同步冲突不存在",
+        )
+    })?;
+    if conflict.resolution_stamp.is_some() {
+        return Err(MergeError::new(
+            MergeErrorCode::StaleResolution,
+            "同步冲突已经解决",
+        ));
+    }
+    let alternative = conflict
+        .alternatives
+        .get(usize::from(alternative_index))
+        .ok_or_else(|| {
+            MergeError::new(
+                MergeErrorCode::InvalidInput,
+                "同步冲突候选索引无效",
+            )
+        })?;
+    let operation = MergeOperation {
+        format_version: FORMAT_VERSION,
+        operation_id: operation_id.to_string(),
+        device_id: device_id.to_string(),
+        sequence,
+        hlc: HybridLogicalClock {
+            physical_ms,
+            logical,
+        },
+        payload: MergePayload::Resolve(ResolvePayload {
+            conflict_id: conflict.conflict_id.clone(),
+            entity_kind: conflict.entity_kind.clone(),
+            entity_id: conflict.entity_id.clone(),
+            field: conflict.field.clone(),
+            value: alternative.value.clone(),
+            keep_deleted: alternative.value.is_none(),
+        }),
+    };
+    validate_operation(&operation)?;
+    Ok(operation)
 }
 
 fn validate_operation(operation: &MergeOperation) -> MergeResult<()> {
@@ -1634,6 +1810,77 @@ mod tests {
         assert_eq!(
             current_field(&left, EntityKind::Host, HOST_ID, "address"),
             FieldValue::Text("host-b.example".into())
+        );
+    }
+
+    #[test]
+    fn conflict_snapshot_is_bounded_and_resolution_uses_a_frozen_alternative() {
+        let first_value = "a".repeat(3_000);
+        let second_value = "b".repeat(3_000);
+        let first = patch(
+            101,
+            DEVICE_A,
+            100,
+            EntityKind::Script,
+            HOST_ID,
+            "body",
+            FieldValue::Text(first_value.clone()),
+        );
+        let second = patch(
+            102,
+            DEVICE_B,
+            100,
+            EntityKind::Script,
+            HOST_ID,
+            "body",
+            FieldValue::Text(second_value),
+        );
+        let mut state = MergeState::default();
+        state.apply(&first).unwrap();
+        state.apply(&second).unwrap();
+
+        let (total, conflicts) = state.conflict_snapshot(0, 1).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].alternatives[0].truncated);
+        assert!(conflicts[0].alternatives[0].preview.as_ref().unwrap().len() <= 2_048);
+        assert_eq!(conflicts[0].alternatives[0].content_hash.as_ref().unwrap().len(), 64);
+        let encoded_snapshot = serde_json::to_string(&conflicts).unwrap();
+        assert!(!encoded_snapshot.contains(DEVICE_A));
+        assert!(!encoded_snapshot.contains(DEVICE_B));
+        assert!(state.conflict_snapshot(0, 0).is_err());
+        assert!(state.conflict_snapshot(0, 51).is_err());
+
+        let conflict_id = conflicts[0].conflict_id.clone();
+        assert!(
+            build_local_conflict_resolution_operation(
+                &state,
+                &operation_id(103),
+                DEVICE_A,
+                103,
+                101,
+                0,
+                &conflict_id,
+                2,
+            )
+            .is_err()
+        );
+        let operation = build_local_conflict_resolution_operation(
+            &state,
+            &operation_id(104),
+            DEVICE_A,
+            104,
+            101,
+            0,
+            &conflict_id,
+            0,
+        )
+        .unwrap();
+        state.apply(&operation).unwrap();
+        assert!(state.open_conflicts().is_empty());
+        assert_eq!(
+            current_field(&state, EntityKind::Script, HOST_ID, "body"),
+            FieldValue::Text(first_value)
         );
     }
 

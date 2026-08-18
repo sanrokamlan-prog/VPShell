@@ -8,6 +8,7 @@ import {
   Cable,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Clock3,
   CircleHelp,
@@ -303,6 +304,37 @@ interface SyncCycleResult {
   appStore: AppStoreSnapshot;
 }
 
+type SyncConflictEntityKind = "host" | "script" | "setting" | "background";
+type SyncConflictReason = "concurrent-edit" | "connection-identity" | "script-content" | "risk-lowered" | "deleted-entity-edited" | "concurrent-delete";
+
+interface SyncConflictAlternative {
+  index: number;
+  valueType: "text" | "integer" | "flag" | "text-list" | "blob-ref" | "clear" | "deleted";
+  preview?: string;
+  byteLength: number;
+  contentHash?: string;
+  truncated: boolean;
+}
+
+interface SyncConflictItem {
+  conflictId: string;
+  entityKind: SyncConflictEntityKind;
+  entityId: string;
+  field: string;
+  reason: SyncConflictReason;
+  alternatives: [SyncConflictAlternative, SyncConflictAlternative];
+}
+
+interface SyncConflictCenterSnapshot {
+  schemaVersion: number;
+  mergeRevision: number;
+  total: number;
+  offset: number;
+  conflicts: SyncConflictItem[];
+}
+
+const SYNC_CONFLICT_PAGE_SIZE = 10;
+
 interface RenderAsset {
   dataUrl: string;
   label: string;
@@ -343,6 +375,29 @@ const syncPhaseLabels: Record<SyncCoordinatorPhase, string> = {
   suspended: "已暂停",
   cancelled: "已取消",
 };
+
+const syncConflictKindLabels: Record<SyncConflictEntityKind, string> = {
+  host: "主机",
+  script: "脚本",
+  setting: "设置",
+  background: "背景",
+};
+
+const syncConflictReasonLabels: Record<SyncConflictReason, string> = {
+  "concurrent-edit": "并发编辑",
+  "connection-identity": "连接身份不一致",
+  "script-content": "脚本内容不一致",
+  "risk-lowered": "风险等级降低",
+  "deleted-entity-edited": "删除后又被编辑",
+  "concurrent-delete": "并发删除",
+};
+
+function syncConflictAlternativeLabel(alternative: SyncConflictAlternative) {
+  if (alternative.valueType === "deleted") return "保持删除";
+  if (alternative.valueType === "clear") return "清空该值";
+  if (alternative.valueType === "flag") return alternative.preview === "true" ? "启用" : "关闭";
+  return alternative.preview || "空值";
+}
 
 const sidebarLabels: Record<SidebarView, { eyebrow: string; title: string; placeholder: string }> = {
   hosts: { eyebrow: "CONNECTIONS", title: "主机", placeholder: "搜索名称、IP、标签" },
@@ -549,6 +604,10 @@ function App() {
   const [desktopSyncStatus, setDesktopSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
   const [desktopSyncError, setDesktopSyncError] = useState<string | null>(null);
   const [desktopSyncBusy, setDesktopSyncBusy] = useState(false);
+  const [syncConflictCenter, setSyncConflictCenter] = useState<SyncConflictCenterSnapshot | null>(null);
+  const [syncConflictOffset, setSyncConflictOffset] = useState(0);
+  const [syncConflictError, setSyncConflictError] = useState<string | null>(null);
+  const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [installedFonts, setInstalledFonts] = useState<string[]>([]);
   const [fontRevision, setFontRevision] = useState(0);
@@ -599,6 +658,22 @@ function App() {
       setDesktopSyncError(null);
     } catch (error) {
       setDesktopSyncError(invokeErrorMessage(error));
+    }
+  }, []);
+
+  const refreshSyncConflicts = useCallback(async (offset: number) => {
+    if (!isDesktopRuntime()) return;
+    try {
+      const snapshot = await invoke<SyncConflictCenterSnapshot>("list_sync_conflicts", {
+        request: { offset, limit: SYNC_CONFLICT_PAGE_SIZE },
+      });
+      setSyncConflictCenter(snapshot);
+      setSyncConflictError(null);
+      if (snapshot.total > 0 && snapshot.conflicts.length === 0 && offset > 0) {
+        setSyncConflictOffset(Math.max(0, offset - SYNC_CONFLICT_PAGE_SIZE));
+      }
+    } catch (error) {
+      setSyncConflictError(invokeErrorMessage(error));
     }
   }, []);
 
@@ -662,6 +737,23 @@ function App() {
     );
     return () => window.clearInterval(timer);
   }, [dialog, refreshDesktopSyncStatus]);
+
+  useEffect(() => {
+    if (
+      !isDesktopRuntime()
+      || dialog !== "sync"
+      || !desktopSyncStatus?.configured
+      || desktopSyncStatus.openConflicts === 0
+    ) {
+      if (desktopSyncStatus?.openConflicts === 0) {
+        setSyncConflictCenter(null);
+        setSyncConflictError(null);
+        setSyncConflictOffset(0);
+      }
+      return;
+    }
+    void refreshSyncConflicts(syncConflictOffset);
+  }, [desktopSyncStatus?.configured, desktopSyncStatus?.mergeRevision, desktopSyncStatus?.openConflicts, dialog, refreshSyncConflicts, syncConflictOffset]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return undefined;
@@ -2075,6 +2167,42 @@ function App() {
     }
   }
 
+  async function resolveSyncConflict(conflictId: string, alternativeIndex: number) {
+    if (!syncConflictCenter || appStoreStatus.saving || desktopSyncStatus?.running) {
+      showToast("请等待当前本地保存或同步任务完成");
+      return;
+    }
+    setResolvingConflictId(conflictId);
+    try {
+      const result = await invoke<SyncCycleResult>("resolve_sync_conflict", {
+        request: {
+          expectedRevision: syncConflictCenter.mergeRevision,
+          conflictId,
+          alternativeIndex,
+        },
+      });
+      const applied = applyAppStoreSnapshot(result.appStore);
+      setDesktopSyncStatus(result.status);
+      setDesktopSyncError(result.status.lastErrorCode ?? (applied ? null : "local-state-busy"));
+      showToast(
+        result.status.lastErrorCode
+          ? "同步冲突已解决并入队；本地投影将在下一周期重试"
+          : applied
+          ? "同步冲突已解决并加入加密发布队列"
+          : "同步冲突已解决；当前未提交编辑保留，稍后刷新本地视图",
+      );
+      await refreshSyncConflicts(syncConflictOffset);
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncConflictError(message);
+      showToast(`冲突解决失败：${message}`);
+      await refreshDesktopSyncStatus();
+      await refreshSyncConflicts(syncConflictOffset);
+    } finally {
+      setResolvingConflictId(null);
+    }
+  }
+
   async function cancelDesktopSync() {
     try {
       const status = await invoke<SyncCoordinatorStatus>("cancel_sync");
@@ -2091,6 +2219,9 @@ function App() {
       const status = await invoke<SyncCoordinatorStatus>("lock_sync");
       setDesktopSyncStatus(status);
       setDesktopSyncError(null);
+      setSyncConflictCenter(null);
+      setSyncConflictError(null);
+      setSyncConflictOffset(0);
       setSyncPassword("");
       setAppState((current) => ({
         ...current,
@@ -2933,6 +3064,43 @@ function App() {
             {desktopSyncStatus?.recoveryNote ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncStatus.recoveryNote}</p> : null}
             {desktopSyncError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncError}</p> : null}
           </div>
+          {desktopSyncStatus?.configured && desktopSyncStatus.openConflicts > 0 ? (
+            <section className="sync-conflict-center" aria-live="polite">
+              <div className="sync-conflict-header">
+                <div><AlertTriangle size={16} /><strong>冲突中心</strong><span>{syncConflictCenter?.total ?? desktopSyncStatus.openConflicts} 项</span></div>
+                <div className="sync-conflict-pagination">
+                  <button type="button" title="上一页" disabled={syncConflictOffset === 0 || Boolean(resolvingConflictId)} onClick={() => setSyncConflictOffset(Math.max(0, syncConflictOffset - SYNC_CONFLICT_PAGE_SIZE))}><ChevronLeft size={16} /></button>
+                  <span>{syncConflictCenter?.total ? `${syncConflictOffset + 1}-${Math.min(syncConflictOffset + syncConflictCenter.conflicts.length, syncConflictCenter.total)}` : "-"}</span>
+                  <button type="button" title="下一页" disabled={!syncConflictCenter || syncConflictOffset + syncConflictCenter.conflicts.length >= syncConflictCenter.total || Boolean(resolvingConflictId)} onClick={() => setSyncConflictOffset(syncConflictOffset + SYNC_CONFLICT_PAGE_SIZE)}><ChevronRight size={16} /></button>
+                </div>
+              </div>
+              {syncConflictError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {syncConflictError}</p> : null}
+              <div className="sync-conflict-list">
+                {syncConflictCenter?.conflicts.map((conflict) => (
+                  <article className="sync-conflict-item" key={conflict.conflictId}>
+                    <div className="sync-conflict-identity">
+                      <strong>{syncConflictKindLabels[conflict.entityKind]} · {conflict.field}</strong>
+                      <span>{syncConflictReasonLabels[conflict.reason]} · {conflict.entityId.slice(0, 8)}</span>
+                    </div>
+                    <div className="sync-conflict-alternatives">
+                      {conflict.alternatives.map((alternative) => (
+                        <button
+                          type="button"
+                          key={alternative.index}
+                          disabled={Boolean(resolvingConflictId) || desktopSyncStatus?.running || desktopSyncStatus?.recoveryRequired || appStoreStatus.saving}
+                          onClick={() => void resolveSyncConflict(conflict.conflictId, alternative.index)}
+                        >
+                          <Check size={15} />
+                          <span>{syncConflictAlternativeLabel(alternative)}{alternative.truncated ? "…" : ""}</span>
+                          <small>{alternative.contentHash ? `${alternative.byteLength} B · ${alternative.contentHash.slice(0, 12)}` : "删除"}</small>
+                        </button>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
           {!desktopSyncStatus?.configured ? <>
           <div className="provider-grid">
             {(Object.keys(providerLabels) as SyncProviderKind[]).map((provider) => (

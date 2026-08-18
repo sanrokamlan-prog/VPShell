@@ -28,8 +28,10 @@ import_finalshell
 initialize_app_store
 save_app_state
 desktop_sync_status
+list_sync_conflicts
 configure_local_folder_sync
 run_sync_once
+resolve_sync_conflict
 cancel_sync
 lock_sync
 install_wallpaper_asset

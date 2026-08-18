@@ -14,8 +14,9 @@ use crate::{
         EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object, encrypt_sync_object,
     },
     sync_merge::{
-        EntityKind, LocalEntityMutation, MergeError, MergeErrorCode, MergedEntityProjection,
-        advance_local_hlc, apply_persisted_operation, build_local_entity_operation,
+        EntityKind, LocalEntityMutation, MergeConflictSnapshot, MergeError, MergeErrorCode,
+        MergedEntityProjection, advance_local_hlc, apply_persisted_operation,
+        build_local_conflict_resolution_operation, build_local_entity_operation,
         load_persisted_state, local_entity_operation_matches,
     },
     sync_provider::validate_key,
@@ -192,6 +193,19 @@ pub(crate) struct JournalStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MergeJournalStatus {
+    pub(crate) revision: u64,
+    pub(crate) open_conflicts: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConflictJournalSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) total: usize,
+    pub(crate) conflicts: Vec<MergeConflictSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConflictResolutionJournalResult {
     pub(crate) revision: u64,
     pub(crate) open_conflicts: usize,
 }
@@ -828,6 +842,24 @@ impl SyncJournal {
         })
     }
 
+    pub(crate) fn conflict_snapshot(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> JournalResult<ConflictJournalSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let (total, conflicts) = state
+                .conflict_snapshot(offset, limit)
+                .map_err(map_merge_error)?;
+            Ok(ConflictJournalSnapshot {
+                revision,
+                total,
+                conflicts,
+            })
+        })
+    }
+
     pub(crate) fn host_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
         self.transaction(|transaction| {
             let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
@@ -1078,6 +1110,146 @@ impl SyncJournal {
                     Ok(())
                 },
             )
+        })
+    }
+
+    pub(crate) fn enqueue_local_conflict_resolution(
+        &self,
+        vault_key: &VaultKey,
+        vault_id: &str,
+        expected_revision: u64,
+        conflict_id: &str,
+        alternative_index: u8,
+        now_ms: i64,
+    ) -> JournalResult<ConflictResolutionJournalResult> {
+        validate_now(now_ms)?;
+        if alternative_index > 1 {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步冲突候选索引无效",
+            ));
+        }
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            ensure_unblocked(transaction)?;
+            let (merge_revision, state) =
+                load_persisted_state(transaction).map_err(map_merge_error)?;
+            if merge_revision != expected_revision {
+                return Err(JournalError::new(
+                    JournalErrorCode::Conflict,
+                    "同步冲突快照 revision 已变化",
+                ));
+            }
+            let (device_id, last_hlc_ms, last_hlc_logical): (String, i64, i64) = transaction
+                .query_row(
+                    "SELECT device_id, last_hlc_ms, last_hlc_logical
+                     FROM sync_local_identity WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份")
+                })?;
+            let highest: Option<i64> = transaction
+                .query_row(
+                    "SELECT highest_sequence FROM sync_heads
+                     WHERE direction = 'local' AND device_id = ?1",
+                    params![device_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取本机同步序号")
+                })?;
+            let sequence = highest
+                .unwrap_or(0)
+                .checked_add(1)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| {
+                    JournalError::new(JournalErrorCode::LimitExceeded, "本机同步序号已耗尽")
+                })?;
+            let (physical_ms, logical) = if now_ms > last_hlc_ms {
+                (now_ms, 0_u16)
+            } else if last_hlc_logical < u16::MAX as i64 {
+                (last_hlc_ms, (last_hlc_logical as u16).saturating_add(1))
+            } else {
+                (
+                    last_hlc_ms.checked_add(1).ok_or_else(|| {
+                        JournalError::new(JournalErrorCode::LimitExceeded, "本机同步 HLC 已耗尽")
+                    })?,
+                    0_u16,
+                )
+            };
+            let (physical_ms, logical) =
+                advance_local_hlc(&state, physical_ms, logical).map_err(map_merge_error)?;
+            let operation_id = Uuid::new_v4().to_string();
+            let operation = build_local_conflict_resolution_operation(
+                &state,
+                &operation_id,
+                &device_id,
+                sequence,
+                physical_ms,
+                logical,
+                conflict_id,
+                alternative_index,
+            )
+            .map_err(map_merge_error)?;
+            let encoded_operation = operation.encode().map_err(map_merge_error)?;
+            let encrypted_object = encrypt_sync_object(
+                vault_key,
+                &vault_id,
+                SyncObjectKind::Event,
+                &operation_id,
+                Some(&device_id),
+                Some(sequence),
+                &encoded_operation,
+            )
+            .and_then(|object| object.encode())
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::InvalidInput,
+                    "无法加密同步冲突解决 operation",
+                )
+            })?;
+            let object = validate_envelope(&encrypted_object)?;
+            let hash = object_hash(&encrypted_object);
+            let object_key = format!("vpshell/v1/{vault_id}/segments/{device_id}/{sequence}.oseg");
+            enqueue_local_in_transaction(
+                transaction,
+                &object_key,
+                &encrypted_object,
+                &object,
+                &hash,
+                now_ms,
+                |transaction| {
+                    apply_persisted_operation(
+                        transaction,
+                        &encoded_operation,
+                        merge_revision,
+                        now_ms,
+                    )
+                    .map_err(map_merge_error)?;
+                    transaction
+                        .execute(
+                            "UPDATE sync_local_identity
+                             SET last_hlc_ms = ?1, last_hlc_logical = ?2
+                             WHERE singleton = 1 AND device_id = ?3",
+                            params![physical_ms, i64::from(logical), device_id],
+                        )
+                        .map_err(|_| {
+                            JournalError::new(JournalErrorCode::Storage, "无法推进本机同步 HLC")
+                        })?;
+                    Ok(())
+                },
+            )?;
+            let (revision, state) =
+                load_persisted_state(transaction).map_err(map_merge_error)?;
+            Ok(ConflictResolutionJournalResult {
+                revision,
+                open_conflicts: state.open_conflicts().len(),
+            })
         })
     }
 
@@ -1630,6 +1802,50 @@ mod tests {
         .unwrap()
     }
 
+    fn encrypted_remote_patch(
+        key: &VaultKey,
+        device_id: &str,
+        sequence: u64,
+        entity_id: &str,
+        value: &str,
+    ) -> (String, Vec<u8>) {
+        let operation_id = Uuid::new_v4().to_string();
+        let operation = serde_json::json!({
+            "formatVersion": 1,
+            "operationId": operation_id,
+            "deviceId": device_id,
+            "sequence": sequence,
+            "hlc": {"physicalMs": 100, "logical": 0},
+            "payload": {
+                "kind": "patch",
+                "payload": {
+                    "entityKind": "host",
+                    "entityId": entity_id,
+                    "fields": {"address": {"type": "text", "value": value}},
+                    "observedFields": {},
+                    "observedTombstone": null
+                }
+            }
+        });
+        let encoded = serde_json::to_vec(&operation).unwrap();
+        let encrypted = encrypt_sync_object(
+            key,
+            VAULT_ID,
+            SyncObjectKind::Event,
+            &operation_id,
+            Some(device_id),
+            Some(sequence),
+            &encoded,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        (
+            format!("vpshell/v1/{VAULT_ID}/segments/{device_id}/{sequence}.oseg"),
+            encrypted,
+        )
+    }
+
     fn create_business_table(transaction: &Transaction<'_>) -> JournalResult<()> {
         transaction
             .execute(
@@ -1765,6 +1981,79 @@ mod tests {
         );
         assert_eq!(journal.status().unwrap().pending_objects, 1);
         assert_eq!(journal.merge_status().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn conflict_resolution_is_revision_bound_encrypted_and_atomic_with_outbox() {
+        let root = TempDir::new("conflict-resolution");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let key = VaultKey::generate().unwrap();
+        let entity_id = Uuid::new_v4().to_string();
+        let device_a = "33333333-3333-4333-8333-333333333333".to_string();
+        let device_b = "44444444-4444-4444-8444-444444444444".to_string();
+        let (first_key, first) =
+            encrypted_remote_patch(&key, &device_a, 1, &entity_id, "first.example");
+        let (second_key, second) =
+            encrypted_remote_patch(&key, &device_b, 1, &entity_id, "second.example");
+        journal
+            .apply_remote_merge(&first_key, &first, &key, 100)
+            .unwrap();
+        journal
+            .apply_remote_merge(&second_key, &second, &key, 101)
+            .unwrap();
+
+        let snapshot = journal.conflict_snapshot(0, 10).unwrap();
+        assert_eq!(snapshot.revision, 2);
+        assert_eq!(snapshot.total, 1);
+        let conflict_id = snapshot.conflicts[0].conflict_id.clone();
+        assert_eq!(
+            journal
+                .enqueue_local_conflict_resolution(
+                    &key,
+                    VAULT_ID,
+                    1,
+                    &conflict_id,
+                    0,
+                    200,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Conflict
+        );
+        assert_eq!(journal.status().unwrap().pending_objects, 0);
+        assert_eq!(journal.merge_status().unwrap().open_conflicts, 1);
+
+        let result = journal
+            .enqueue_local_conflict_resolution(
+                &key,
+                VAULT_ID,
+                snapshot.revision,
+                &conflict_id,
+                0,
+                200,
+            )
+            .unwrap();
+        assert_eq!(result.revision, 3);
+        assert_eq!(result.open_conflicts, 0);
+        assert_eq!(journal.status().unwrap().pending_objects, 1);
+        let projection = journal.host_merge_projection().unwrap();
+        assert_eq!(
+            projection.entities[0].fields.as_ref().unwrap()["address"],
+            crate::sync_merge::FieldValue::Text("first.example".to_string())
+        );
+        let claim = journal.claim_next_for_vault(VAULT_ID, 201).unwrap().unwrap();
+        assert!(
+            !claim
+                .encrypted_object
+                .windows("first.example".len())
+                .any(|window| window == b"first.example")
+        );
+        assert!(
+            !claim
+                .encrypted_object
+                .windows("second.example".len())
+                .any(|window| window == b"second.example")
+        );
     }
 
     #[test]

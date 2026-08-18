@@ -1,6 +1,6 @@
 # VPShell 加密同步设计
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；AppState 主机公开字段、安全自建脚本、终端字体族/字号/行高及自动上传编辑文件/包传输两个行为偏好已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。主机 credential/key/path/trust pin，脚本描述、分类和未通过秘密扫描的内容，自定义字体资产/名称，以及设备本地编辑器路径不进入 operation，远端投影也不会替换这些本机数据。历史、背景、其他尚未建模设置和冲突解决 UI、WebDAV/扩展 provider 产品凭据、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；AppState 主机公开字段、安全自建脚本、终端字体族/字号/行高及自动上传编辑文件/包传输两个行为偏好已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。桌面冲突中心以分页有界预览展示持久冲突，前端只回传 snapshot revision、conflict ID 和候选索引；Rust 从持久候选构造、加密并原子入队 resolution operation，再重投影 AppState。主机 credential/key/path/trust pin，脚本描述、分类和未通过秘密扫描的内容，自定义字体资产/名称，以及设备本地编辑器路径不进入 operation，远端投影也不会替换这些本机数据。历史、背景、其他尚未建模设置、WebDAV/扩展 provider 产品凭据、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
 
 ### 当前 v1 密码学边界
 
@@ -389,8 +389,8 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：桌面 Local Folder 已接通初始化/解锁、主机公开字段、安全自建脚本、终端字体族/字号/行高和两个应用行为偏好的双向事务交接，以及手动与解锁期自动单周期；仍需历史/背景/其他尚未建模设置业务域入队、WebDAV 产品入口、真实外部服务器兼容矩阵及断网退避测试。
-4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心和远端路径作用域已接入协调器事务；仍需冲突详情/解决 UI 和多进程/真实设备演练。
+3. **MVP provider**：桌面 Local Folder 已接通初始化/解锁、主机公开字段、安全自建脚本、终端字体族/字号/行高和两个应用行为偏好的双向事务交接、持久冲突解决，以及手动与解锁期自动单周期；仍需历史/背景/其他尚未建模设置业务域入队、WebDAV 产品入口、真实外部服务器兼容矩阵及断网退避测试。
+4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心、分页详情和 Rust-owned 候选解决 operation 已接入协调器事务；仍需多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
 6. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。
 7. **Provider 扩展**：SFTP、S3-compatible、Gateway 的结构化不可变适配层已完成；仍需真实 transport、协调器、协议兼容与故障矩阵，再评估 rclone 适配。

@@ -252,7 +252,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - `vpshell/v1/bootstrap.json` 是不可变 schema-v1 对象，只包含 canonical vault UUID 和 Argon2id 认证 keyslot。二级密码进入 Rust 后立即由清零容器拥有，不得持久化、序列化、调试、记录或返回前端；状态响应只包含阶段、计数、代际和稳定错误码。
 - 配置与 Argon2id 解锁、手动及自动单周期均在 blocking worker 执行；取消使当前 provider token 与 generation 同时失效，锁定先使 `AutomaticSyncScheduler` 代际失效，再清除运行时 provider/VMK。五个桌面命令只能进入 `capabilities/default.json`，自动调度不能新增 WebView 启动命令，Android capability 必须持续排除。
 - 自动调度只在桌面 vault 解锁期间存在：2 秒启动/业务 changefeed 防抖、5 分钟远端周期检查、仍有 pending 或可重试失败时 30 秒复查。永久错误、取消与 `reconcile-required` 保持暂停，手动成功可恢复调度；协调器的配置/worker 单飞门仍是最终仲裁。worker 只发送 `desktop-sync-cycle` 具名事件，其中只有 value-free 状态和 Rust AppStore snapshot。前端持久状态 hook 必须拒绝 revision 回退及本地脏代际期间的快照，不能静默覆盖未提交编辑。
-- 当前入口不会把 AppState 快照直接上传。主机公开字段、通过秘密扫描的 `custom=true` 脚本、终端字体族/字号/行高及自动上传编辑文件/包传输两个行为偏好会经业务库 changefeed、具名 operation、加密 outbox 与独立远端投影交接；内置脚本及 description/category 不同步，安全脚本变为不安全时只发 tombstone，本机不安全脚本拒绝远端覆盖/删除。自定义字体资产/名称、设备本地编辑器路径、历史、背景、其他尚未建模设置、冲突解决、WebDAV 产品凭据和真实多设备矩阵必须作为后续独立项完成。
+- 当前入口不会把 AppState 快照直接上传。主机公开字段、通过秘密扫描的 `custom=true` 脚本、终端字体族/字号/行高及自动上传编辑文件/包传输两个行为偏好会经业务库 changefeed、具名 operation、加密 outbox 与独立远端投影交接；内置脚本及 description/category 不同步，安全脚本变为不安全时只发 tombstone，本机不安全脚本拒绝远端覆盖/删除。桌面冲突中心每页最多读取 50 项、每个候选预览最多 2048 bytes 且不返回 stamp/device ID；解决请求只能携带 snapshot revision、conflict ID 和 0/1 候选索引，Rust 必须重新读取持久候选并在同一 journal 事务完成 resolution merge 与加密 outbox，随后按 merge revision 重投影 AppState。两个 command 只允许 desktop capability，Android 继续只读。自定义字体资产/名称、设备本地编辑器路径、历史、背景、其他尚未建模设置、WebDAV 产品凭据和真实多设备矩阵必须作为后续独立项完成。
 
 ### 10.10 Android Preview 共享契约（Phase C）
 
