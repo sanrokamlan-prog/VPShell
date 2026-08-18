@@ -29,7 +29,7 @@ Actual third-party code used or adapted by VPShell is listed separately in
 | [openFinalShell](https://github.com/kexue-aihao/openfinalshell) | No repository-level license detected on 2026-08-01 | FinalShell migration behavior and familiar desktop layout | Behavior reference only; no copied code; never treated as a credential-decoding authority |
 | [FinalShell password decoder](https://github.com/qurikuduo/finalshellPasswordDecoder) | Apache-2.0 | Legacy FinalShell DES import compatibility | Clean Rust port; see `THIRD_PARTY_NOTICES.md` |
 | [rusqlite](https://github.com/rusqlite/rusqlite) | MIT or Apache-2.0 | Local schema-v1 SQLite transaction/event store | Dependency used with `bundled`, no copied source; version/feature and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
-| [RustCrypto password-hashes/AEADs/KDFs](https://github.com/RustCrypto) | MIT or Apache-2.0 | Argon2id key wrapping, XChaCha20-Poly1305 envelopes and HKDF domain separation | Stable crates used through public APIs; no copied source; exact versions/features and replacement plan recorded in `THIRD_PARTY_NOTICES.md` and development docs |
+| [RustCrypto password-hashes/AEADs/KDFs/MACs](https://github.com/RustCrypto) | MIT or Apache-2.0 | Argon2id key wrapping, XChaCha20-Poly1305 envelopes, HKDF domain separation and Relay HMAC-SHA256 proofs | Stable crates used through public APIs; no copied source; exact versions/features and replacement plan recorded in `THIRD_PARTY_NOTICES.md` and development docs |
 | [quick-xml](https://github.com/tafia/quick-xml) and [percent-encoding](https://github.com/servo/rust-url) | MIT | Bounded WebDAV XML parsing and href decoding | Existing locked packages promoted to direct dependencies; public APIs only, no copied source or provider implementation |
 | [ssh2-rs](https://github.com/alexcrichton/ssh2-rs), libssh2 and OpenSSL | MIT or Apache-2.0 / BSD-style / Apache-2.0 | Android-compatible SSH/SFTP transport without a system executable | Existing dependency used through public APIs; vendored OpenSSL only enables NDK cross-compilation; no copied source |
 | [android-native-keyring-store](https://github.com/open-source-cooperative/android-native-keyring-store) and keyring-core | MIT or Apache-2.0 | Android Keystore-backed opaque credential references | Dependencies used through public APIs; no copied source; platform scope and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
@@ -117,3 +117,8 @@ inventory and per-item partial results. No reviewed project's file-manager code 
   loopback-only SOCKS5 CONNECT forwarding. The bounded no-authentication parser, address validation,
   listener/route ownership, counters, cancellation, IPC/UI and two-sshd fixture are VPShell code; no
   upstream SOCKS implementation, example, fixture, text or asset was copied and no new dependency was added.
+- 2026-08-18: Verified RustCrypto/MACs tag `hmac-v0.12.1` commit
+  `46797e3b44973a30edb9d7f3a3ebb41810061d90`; its crate manifest declares MIT OR Apache-2.0 and a
+  single public `digest` dependency. VPShell promotes the already locked crate to a direct dependency
+  with default features disabled and uses only its public `Mac` API for independently specified Relay
+  v1 request/response proofs. No upstream source, examples, vectors, protocol text or assets were copied.

@@ -42,6 +42,7 @@ rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled
 argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
 hkdf = { version = "=0.12.4", default-features = false }
+hmac = { version = "=0.12.1", default-features = false }
 getrandom = { version = "=0.3.4", default-features = false }
 quick-xml = { version = "=0.41.0", default-features = false }
 percent-encoding = { version = "=2.3.2", default-features = false }
@@ -62,3 +63,11 @@ russh = { version = "=0.62.7", default-features = false, features = ["ring", "rs
 russh-sftp = "=2.4.0"
 tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
+
+[[bin]]
+name = "vpshell"
+path = "src/main.rs"
+
+[[bin]]
+name = "vpshell-relay"
+path = "src/bin/vpshell-relay.rs"

@@ -267,6 +267,14 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - 动态转发请求只能包含 UUID、已验证 route 和端口；Rust 固定绑定 `127.0.0.1`，最多 8 条、每条 32 个连接，握手固定 10 秒并沿用最终 hop 的通道超时。WebView 不能提交目标或秘密，也不能解析 SOCKS；BIND、UDP ASSOCIATE、认证协商和非 CONNECT 能力保持 fail closed。Android manifest/capability 不得出现三项动态转发命令。
 - 系统 OpenSSH 仍为默认，只有用户对未连接标签显式选择 `russh` 才启用长期原生终端及共享目录浏览；FIDO/U2F、agent、PKCS#11、GSSAPI、Pageant 等未覆盖认证继续使用兼容引擎。单跳原生终端只有在 Rust 返回 `native-engine-key-invalid`、`native-engine-auth-negotiation-failed` 或 `native-engine-rsa-sha2-unavailable` 且附带 `fallbackEngine: openssh` 时才自动使用相同 host/user/identity/credential reference 回退；前端使用独立同值白名单复核。主机密钥不匹配/未验证、认证失败/拒绝、取消、超时、无效请求及所有多跳 route 必须 fail closed，不能回退。系统请求拒绝未知字段并限制 UUID、host/user/port、PTY 尺寸、私钥路径与引用；固定 `StrictHostKeyChecking=yes`、安全 KEX、`--` 选项终止符和一次 AskPass，不接受 ProxyCommand 或任意 OpenSSH 参数，返回 schema 与实际 engine 后前端才登记成功。删除方案是移除相应桌面原生命令 capability、`native_engine.rs` 和两项依赖；升级或扩大用途前必须通过锁文件、四平台编译、真实原生与系统 OpenSSH/SFTP/PTY 和安全回归，并保留系统 OpenSSH 回退。
 
+### 10.12 自建 Relay 参考服务（Phase D）
+
+- Relay proof 复用锁图中已有的 RustCrypto `hmac = 0.12.1` 并提升为关闭默认 feature 的精确直接依赖；MIT OR Apache-2.0，无网络、文件、遥测或原生构建脚本权限。标准库没有 HMAC，不能用裸 `SHA256(token || message)` 替代。删除 Relay binary/module 后可从根依赖移除，现有同步密文格式不依赖它。
+- `src-tauri/src/relay.rs` 与 `src-tauri/src/bin/vpshell-relay.rs` 是 desktop-only 的独立服务/loopback client；不加入 Tauri command、capability、Android 或 WebView 状态。协议版本、服务端随机挑战、客户端随机 nonce、精确目标和 token key id 均进入 HMAC-SHA256 proof，服务端 response proof 在最终 SSH 字节开始前验证；单次 challenge 使旧 request 不能重放。
+- 服务端只打开 operator allowlist 中的目标 TCP，不接受 wildcard/CIDR/任意目标；不会解析或终止 SSH，也不接收凭据。token 是 32-byte base64url 文件，必须为 regular non-symlink、Unix `0600`，生成器 create-only 且不打印 token。控制面不加密，部署者必须自行提供 ACL 或外层 TLS/VPN 以保护目标元数据。
+- 总连接、单源 IP 连接、认证尝试、会话字节、握手/目标连接/空闲/总时长均有硬上限，source bucket 有数量和 TTL 上限。JSONL audit 只记录 schema/阶段、随机 request id、盐哈希 source/target、稳定 outcome、字节和时长；无 token、key id、原始地址、主机名、凭据、SSH 字节或底层错误。audit sink 出错后新会话拒绝。
+- `relay::tests` 必须覆盖成功回环 opaque bytes、错误 token、allowlist 拒绝、挑战篡改/重放、认证速率/连接容量、字节/空闲/总时长、token/audit 文件权限与审计脱敏。真实多区域部署、firewall、日志轮换、外层 TLS/VPN、长时间丢包和多版本 SSH 服务器仍是外部验收。
+
 ### 10.9 B8 协议回归矩阵（v0.3 工作树）
 
 - `sync_protocol_regression` 在跨模块边界验证：未知 v1 envelope、AEAD 错误密钥/篡改、对象身份搬移、journal 同 key/同身份 replay、已发布终态、merge 两种到达顺序和截断状态、Local Folder 截断字节与取消。每个失败都返回稳定错误码，不能把部分提交标为成功。

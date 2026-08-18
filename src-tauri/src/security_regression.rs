@@ -214,6 +214,35 @@ mod tests {
     }
 
     #[test]
+    fn relay_is_a_desktop_binary_without_webview_or_secret_audit_surface() {
+        let relay = include_str!("relay.rs");
+        let binary = include_str!("bin/vpshell-relay.rs");
+        let manifest = include_str!("../command_manifest.txt");
+        let desktop = include_str!("../capabilities/default.json");
+        let android = include_str!("../capabilities/android.json");
+
+        assert!(!relay.contains("#[tauri::command]"));
+        assert!(!manifest.lines().any(|command| command.contains("relay")));
+        assert!(!desktop.contains("allow-relay"));
+        assert!(!android.contains("allow-relay"));
+        assert!(binary.contains("vpshell_lib::relay"));
+        assert!(binary.contains("relay-local-listener-must-be-loopback"));
+        assert!(relay.contains("const CLIENT_DOMAIN: &[u8] = b\"vpshell-relay-v1-client\""));
+        assert!(relay.contains("const SERVER_DOMAIN: &[u8] = b\"vpshell-relay-v1-server\""));
+        assert!(relay.contains("pub struct RelayAuditEvent"));
+        for forbidden_field in [
+            "pub token:",
+            "pub key_id:",
+            "pub source_address:",
+            "pub target_host:",
+            "pub payload:",
+            "pub error:",
+        ] {
+            assert!(!relay.contains(forbidden_field));
+        }
+    }
+
+    #[test]
     fn native_jump_route_is_explicit_and_fail_closed_in_frontend() {
         let frontend = include_str!("../../src/App.tsx");
         let types = include_str!("../../src/types.ts");
