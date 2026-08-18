@@ -508,6 +508,19 @@ impl SyncCoordinatorManager {
                 downloaded = downloaded.saturating_add(1);
             }
         }
+        self.check_generation(generation, cancellation)?;
+        let projection = self
+            .journal
+            .host_merge_projection()
+            .map_err(journal_code)?;
+        app_store
+            .apply_remote_host_projection(
+                vault_id,
+                projection.revision,
+                &projection.hosts,
+                now_ms,
+            )
+            .map_err(|_| "app-state-writeback".to_string())?;
         self.journal.prune(now_ms).map_err(journal_code)?;
         Ok(CycleCounts {
             uploaded,
@@ -1131,6 +1144,62 @@ mod tests {
                 .windows(b"ssh-reference".len())
                 .any(|value| value == b"ssh-reference")
         );
+    }
+
+    #[test]
+    fn cycle_projects_remote_host_fields_back_to_app_state_without_secrets() {
+        let root = TempDir::new("app-state-writeback");
+        let store = test_app_store(&root);
+        store
+            .save(SaveAppStateRequest {
+                state_json: app_state_fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let entity_id = store.pending_host_sync_changes(128).unwrap()[0]
+            .entity_id
+            .clone();
+        let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let vault_id = Uuid::new_v4().to_string();
+        let remote_device = Uuid::new_v4().to_string();
+        let vault_key = VaultKey::generate().unwrap();
+        let remote = encrypt_sync_object(
+            &vault_key,
+            &vault_id,
+            SyncObjectKind::Event,
+            &Uuid::new_v4().to_string(),
+            Some(&remote_device),
+            Some(1),
+            &operation_patch(
+                &remote_device,
+                1,
+                &entity_id,
+                "address",
+                "remote.example",
+            ),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider.insert(
+            &format!("vpshell/v1/{vault_id}/segments/{remote_device}/1.oseg"),
+            remote,
+        );
+        coordinator
+            .attach_session(provider, vault_key, &vault_id)
+            .unwrap();
+
+        let status = coordinator.run_once(&store, 1_000).unwrap();
+        assert_eq!(status.last_uploaded_objects, 1);
+        assert_eq!(status.last_downloaded_objects, 1);
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.revision, 2);
+        let state: serde_json::Value =
+            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+        assert_eq!(state["hosts"][0]["host"], "remote.example");
+        assert_eq!(state["hosts"][0]["credentialRef"], "ssh-reference");
+        assert!(store.pending_host_sync_changes(128).unwrap().is_empty());
     }
 
     #[test]

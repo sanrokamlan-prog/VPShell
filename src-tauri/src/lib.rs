@@ -1440,11 +1440,18 @@ async fn configure_local_folder_sync(
     .map_err(|error| format!("Local Folder 同步配置任务异常结束: {error}"))?
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunSyncOnceResult {
+    status: sync_coordinator::SyncCoordinatorStatus,
+    app_store: app_store::AppStoreSnapshot,
+}
+
 #[tauri::command]
 async fn run_sync_once(
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
     store: State<'_, app_store::AppStore>,
-) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+) -> Result<RunSyncOnceResult, String> {
     let coordinator = coordinator.inner().clone();
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1454,7 +1461,9 @@ async fn run_sync_once(
             .as_millis()
             .try_into()
             .unwrap_or(i64::MAX);
-        coordinator.run_once(&store, now_ms)
+        let status = coordinator.run_once(&store, now_ms)?;
+        let app_store = store.snapshot()?;
+        Ok(RunSyncOnceResult { status, app_store })
     })
     .await
     .map_err(|error| format!("同步单周期任务异常结束: {error}"))?

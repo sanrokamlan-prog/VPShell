@@ -14,7 +14,7 @@ use crate::{
         EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object, encrypt_sync_object,
     },
     sync_merge::{
-        LocalHostMutation, MergeError, MergeErrorCode, advance_local_hlc,
+        LocalHostMutation, MergeError, MergeErrorCode, MergedHostProjection, advance_local_hlc,
         apply_persisted_operation, build_local_host_operation, load_persisted_state,
         local_host_operation_matches,
     },
@@ -201,6 +201,12 @@ pub(crate) struct RemoteMergeResult {
     pub(crate) outcome: RemoteApplyOutcome,
     pub(crate) revision: u64,
     pub(crate) open_conflicts: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HostMergeProjectionSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) hosts: Vec<MergedHostProjection>,
 }
 
 fn map_merge_error(error: MergeError) -> JournalError {
@@ -819,6 +825,14 @@ impl SyncJournal {
                 revision,
                 open_conflicts: state.open_conflicts().len(),
             })
+        })
+    }
+
+    pub(crate) fn host_merge_projection(&self) -> JournalResult<HostMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let hosts = state.host_projection().map_err(map_merge_error)?;
+            Ok(HostMergeProjectionSnapshot { revision, hosts })
         })
     }
 

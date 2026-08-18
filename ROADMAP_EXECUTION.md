@@ -106,10 +106,11 @@
 | 完成 | SFTP、S3-compatible、自建 Gateway 结构化 provider；TOTP 仅保护 Gateway 登录 |
 | 完成 | 篡改、重放、冲突、断网、截断、升级、恢复失败和真实 provider 测试报告 |
 | 完成 | 桌面 Local Folder 产品入口：不可变 bootstrap、显式初始化/解锁、手动单周期、取消/锁定和 value-free 状态；PR #1 run `32104797505` 全绿 |
-| 进行中 | AppState 主机公开字段保存事务 changefeed、稳定实体映射、observed merge operation、加密 outbox 与跨库幂等确认已接线，等待 Actions |
-| 待实现 | 远端 merge 到 AppState 的安全回写、其他业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
+| 完成 | AppState 主机公开字段保存事务 changefeed、稳定实体映射、observed merge operation、加密 outbox 与跨库幂等确认已接线；PR #1 run `32107931488` 全绿 |
+| 进行中 | 远端主机 merge 按 vault/revision/hash 可重试投影到 AppState，保留本机秘密、无回声 changefeed，并把新 snapshot/revision 接回桌面状态，等待 Actions |
+| 待实现 | 其他业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口均已通过 Actions；主机公开字段的本地 operation 链路正在验证，但远端 AppState 回写、其他业务域、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口及主机公开字段本地 operation 链路均已通过 Actions；远端 AppState 投影正在验证，其他业务域、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
 
 ## Phase C：Android Preview
 
@@ -208,7 +209,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 AppState 主机 operation 事务交接（待 Actions） | `vpshell-state.sqlite3` 升级 schema v2：状态保存与最多 10,000 项 durable changefeed 同事务提交，v1 快照迁移时回填已有主机；本地 `host-*` 持久映射随机协议 UUID，patch 只含 name/address/port/username/group/environment/tags/jumpRoute，credentialRef、私钥/路径、host-key pin 和运行字段不进入 change。手动 worker 将 change 交给独立 schema-v2 sync journal：持久本机 device ID/seq/HLC，HLC 越过已观察远端 stamp，带 observed fields 构造具名 operation，并在 journal 单事务完成 AEAD、merge state 和 outbox；成功后才确认业务 change。两个 SQLite 提交之间崩溃时按 operation ID 解密核对实体/payload 后幂等确认，不伪称跨库原子；内容改变、vault 改绑或损坏均 fail closed。远端 merge 安全回写和其他业务域明确未完成。新增 changefeed 脱敏/敏感引用无 operation、删除稳定实体、v1 双库迁移、journal 原子幂等/内容绑定、远端时钟推进和 coordinator 加密上传后确认测试。 |
 | 2026-08-18 | B9 AppState operation 本机轻量门禁 | `git diff --check`、91-command handler/capability 数量不变、Android Sync capability 继续 disabled、五个改动 Rust 模块静态引用闭合、文档边界与无 `node_modules`/`target` 检查通过；根分区交接时 50%。VPS 无 Cargo/rustfmt/TypeScript 依赖，未下载工具链、SDK 或项目依赖；frontend、四平台 locked fmt/check/test 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | B9 AppState operation 首轮 Actions 与格式修复 | 提交 `4890eb3` 的 PR #1 run `32107068901` 已进入终态：frontend 生产构建与 Android aarch64 debug APK/Gradle gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告相同 17 处 AppState changefeed、coordinator 测试、merge HLC 与 journal operation 排版差异后失败，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按 Ubuntu job `95618556712` 的完整 runner 差异机械应用全部格式，不改行为；修复后本机 `git diff --check`、严格 JSON、91-command manifest/handler/capability 对齐、Android Sync disabled/read-only gate 及无 `node_modules`/`target` 检查通过，根分区保持 50%。VPS 无 Cargo/rustfmt 且未下载依赖；等待格式修复提交后的四平台 locked fmt/check/test、frontend、Linux 真实 fixture 与 Android 完整矩阵。 |
+| 2026-08-18 | B9 AppState 主机 operation 事务交接（Actions 完成） | 格式修复提交 `23d4bd1` 的 PR #1 run `32107931488` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 远端主机 merge 到 AppState 安全回写（待 Actions） | `vpshell-state.sqlite3` 升级 schema v3；协调器在 journal 原子提交远端 receipt/merge 后读取完整主机投影，业务库以 vault 绑定、单调 merge revision 和 SHA-256 投影哈希在独立事务中幂等落地，同 revision 换内容或 revision 回退 fail closed。投影只覆盖 name/address/port/username/group/environment/tags/jumpRoute，保留现有 credentialRef、私钥路径、host-key pin 与运行字段；新实体获得持久本机 ID，路线只接受最多三台仍活动实体。待发送本地 changefeed 非空时延迟，缺少必需连接字段、悬空/已删除路线、数量越界或无效类型整事务回滚；专用写入不生成回声 change。双库间崩溃后下一周期从持久 merge state 重试，不伪称跨库原子。`run_sync_once` 返回 AppStore snapshot/revision，前端接受时抑制一次自动保存；本地 debounce 未提交期间禁用手动同步。新增公开字段覆盖且保留本机秘密/幂等内容绑定、待发送延迟/非法回滚、新主机 route 映射/tombstone 删除及加密远端 operation 端到端回写四项测试。 |
+| 2026-08-18 | B9 远端 AppState 回写本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest/唯一项/handler/capability 对齐、Android Sync disabled/read-only gate、投影函数不调用 changefeed 且包含 vault/revision/hash/pending-change/稳定事件边界、四项新增测试清单、文档未残留“远端回写未接线”、无 `node_modules`/`target` 检查通过；根分区交接前 50%。VPS 无 Cargo/rustfmt/TypeScript 依赖，未下载工具链、SDK 或项目依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 AppState 主机 operation 事务交接提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入远端 merge 到 AppState 的事务安全回写。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待远端主机 merge 到 AppState 安全回写提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入其他业务域 operation。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

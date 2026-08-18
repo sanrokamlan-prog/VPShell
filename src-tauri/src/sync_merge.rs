@@ -119,6 +119,13 @@ pub(crate) enum LocalHostMutation {
     Delete,
 }
 
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergedHostProjection {
+    pub(crate) entity_id: String,
+    pub(crate) fields: Option<BTreeMap<String, FieldValue>>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FieldRegister {
@@ -649,6 +656,21 @@ impl MergeState {
                 .map(|(field, register)| (field.clone(), register.value.clone()))
                 .collect(),
         )
+    }
+
+    pub(crate) fn host_projection(&self) -> MergeResult<Vec<MergedHostProjection>> {
+        let mut projection = Vec::new();
+        for key in self.entities.keys() {
+            let (kind, entity_id) = parse_entity_key(key)?;
+            if kind != EntityKind::Host {
+                continue;
+            }
+            projection.push(MergedHostProjection {
+                entity_id: entity_id.to_string(),
+                fields: self.entity_fields(&kind, entity_id),
+            });
+        }
+        Ok(projection)
     }
 
     fn apply_patch(&mut self, payload: &PatchPayload, stamp: MergeStamp) -> MergeResult<()> {

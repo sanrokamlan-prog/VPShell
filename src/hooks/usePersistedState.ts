@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-interface AppStoreSnapshot {
+export interface AppStoreSnapshot {
   schemaVersion: number;
   revision: number;
   stateJson?: string;
@@ -68,6 +68,23 @@ export function usePersistedState<T>(
   const revision = useRef(0);
   const ready = useRef(!isDesktopRuntime());
   const saveQueue = useRef(Promise.resolve());
+  const suppressPersistedJson = useRef<string | null>(null);
+
+  const applyAppStoreSnapshot = useCallback((snapshot: AppStoreSnapshot) => {
+    let next = initialValue;
+    if (snapshot.stateJson) {
+      const parsed = JSON.parse(snapshot.stateJson) as T;
+      next = migrate ? migrate(parsed) : parsed;
+    }
+    revision.current = snapshot.revision;
+    ready.current = true;
+    const nextJson = JSON.stringify(next);
+    if (nextJson === undefined) throw new Error("Rust 返回了不可序列化的本地状态");
+    suppressPersistedJson.current = nextJson;
+    setValue(next);
+    setStatus({ ready: true, saving: false, recoveryNote: snapshot.recoveryNote });
+    legacy.current = { value: next, stateJson: undefined };
+  }, [initialValue, migrate]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -76,21 +93,12 @@ export function usePersistedState<T>(
       request: { legacyStateJson: legacy.current?.stateJson ?? null },
     }).then((snapshot) => {
       if (disposed) return;
-      let next = initialValue;
-      if (snapshot.stateJson) {
-        const parsed = JSON.parse(snapshot.stateJson) as T;
-        next = migrate ? migrate(parsed) : parsed;
-      }
-      revision.current = snapshot.revision;
-      ready.current = true;
-      setValue(next);
-      setStatus({ ready: true, saving: false, recoveryNote: snapshot.recoveryNote });
+      applyAppStoreSnapshot(snapshot);
       try {
         for (const candidate of [key, ...legacyKeys, ...cleanupKeys]) localStorage.removeItem(candidate);
       } catch {
         // A blocked WebView storage API must not invalidate the completed SQLite migration.
       }
-      legacy.current = { value: next, stateJson: undefined };
     }).catch((error) => {
       if (!disposed) {
         setStatus({ ready: false, saving: false, error: String(error) });
@@ -99,13 +107,18 @@ export function usePersistedState<T>(
     return () => { disposed = true; };
   // The storage identity is fixed for the application lifetime.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [applyAppStoreSnapshot]);
 
   useEffect(() => {
     if (!isDesktopRuntime() || !ready.current) return;
     const stateJson = JSON.stringify(value);
+    if (suppressPersistedJson.current !== null) {
+      const suppress = suppressPersistedJson.current === stateJson;
+      suppressPersistedJson.current = null;
+      if (suppress) return;
+    }
+    setStatus((current) => ({ ...current, saving: true, error: undefined }));
     const timer = window.setTimeout(() => {
-      setStatus((current) => ({ ...current, saving: true, error: undefined }));
       saveQueue.current = saveQueue.current
         .catch(() => undefined)
         .then(async () => {
@@ -122,5 +135,5 @@ export function usePersistedState<T>(
     return () => window.clearTimeout(timer);
   }, [value]);
 
-  return [value, setValue, status] as const;
+  return [value, setValue, status, applyAppStoreSnapshot] as const;
 }

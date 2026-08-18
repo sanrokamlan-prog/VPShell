@@ -215,6 +215,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 
 - `sync_outbox` 复用已审计的精确锁定 `rusqlite 0.40.2` bundled 配置，不新增依赖、网络或 Tauri capability。它使用独立数据库，避免把 24 MiB 加密对象挤入 UI 状态快照库。
 - `enqueue_local`/`apply_remote` 的业务闭包只允许执行传入 SQLite transaction 上可回滚的 SQL；禁止在闭包内访问 provider、写文件、启动进程或发送事件。错误必须回滚业务数据、operation、outbox/receipt 和 head 的全部变化。
+- journal 与 AppState 是两个数据库。远端 receipt/merge 提交后只能以完整投影、单调 merge revision 和内容哈希交给业务库；业务事务必须核对 vault 且在本地 changefeed 非空时延迟，禁止覆盖尚未入 journal 的修改。公开字段投影不得删除或替换本机 credential/key path/host-key pin，专用回写不得生成新的本地 operation；同 revision 不同内容、悬空 jump route 和无完整连接身份一律 fail closed。前端只能接受 Rust 返回的完整 snapshot/revision，并跳过该 snapshot 的一次自动保存。
 - 测试使用注入的毫秒时间，不依赖 sleep；必须覆盖租约过期、每次退避、六次上限、暂停/恢复、发布终态、事务回滚、损坏/未来 schema、保留不删除未发布工作、序号缺口/回退以及无序号对象换 key/身份重放。
 
 ### 10.5 确定性 merge 规则（v0.3 工作树）

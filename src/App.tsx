@@ -61,7 +61,7 @@ import { NetworkToolsDialog, type NetworkToolMode, type RouteMeasurementOption }
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TerminalView } from "./components/TerminalView";
-import { usePersistedState } from "./hooks/usePersistedState";
+import { type AppStoreSnapshot, usePersistedState } from "./hooks/usePersistedState";
 import brandMark from "./assets/vpshell.svg";
 import {
   postAndroidVisibility,
@@ -298,6 +298,11 @@ interface SyncCoordinatorStatus {
   lastDownloadedObjects: number;
 }
 
+interface SyncCycleResult {
+  status: SyncCoordinatorStatus;
+  appStore: AppStoreSnapshot;
+}
+
 interface RenderAsset {
   dataUrl: string;
   label: string;
@@ -515,7 +520,7 @@ function migrateAppStateIntoSqlite(value: AppState) {
 }
 
 function App() {
-  const [appState, setAppState, appStoreStatus] = usePersistedState<AppState>(
+  const [appState, setAppState, appStoreStatus, applyAppStoreSnapshot] = usePersistedState<AppState>(
     "vpshell-state-v1",
     initialState,
     ["opsshell-state-v6"],
@@ -2016,17 +2021,19 @@ function App() {
   }
 
   async function runDesktopSyncOnce() {
+    if (appStoreStatus.saving) {
+      showToast("请等待本地状态保存完成后再同步");
+      return;
+    }
     setDesktopSyncBusy(true);
     try {
-      const status = await invoke<SyncCoordinatorStatus>("run_sync_once");
+      const result = await invoke<SyncCycleResult>("run_sync_once");
+      const status = result.status;
+      applyAppStoreSnapshot(result.appStore);
       setDesktopSyncStatus(status);
       setDesktopSyncError(null);
-      const completedAtMs = status.lastCompletedAtMs;
-      if (completedAtMs) {
-        setAppState((current) => ({
-          ...current,
-          sync: { ...current.sync, enabled: true, lastSyncedAt: new Date(completedAtMs).toISOString() },
-        }));
+      if (status.lastErrorCode) {
+        throw new Error(status.lastErrorCode);
       }
       showToast(`同步周期完成：上传 ${status.lastUploadedObjects}，下载 ${status.lastDownloadedObjects}`);
     } catch (error) {
@@ -2872,7 +2879,7 @@ function App() {
       ) : null}
 
       {dialog === "sync" ? (
-        <Dialog title={isAndroidRuntime() ? "同步状态" : "加密同步"} wide onClose={() => setDialog(null)} footer={isAndroidRuntime() ? <><button className="secondary-button" type="button" onClick={() => void refreshAndroidSyncStatus()}><RefreshCw size={14} /> 刷新</button><button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button></> : desktopSyncStatus?.configured ? <><button className="secondary-button" type="button" disabled={desktopSyncBusy} onClick={() => void lockDesktopSync()}><KeyRound size={14} /> 锁定</button>{desktopSyncStatus.running ? <button className="danger-button" type="button" onClick={() => void cancelDesktopSync()}><Square size={14} /> 取消同步</button> : <button className="primary-button" type="button" disabled={desktopSyncBusy || desktopSyncStatus.recoveryRequired} onClick={() => void runDesktopSyncOnce()}><RefreshCw size={14} /> 立即同步</button>}</> : <><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" disabled={desktopSyncBusy} onClick={() => void configureLocalFolderSync()}><ShieldCheck size={14} /> {syncSetupMode === "initialize" ? "初始化并解锁" : "解锁"}</button></>}>
+        <Dialog title={isAndroidRuntime() ? "同步状态" : "加密同步"} wide onClose={() => setDialog(null)} footer={isAndroidRuntime() ? <><button className="secondary-button" type="button" onClick={() => void refreshAndroidSyncStatus()}><RefreshCw size={14} /> 刷新</button><button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button></> : desktopSyncStatus?.configured ? <><button className="secondary-button" type="button" disabled={desktopSyncBusy} onClick={() => void lockDesktopSync()}><KeyRound size={14} /> 锁定</button>{desktopSyncStatus.running ? <button className="danger-button" type="button" onClick={() => void cancelDesktopSync()}><Square size={14} /> 取消同步</button> : <button className="primary-button" type="button" disabled={desktopSyncBusy || appStoreStatus.saving || desktopSyncStatus.recoveryRequired} onClick={() => void runDesktopSyncOnce()}><RefreshCw size={14} /> 立即同步</button>}</> : <><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" disabled={desktopSyncBusy} onClick={() => void configureLocalFolderSync()}><ShieldCheck size={14} /> {syncSetupMode === "initialize" ? "初始化并解锁" : "解锁"}</button></>}>
           {isAndroidRuntime() ? (
             <div className="sync-readonly-status" aria-live="polite">
               <div><span>协调阶段</span><strong>{androidSyncError ? "状态读取失败" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取"}</strong></div>
