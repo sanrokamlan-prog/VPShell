@@ -1659,8 +1659,8 @@ function App() {
     setAppState((current) => ({
       ...current,
       commandHistory: [
-        ...targetSessions.map((session, index) => ({
-          id: `history-${Date.now()}-${index}`,
+        ...targetSessions.map((session) => ({
+          id: crypto.randomUUID(),
           command,
           hostId: session.hostId,
           path: session.currentPath,
@@ -1721,8 +1721,8 @@ function App() {
         setAppState((current) => ({
           ...current,
           commandHistory: [
-            ...sessions.filter((session) => successfulIds.includes(session.id)).map((session, index) => ({
-              id: `history-${Date.now()}-${index}`,
+            ...sessions.filter((session) => successfulIds.includes(session.id)).map((session) => ({
+              id: crypto.randomUUID(),
               command: broadcastPreview.command,
               hostId: session.hostId,
               path: session.currentPath,
@@ -2528,6 +2528,24 @@ function App() {
 
             {sidebarView === "history" ? (
               <div className="history-list">
+                {appState.commandHistory.length > 0 ? (
+                  <div className="group-title">
+                    <History size={13} />
+                    <span>命令历史</span>
+                    <button
+                      type="button"
+                      title="清空命令历史"
+                      aria-label="清空命令历史"
+                      onClick={() => {
+                        if (window.confirm("清空全部命令历史吗？此变更会同步到其他设备。")) {
+                          setAppState((current) => ({ ...current, commandHistory: [] }));
+                        }
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ) : null}
                 {appState.commandHistory.filter((item) => !searchText || item.command.toLocaleLowerCase().includes(searchText.toLocaleLowerCase())).map((item) => (
                   <button className="history-row" type="button" key={item.id} onClick={() => setCommandInput(item.command)}>
                     <Command size={14} />

@@ -91,6 +91,7 @@ pub(crate) enum EntityKind {
     Script,
     Setting,
     Background,
+    History,
 }
 
 impl EntityKind {
@@ -100,6 +101,7 @@ impl EntityKind {
             Self::Script => "script",
             Self::Setting => "setting",
             Self::Background => "background",
+            Self::History => "history",
         }
     }
 }
@@ -744,6 +746,10 @@ impl MergeState {
 
     pub(crate) fn setting_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
         self.entity_projection(EntityKind::Setting)
+    }
+
+    pub(crate) fn history_entity_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::History)
     }
 
     fn apply_patch(&mut self, payload: &PatchPayload, stamp: MergeStamp) -> MergeResult<()> {
@@ -1402,6 +1408,33 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
         {
             Ok(())
         }
+        (EntityKind::History, "kind", FieldValue::Text(value)) if value == "command" => Ok(()),
+        (EntityKind::History, "value", FieldValue::Text(value))
+            if !value.is_empty()
+                && value.len() <= 4096
+                && !contains_unsafe_multiline(value)
+                && !contains_obvious_secret(value) =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "hostId", FieldValue::Text(value))
+            if validate_uuid(value, "history host").is_ok() =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "remotePath", FieldValue::Text(value))
+            if value.len() <= 4096
+                && (value == "~" || value.starts_with('/') || value.starts_with("~/"))
+                && !contains_unsafe_text(value)
+                && !contains_obvious_secret(value) =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "createdAt", FieldValue::Text(value))
+            if valid_iso_timestamp(value) =>
+        {
+            Ok(())
+        }
         _ => Err(MergeError::new(
             MergeErrorCode::InvalidInput,
             "同步字段值类型或范围无效",
@@ -1467,6 +1500,9 @@ fn field_allowed(kind: &EntityKind, field: &str) -> bool {
                 | "onboardingCompleted"
         ),
         EntityKind::Background => matches!(field, "kind" | "blobId" | "opacity"),
+        EntityKind::History => {
+            matches!(field, "kind" | "value" | "hostId" | "remotePath" | "createdAt")
+        }
     }
 }
 
@@ -1671,6 +1707,7 @@ fn parse_entity_key(value: &str) -> MergeResult<(EntityKind, &str)> {
         "script" => EntityKind::Script,
         "setting" => EntityKind::Setting,
         "background" => EntityKind::Background,
+        "history" => EntityKind::History,
         _ => {
             return Err(MergeError::new(
                 MergeErrorCode::CorruptState,
@@ -1713,6 +1750,48 @@ fn contains_obvious_secret(value: &str) -> bool {
         || lower.contains("api_key=")
         || lower.contains("apikey=")
         || lower.contains("credentialref")
+}
+
+fn valid_iso_timestamp(value: &str) -> bool {
+    if value.len() != 24
+        || !value.is_ascii()
+        || value.as_bytes()[4] != b'-'
+        || value.as_bytes()[7] != b'-'
+        || value.as_bytes()[10] != b'T'
+        || value.as_bytes()[13] != b':'
+        || value.as_bytes()[16] != b':'
+        || value.as_bytes()[19] != b'.'
+        || value.as_bytes()[23] != b'Z'
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit()
+        })
+    {
+        return false;
+    }
+    let parse = |start, end| value[start..end].parse::<u32>().ok();
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        parse(0, 4),
+        parse(5, 7),
+        parse(8, 10),
+        parse(11, 13),
+        parse(14, 16),
+        parse(17, 19),
+    ) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    year >= 1970
+        && (1..=maximum_day).contains(&day)
+        && hour <= 23
+        && minute <= 59
+        && second <= 59
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -2178,6 +2257,79 @@ mod tests {
             secret.encode().unwrap_err().code,
             MergeErrorCode::InvalidInput
         );
+    }
+
+    #[test]
+    fn command_history_entities_validate_complete_public_fields_and_preserve_tombstones() {
+        let history_id = "22222222-2222-4222-8222-222222222222";
+        let fields = BTreeMap::from([
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-18T22:30:00.000Z".into()),
+            ),
+            ("hostId".to_string(), FieldValue::Text(HOST_ID.into())),
+            ("kind".to_string(), FieldValue::Text("command".into())),
+            ("remotePath".to_string(), FieldValue::Text("/srv/app".into())),
+            (
+                "value".to_string(),
+                FieldValue::Text("systemctl status nginx".into()),
+            ),
+        ]);
+        let mut state = MergeState::default();
+        let append = build_local_entity_operation(
+            &state,
+            &operation_id(81),
+            DEVICE_A,
+            81,
+            100,
+            0,
+            EntityKind::History,
+            history_id,
+            LocalEntityMutation::Patch(fields.clone()),
+        )
+        .unwrap();
+        state.apply(&append).unwrap();
+        assert_eq!(
+            state.history_entity_projection().unwrap(),
+            vec![MergedEntityProjection {
+                entity_id: history_id.into(),
+                fields: Some(fields),
+            }]
+        );
+        let delete = build_local_entity_operation(
+            &state,
+            &operation_id(82),
+            DEVICE_A,
+            82,
+            101,
+            0,
+            EntityKind::History,
+            history_id,
+            LocalEntityMutation::Delete,
+        )
+        .unwrap();
+        state.apply(&delete).unwrap();
+        assert_eq!(
+            state.history_entity_projection().unwrap(),
+            vec![MergedEntityProjection {
+                entity_id: history_id.into(),
+                fields: None,
+            }]
+        );
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &BTreeMap::from([(
+                "value".to_string(),
+                FieldValue::Text("deploy --token=secret".into()),
+            )]),
+        ));
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &BTreeMap::from([(
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-18".into()),
+            )]),
+        ));
     }
 
     #[test]

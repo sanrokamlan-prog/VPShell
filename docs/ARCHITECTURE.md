@@ -16,7 +16,7 @@ VPShell 是一个 Windows-first、最终覆盖 Windows、macOS 和 Linux 的 SSH
 
 ## 2. v0.1.0 已实现
 
-同步设置补充：`onboardingCompleted`、默认监控采样频率与背景可见度分别作为第三、第四、第五个固定 setting 实体，仅同步布尔完成状态、5–300 秒整数及 5%–65% 整数；引导内容、运行中监控采样、背景图片来源/资产和设备本地路径保持本机，远端回写不生成回声 change。
+同步设置补充：`onboardingCompleted`、默认监控采样频率与背景可见度分别作为第三、第四、第五个固定 setting 实体，仅同步布尔完成状态、5–300 秒整数及 5%–65% 整数；公开命令历史使用独立稳定实体与 tombstone，含明显秘密的记录保持本机。引导内容、运行中监控采样、背景图片来源/资产和设备本地路径保持本机，远端回写不生成回声 change。
 
 v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 
@@ -27,7 +27,7 @@ v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 | SSH | Rust 后端默认通过 `portable-pty` 启动系统 `ssh`；可选 `russh` route 提供逐跳 pin/认证、PTY/SFTP、本地/远端回环转发与 SOCKS5 CONNECT 动态转发；桌面直连可显式启动系统 Mosh | 系统路径依赖 `ssh`/可选 `mosh` 在 PATH 中；原生路径仍缺广泛服务器兼容验证，Mosh 需要远端 helper 与 UDP，SOCKS5 不提供认证、BIND 或 UDP ASSOCIATE |
 | 主机与会话 | 主机分组、环境标签、最近连接、会话切换；OpenSSH 采集 Linux `/proc` 概况；v0.2 工作树可显式启用 bash/zsh 自报上下文栈 | Integration 不支持 fish/PowerShell，也不把远端自报 hostname 当作已验证身份；监控仅支持 Linux |
 | 多终端输入 | v0.2 Compose 广播由 Rust 冻结目标/命令/上下文，所有目标均需预览，生产持续标记，认证和已知危险命令阻止 | 不是完整的原始按键同步；成功只表示 PTY 写入，不能结构化证明远端命令成功 |
-| 历史 | 命令、SFTP 路径和连接尝试历史由 Rust SQLite schema v8 快照/事件元数据管理；首次启动一次性迁移旧 WebView 状态 | SSH 进程启动不代表认证成功；历史同步尚未接线，终端内 `cd` 只由显式 Shell Integration 上报 |
+| 历史 | 命令、SFTP 路径和连接尝试历史由 Rust SQLite schema v9 快照/事件元数据管理；公开命令历史已接双向加密同步与删除，首次启动一次性迁移旧 WebView 状态 | SSH 进程启动不代表认证成功；路径/参数/连接历史同步尚未接线，终端内 `cd` 只由显式 Shell Integration 上报 |
 | 命令库 | 22 项本地命令/工具；中文意图匹配、参数表单、POSIX 参数引用、风险与执行前预览 | 不是自然语言模型；自建命令编辑、命令版本和 secret 参数仍未实现 |
 | 脚本中心 | 内置脚本资料、风险标签、来源链接、复制/加入命令栏；可添加自建脚本；安全自建脚本白名单字段可加密同步 | 没有哈希锁定、签名、版本更新或安全执行沙箱；内置脚本、描述/分类、附件和不安全内容不在当前同步范围 |
 | 凭据与密钥 | FinalShell 密码只写入 OS keyring；终端、采样和 SFTP 可使用凭据引用；原生 route 的每跳资料独立绑定凭据引用或私钥；生成 Ed25519/RSA4096 OpenSSH 密钥；可安装所选公钥；删除主机进入 30 天回收站，永久删除或到期时清理未共享凭据 | 凭据尚不能同步或单独编辑；route 不支持 agent/FIDO/PKCS#11 等兼容认证 |
@@ -36,7 +36,7 @@ v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 | 文件面板 | 真实 SFTP 列表、递归上传下载、拖放、进度、暂存校验与原子提交；`tar + zstd` 回退；后端任务恢复/取消；v0.2 工作区的目录、重命名、跨目录移动、递归权限和批量删除操作 | 已发布 Alpha 尚无文件变更操作；暂无字节级断点续传；移动覆盖策略不适用于普通上传；SFTP 不支持 ProxyJump |
 | 外部编辑 | SFTP 下载受管临时副本，Rust 适配 Notepad++、VS Code/VSCodium、自定义/系统编辑器，检测保存并比较远端哈希后回传；v0.2 工作树提供重启恢复与冲突中心 | 仅普通文件且不超过 64 MiB；ProxyJump 尚未实现，Windows/macOS 编辑器仍需实机验收 |
 | 配置迁移 | FinalShell 可选密码进入 OS keyring；v0.2 工作树提供 OpenSSH、PuTTY、Xshell、SecureCRT、MobaXterm、Tabby、Termius 非敏感字段预览/导入 | 厂商版本差异需真实客户端导出验收；不导入其他应用 vault、Token、私钥内容或隐式主机信任 |
-| 同步 | Local Folder/WebDAV 显式初始化/解锁、E2EE 手动单周期与 Rust-owned 解锁期自动调度、WebDAV 本机 PEM CA、主机公开字段、安全自建脚本、五个固定设置实体双向合并及持久冲突解决；Android 只读状态 | 尚无历史/背景图片 blob/其他尚未建模设置、自定义字体资产、扩展 provider 产品入口或真实多设备矩阵；自动调度不是应用关闭后的系统服务 |
+| 同步 | Local Folder/WebDAV 显式初始化/解锁、E2EE 手动单周期与 Rust-owned 解锁期自动调度、WebDAV 本机 PEM CA、主机公开字段、安全自建脚本、五个固定设置实体、公开命令历史双向合并及持久冲突解决；Android 只读状态 | 尚无路径/参数/连接历史、背景图片 blob、其他尚未建模设置、自定义字体资产、扩展 provider 产品入口或真实多设备矩阵；自动调度不是应用关闭后的系统服务 |
 
 当前工作树已将 CSP 设为显式指令集，`object/frame/form` 禁止，脚本只允许 bundled self；capability 只绑定 `main` 窗口和实际使用的自定义命令/插件动作。SQLite 快照、资产缓存和事件元数据由 Rust 管理，但本地数据库未加密，不能把 v0.1.0 当作生产密码管理器。
 
@@ -319,9 +319,9 @@ attachments / changelog
 
 `sync_provider` 已定义 Rust-only、有界、可取消的不可变 `list/get/put` 接口。Local Folder 逐级隔离符号链接，以同目录暂存、`fsync`、原子无覆盖 hard-link 和回读保持提交语义；WebDAV 强制 HTTPS/无重定向/有界显式 CA 和总超时，使用结构化 XML、条件 PUT 与提交后回读。对象最多 24 MiB，key/深度/分页/扫描/XML 均有硬限制，错误码区分取消、输入、路径、缺失、冲突、资源、服务和协议。`sync_coordinator` 已按 vault 作用域连接 provider、outbox、远端 receipt/head 与 merge。桌面 Local Folder 和 HTTPS WebDAV 产品入口都要求用户明确选择初始化或解锁：初始化以不可变 `vpshell/v1/bootstrap.json` 写入版本、vault ID 和 Argon2id 认证 keyslot，二级密码只在 Rust 清零内存中用于包裹/解包 VMK；解锁已有存储不会隐式创建新 vault。WebDAV basic-auth 密码以 `sync-webdav-<UUID>` 随机本机引用保存到系统凭据管理器，AppState 只持久化引用，协调器在 blocking worker 内解析并直接交给清零 provider credentials；引用、密码和 username 不进入状态事件或同步对象。显式 PEM CA 由 Rust 从用户选择的普通文件限量读取、解析并原子复制到应用私有目录，AppState 只保存 `sync-webdav-ca-<UUID>` 引用；源路径和 PEM 不进入持久状态、changefeed、事件或同步对象。桌面 capability 只开放 value-free 状态、受限配置、手动单周期、取消和锁定，以及 CA 资产安装/失败清理；自动调度复用同一协调器而不新增 WebView 启动命令，Android capability 继续排除桌面 Sync、provider 凭据与 CA 命令。
 
-`sync_outbox` 在独立的 schema-v2 `vpshell-sync.sqlite3` 中原子写入加密 operation、outbox、merge state、本机 device seq 与单调 HLC。两分钟 claim 租约、最多六次 2 秒起/5 分钟封顶退避、显式暂停/恢复、不可逆发布态和过期租约恢复都由 SQLite 状态机拥有；前端不能提交或改写状态。远端对象在 Rust 内完成信封解析/AEAD 后，业务合并、receipt 和每设备连续序号 head 同事务提交；key/hash/对象身份唯一性阻止无序号对象换 key 重放。journal 的 10,000 未发布项/256 MiB、50,000 总对象/384 MiB、512 MiB 文件、30/90 天保留和两份损坏隔离备份均为硬边界。损坏恢复默认 `reconcile-required`，不会静默恢复上传。Local Folder worker 已接通 AppState 主机公开字段、安全自建脚本、终端字体族/字号/行高、背景可见度及两个应用行为偏好的本地入队与远端投影；投影要求本地 changefeed 已清空，并按实体域独立的 vault/revision/hash 在业务库事务提交，崩溃后从 journal merge state 重试。Rust 调度器在桌面解锁后执行 2 秒启动/业务变化防抖、5 分钟周期与 30 秒待处理或可重试复查；永久错误、取消和恢复阻止会暂停自动周期，锁定通过调度代际先停止旧 worker。历史、背景图片 blob、其他尚未建模设置、自定义字体资产、哈希链和设备签名仍未实现。
+`sync_outbox` 在独立的 schema-v2 `vpshell-sync.sqlite3` 中原子写入加密 operation、outbox、merge state、本机 device seq 与单调 HLC。两分钟 claim 租约、最多六次 2 秒起/5 分钟封顶退避、显式暂停/恢复、不可逆发布态和过期租约恢复都由 SQLite 状态机拥有；前端不能提交或改写状态。远端对象在 Rust 内完成信封解析/AEAD 后，业务合并、receipt 和每设备连续序号 head 同事务提交；key/hash/对象身份唯一性阻止无序号对象换 key 重放。journal 的 10,000 未发布项/256 MiB、50,000 总对象/384 MiB、512 MiB 文件、30/90 天保留和两份损坏隔离备份均为硬边界。损坏恢复默认 `reconcile-required`，不会静默恢复上传。Local Folder worker 已接通 AppState 主机公开字段、安全自建脚本、五个固定设置实体与公开命令历史的本地入队和远端投影；投影要求本地 changefeed 已清空，并按实体域独立的 vault/revision/hash 在业务库事务提交，崩溃后从 journal merge state 重试。Rust 调度器在桌面解锁后执行 2 秒启动/业务变化防抖、5 分钟周期与 30 秒待处理或可重试复查；永久错误、取消和恢复阻止会暂停自动周期，锁定通过调度代际先停止旧 worker。路径/参数/连接历史、背景图片 blob、其他尚未建模设置、自定义字体资产、哈希链和设备签名仍未实现。
 
-`sync_merge` 已实现 version 1 operation/state、HLC/device/operation 确定性字段 register、history event 并集、因果 tombstone 和冲突中心。host/script/setting/background 只有逐字段类型/范围白名单；host trust pin、credential ref、本机背景路径、密码/Token/私钥和敏感参数 history 不属于格式。本地主机、脚本与已接线设置 patch 从当前 merge state 自动携带 observed stamps，并把 HLC 推进到已观察远端时钟之后；删除保存 observed-field stamps，使并发编辑/删除在任意到达顺序生成同一冲突。风险降低、连接身份和脚本正文变化也会持续显示。冲突解决自身使用 LWW stamp，支持保持删除或明确恢复。`sync_merge_state` 的 revision、apply 和写回由协调器嵌入本地 outbox 或 remote receipt 的同一 journal transaction；完整主机、脚本与五个固定 setting 实体的投影再以各自独立可重试事务写入 AppState，Android 仍只显示 revision/冲突数。桌面冲突中心只提交 revision、conflict ID 和候选索引，解决值由 Rust 从持久候选构造并加密入队。
+`sync_merge` 已实现 version 1 operation/state、HLC/device/operation 确定性字段 register、旧 history event 并集、因果 tombstone 和冲突中心。host/script/setting/background/history 只有逐字段类型/范围白名单；产品命令历史使用恰好五字段的 history 实体和 tombstone，不依赖缺少删除语义的旧 append event。host trust pin、credential ref、本机背景路径、密码/Token/私钥和敏感参数 history 不属于格式。本地主机、脚本、已接线设置与命令历史 patch 从当前 merge state 自动携带 observed stamps，并把 HLC 推进到已观察远端时钟之后；删除保存 observed-field stamps，使并发编辑/删除在任意到达顺序生成同一冲突。风险降低、连接身份和脚本正文变化也会持续显示。冲突解决自身使用 LWW stamp，支持保持删除或明确恢复。`sync_merge_state` 的 revision、apply 和写回由协调器嵌入本地 outbox 或 remote receipt 的同一 journal transaction；完整主机、脚本、五个固定 setting 与公开命令历史投影再以各自独立可重试事务写入 AppState，Android 仍只显示 revision/冲突数。桌面冲突中心只提交 revision、conflict ID 和候选索引，解决值由 Rust 从持久候选构造并加密入队。
 
 `sync_recovery` 已实现独立的 256-bit 可打印恢复密钥与 recovery keyslot，以及最多 32 台设备的 schema-v1 加密 registry。设备公钥身份不可替换，expected revision、撤销优先合并、最后活动设备保护和已撤销发布者拒绝防止本地静默复活。加密导出只封装 keyslot、认证密文和 manifest，限制为 10,000 对象/256 MiB 密文/384 MiB 文件；Rust 使用私有同目录暂存、文件与目录同步、hard-link 无覆盖提交，读取拒绝符号链接。恢复演练解包 VMK 后逐对象认证，严格解析 event 与 device registry。该模块不持久化恢复密钥、密码、私钥、provider 凭据或明文；设备 operation 签名、远端 registry 回滚防护、VMK 轮换、恢复写入、协调器与 UI 仍未实现。
 
