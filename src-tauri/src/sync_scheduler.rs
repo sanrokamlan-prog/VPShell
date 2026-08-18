@@ -286,14 +286,15 @@ mod tests {
 
     #[test]
     fn successful_cycles_use_periodic_or_pending_recheck_deadlines() {
-        let mut policy = AutomaticSyncPolicy::new(0);
-        policy.complete(10, 0, CycleDisposition::Success);
-        assert!(!policy.observe(10 + PERIODIC_INTERVAL_MS - 1, 0));
-        assert!(policy.observe(10 + PERIODIC_INTERVAL_MS, 0));
+        let mut periodic_policy = AutomaticSyncPolicy::new(0);
+        periodic_policy.complete(10, 0, CycleDisposition::Success);
+        assert!(!periodic_policy.observe(10 + PERIODIC_INTERVAL_MS - 1, 0));
+        assert!(periodic_policy.observe(10 + PERIODIC_INTERVAL_MS, 0));
 
-        policy.complete(20, 4, CycleDisposition::Success);
-        assert!(!policy.observe(20 + PENDING_RECHECK_MS - 1, 4));
-        assert!(policy.observe(20 + PENDING_RECHECK_MS, 4));
+        let mut pending_policy = AutomaticSyncPolicy::new(0);
+        pending_policy.complete(20, 4, CycleDisposition::Success);
+        assert!(!pending_policy.observe(20 + PENDING_RECHECK_MS - 1, 4));
+        assert!(pending_policy.observe(20 + PENDING_RECHECK_MS, 4));
     }
 
     #[test]
