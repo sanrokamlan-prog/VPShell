@@ -1319,9 +1319,7 @@ fn default_monitor_preference_sync_fields() -> BTreeMap<String, FieldValue> {
     BTreeMap::from([("monitorInterval".to_string(), FieldValue::Integer(15))])
 }
 
-fn wallpaper_preference_sync_fields(
-    value: &Value,
-) -> Result<BTreeMap<String, FieldValue>, String> {
+fn wallpaper_preference_sync_fields(value: &Value) -> Result<BTreeMap<String, FieldValue>, String> {
     let root = ensure_object(value, "root")?;
     let wallpaper = ensure_object(
         root.get("wallpaper")
@@ -3629,7 +3627,10 @@ mod tests {
         let projected: Value =
             serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
         assert_eq!(projected["wallpaper"]["source"], "local");
-        assert_eq!(projected["wallpaper"]["value"], "device-only-wallpaper.webp");
+        assert_eq!(
+            projected["wallpaper"]["value"],
+            "device-only-wallpaper.webp"
+        );
         assert_eq!(projected["wallpaper"]["opacity"], 0.6);
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
         store
