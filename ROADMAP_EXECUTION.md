@@ -107,10 +107,11 @@
 | 完成 | 篡改、重放、冲突、断网、截断、升级、恢复失败和真实 provider 测试报告 |
 | 完成 | 桌面 Local Folder 产品入口：不可变 bootstrap、显式初始化/解锁、手动单周期、取消/锁定和 value-free 状态；PR #1 run `32104797505` 全绿 |
 | 完成 | AppState 主机公开字段保存事务 changefeed、稳定实体映射、observed merge operation、加密 outbox 与跨库幂等确认已接线；PR #1 run `32107931488` 全绿 |
-| 进行中 | 远端主机 merge 按 vault/revision/hash 可重试投影到 AppState，保留本机秘密、无回声 changefeed，并把新 snapshot/revision 接回桌面状态，等待 Actions |
-| 待实现 | 其他业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
+| 完成 | 远端主机 merge 按 vault/revision/hash 可重试投影到 AppState，保留本机秘密、无回声 changefeed，并把新 snapshot/revision 接回桌面状态；PR #1 run `32111238560` 全绿 |
+| 进行中 | 安全自建脚本的事务 changefeed、具名加密 operation/outbox、远端可重试投影与本机不安全脚本保护已接线，等待 Actions |
+| 待实现 | 历史/设置/背景等其他业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口及主机公开字段本地 operation 链路均已通过 Actions；远端 AppState 投影正在验证，其他业务域、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口及主机公开字段双向 operation/投影链路均已通过 Actions；安全自建脚本双向链路正在验证，其他业务域、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
 
 ## Phase C：Android Preview
 
@@ -214,7 +215,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 远端 AppState 回写本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest/唯一项/handler/capability 对齐、Android Sync disabled/read-only gate、投影函数不调用 changefeed 且包含 vault/revision/hash/pending-change/稳定事件边界、四项新增测试清单、文档未残留“远端回写未接线”、无 `node_modules`/`target` 检查通过；根分区交接前 50%。VPS 无 Cargo/rustfmt/TypeScript 依赖，未下载工具链、SDK 或项目依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | B9 远端 AppState 回写首轮 Actions 与格式修复 | 提交 `040803b` 的 PR #1 run `32110056937` 已全部进入终态：frontend 生产构建与 Android aarch64 debug APK/Gradle gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告 `app_store.rs` 与 `sync_coordinator.rs` 相同 6 处排版差异后失败，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按 Ubuntu job `95627327426`、Windows job `95627327440` 及两个 macOS job 的一致 runner 差异机械应用全部格式，不改行为；修复后本机 `git diff --check`、严格 JSON、对应格式形态、91-command/Android Sync disabled 既有静态断言、无 `node_modules`/`target` 检查通过，根分区保持 50%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、SDK 或项目依赖；等待格式修复提交后的四平台 locked fmt/check/test、frontend、Linux 真实 fixture 与 Android 完整矩阵。 |
 | 2026-08-18 | B9 远端 AppState 回写第二轮 Actions 与测试契约修复 | 格式修复提交 `b40a369` 的 PR #1 run `32110659604` 已全部进入终态：frontend、Android aarch64 debug APK/Gradle gate、四个平台 `cargo fmt --check` 与 locked check 均 `COMPLETED/SUCCESS`；四个平台只在 test target 编译新增协调器集成测试时出现相同两个 `E0616`，测试跨模块直接读取 `AppStoreSnapshot.revision/state_json` 私有字段，因而没有执行测试或 Linux 真实 fixture。修复保持生产快照字段私有，测试改为通过 serde 序列化后的公开 camelCase IPC 契约读取 `revision/stateJson`，既覆盖桌面实际边界又不扩大 Rust API。修复后本机 `git diff --check`、严格 JSON、跨模块快照访问、91-command 与 Android Sync disabled 既有静态断言、无 `node_modules`/`target` 检查通过，根分区保持 50%；VPS 无 Cargo/rustfmt，未下载依赖，等待修复提交后的完整矩阵。 |
+| 2026-08-18 | B9 远端主机 merge 到 AppState 安全回写（Actions 完成） | 测试契约修复提交 `2976d5c` 的 PR #1 run `32111238560` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 安全自建脚本 operation 与 AppState 投影（待 Actions） | `vpshell-state.sqlite3` 升级 schema v4，changefeed 以 `entity_kind` 区分 host/script，并为脚本建立独立稳定 UUID 映射和投影水位。仅 `custom=true` 且通过严格协议/秘密扫描的 name/body/source/risk/parameters 进入 operation；内置脚本、description/category 与不安全内容保持本机，安全脚本转为不安全时只发布 tombstone。通用 journal handoff 对 operation ID 同时绑定实体类型/身份/payload；协调器在同一周期加密上传主机与脚本 change，并以独立 vault/revision/hash 事务投影脚本。远端更新保留本机描述/分类，本机不安全或非自建脚本拒绝远端更新和删除，远端风险不降低本机风险，非法/不完整投影整事务回滚且不生成回声 change。聚焦测试覆盖安全字段筛选、不安全转换 tombstone、稳定身份、元数据/受保护脚本、风险不降级、v3 迁移、幂等与回滚，以及真实协调器周期中的双对象加密、远端正文冲突胜出和本机元数据不出密文。 |
+| 2026-08-18 | B9 安全自建脚本本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest/唯一项/handler/capability 完整对齐、Android 运行 Sync capability disabled 且只保留状态读取、schema v4 与 v3 升级测试、三项脚本聚焦测试和通用 journal 实体类型内容绑定静态契约、无旧 host-only 符号、无新增日志宏及无 `node_modules`/`target` 检查通过；根分区交接前 50%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、SDK 或项目依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待远端主机 merge 到 AppState 安全回写格式修复提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入其他业务域 operation。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送安全自建脚本 operation/投影；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后进入下一个真实未完成业务域 operation。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

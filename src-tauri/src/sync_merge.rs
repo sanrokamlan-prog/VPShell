@@ -114,14 +114,14 @@ pub(crate) enum FieldValue {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum LocalHostMutation {
+pub(crate) enum LocalEntityMutation {
     Patch(BTreeMap<String, FieldValue>),
     Delete,
 }
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct MergedHostProjection {
+pub(crate) struct MergedEntityProjection {
     pub(crate) entity_id: String,
     pub(crate) fields: Option<BTreeMap<String, FieldValue>>,
 }
@@ -255,21 +255,20 @@ impl MergeOperation {
     }
 }
 
-pub(crate) fn build_local_host_operation(
+pub(crate) fn build_local_entity_operation(
     state: &MergeState,
     operation_id: &str,
     device_id: &str,
     sequence: u64,
     physical_ms: i64,
     logical: u16,
+    entity_kind: EntityKind,
     entity_id: &str,
-    mutation: LocalHostMutation,
+    mutation: LocalEntityMutation,
 ) -> MergeResult<MergeOperation> {
-    let record = state
-        .entities
-        .get(&entity_key(&EntityKind::Host, entity_id));
+    let record = state.entities.get(&entity_key(&entity_kind, entity_id));
     let payload = match mutation {
-        LocalHostMutation::Patch(fields) => {
+        LocalEntityMutation::Patch(fields) => {
             let observed_fields = fields
                 .keys()
                 .map(|field| {
@@ -282,15 +281,15 @@ pub(crate) fn build_local_host_operation(
                 })
                 .collect();
             MergePayload::Patch(PatchPayload {
-                entity_kind: EntityKind::Host,
+                entity_kind: entity_kind.clone(),
                 entity_id: entity_id.to_string(),
                 fields,
                 observed_fields,
                 observed_tombstone: record.and_then(|record| record.tombstone.clone()),
             })
         }
-        LocalHostMutation::Delete => MergePayload::Delete(DeletePayload {
-            entity_kind: EntityKind::Host,
+        LocalEntityMutation::Delete => MergePayload::Delete(DeletePayload {
+            entity_kind,
             entity_id: entity_id.to_string(),
             observed_fields: record
                 .map(|record| {
@@ -375,11 +374,12 @@ pub(crate) fn advance_local_hlc(
     }
 }
 
-pub(crate) fn local_host_operation_matches(
+pub(crate) fn local_entity_operation_matches(
     encoded: &[u8],
     operation_id: &str,
+    entity_kind: &EntityKind,
     entity_id: &str,
-    mutation: &LocalHostMutation,
+    mutation: &LocalEntityMutation,
 ) -> bool {
     let Ok(operation) = MergeOperation::decode(encoded) else {
         return false;
@@ -388,13 +388,13 @@ pub(crate) fn local_host_operation_matches(
         return false;
     }
     match (&operation.payload, mutation) {
-        (MergePayload::Patch(payload), LocalHostMutation::Patch(fields)) => {
-            payload.entity_kind == EntityKind::Host
+        (MergePayload::Patch(payload), LocalEntityMutation::Patch(fields)) => {
+            payload.entity_kind == *entity_kind
                 && payload.entity_id == entity_id
                 && payload.fields == *fields
         }
-        (MergePayload::Delete(payload), LocalHostMutation::Delete) => {
-            payload.entity_kind == EntityKind::Host && payload.entity_id == entity_id
+        (MergePayload::Delete(payload), LocalEntityMutation::Delete) => {
+            payload.entity_kind == *entity_kind && payload.entity_id == entity_id
         }
         _ => false,
     }
@@ -658,19 +658,30 @@ impl MergeState {
         )
     }
 
-    pub(crate) fn host_projection(&self) -> MergeResult<Vec<MergedHostProjection>> {
+    fn entity_projection(
+        &self,
+        projected_kind: EntityKind,
+    ) -> MergeResult<Vec<MergedEntityProjection>> {
         let mut projection = Vec::new();
         for key in self.entities.keys() {
             let (kind, entity_id) = parse_entity_key(key)?;
-            if kind != EntityKind::Host {
+            if kind != projected_kind {
                 continue;
             }
-            projection.push(MergedHostProjection {
+            projection.push(MergedEntityProjection {
                 entity_id: entity_id.to_string(),
                 fields: self.entity_fields(&kind, entity_id),
             });
         }
         Ok(projection)
+    }
+
+    pub(crate) fn host_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::Host)
+    }
+
+    pub(crate) fn script_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::Script)
     }
 
     fn apply_patch(&mut self, payload: &PatchPayload, stamp: MergeStamp) -> MergeResult<()> {
@@ -1092,6 +1103,17 @@ fn validate_history_core(event: &HistoryEvent) -> MergeResult<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn entity_fields_are_syncable(
+    kind: &EntityKind,
+    fields: &BTreeMap<String, FieldValue>,
+) -> bool {
+    !fields.is_empty()
+        && fields.len() <= MAX_FIELDS_PER_PATCH
+        && fields
+            .iter()
+            .all(|(field, value)| validate_field(kind, field, value).is_ok())
 }
 
 fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeResult<()> {

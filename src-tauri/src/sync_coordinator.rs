@@ -233,7 +233,7 @@ impl SyncCoordinatorManager {
         let mut status = self.status()?;
         status.pending_objects = status
             .pending_objects
-            .saturating_add(app_store.pending_host_sync_change_count()?);
+            .saturating_add(app_store.pending_entity_sync_change_count()?);
         Ok(status)
     }
 
@@ -511,7 +511,24 @@ impl SyncCoordinatorManager {
         self.check_generation(generation, cancellation)?;
         let projection = self.journal.host_merge_projection().map_err(journal_code)?;
         app_store
-            .apply_remote_host_projection(vault_id, projection.revision, &projection.hosts, now_ms)
+            .apply_remote_host_projection(
+                vault_id,
+                projection.revision,
+                &projection.entities,
+                now_ms,
+            )
+            .map_err(|_| "app-state-writeback".to_string())?;
+        let projection = self
+            .journal
+            .script_merge_projection()
+            .map_err(journal_code)?;
+        app_store
+            .apply_remote_script_projection(
+                vault_id,
+                projection.revision,
+                &projection.entities,
+                now_ms,
+            )
             .map_err(|_| "app-state-writeback".to_string())?;
         self.journal.prune(now_ms).map_err(journal_code)?;
         Ok(CycleCounts {
@@ -531,21 +548,22 @@ impl SyncCoordinatorManager {
             .bind_sync_vault(vault_id)
             .map_err(|_| "app-state-handoff".to_string())?;
         for change in app_store
-            .pending_host_sync_changes(MAX_PUSH_OBJECTS_PER_CYCLE)
+            .pending_entity_sync_changes(MAX_PUSH_OBJECTS_PER_CYCLE)
             .map_err(|_| "app-state-handoff".to_string())?
         {
             self.journal
-                .enqueue_local_host_change(
+                .enqueue_local_entity_change(
                     vault_key,
                     vault_id,
                     &change.operation_id,
+                    change.entity_kind,
                     &change.entity_id,
                     change.mutation,
                     now_ms,
                 )
                 .map_err(journal_code)?;
             app_store
-                .acknowledge_host_sync_change(vault_id, &change.operation_id)
+                .acknowledge_entity_sync_change(vault_id, &change.operation_id)
                 .map_err(|_| "app-state-handoff".to_string())?;
         }
         Ok(())
@@ -1060,6 +1078,7 @@ mod tests {
         operation_patch(
             device_id,
             sequence,
+            "host",
             &Uuid::new_v4().to_string(),
             "name",
             "fixture",
@@ -1069,6 +1088,7 @@ mod tests {
     fn operation_patch(
         device_id: &str,
         sequence: u64,
+        entity_kind: &str,
         entity_id: &str,
         field: &str,
         value: &str,
@@ -1082,7 +1102,7 @@ mod tests {
             "payload": {
                 "kind": "patch",
                 "payload": {
-                    "entityKind": "host",
+                    "entityKind": entity_kind,
                     "entityId": entity_id,
                     "fields": { (field): { "type": "text", "value": value } },
                     "observedFields": { (field): null },
@@ -1103,7 +1123,7 @@ mod tests {
                 expected_revision: 0,
             })
             .unwrap();
-        assert_eq!(store.pending_host_sync_changes(128).unwrap().len(), 1);
+        assert_eq!(store.pending_entity_sync_changes(128).unwrap().len(), 1);
 
         let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
         let provider = Arc::new(MemoryProvider::default());
@@ -1122,7 +1142,7 @@ mod tests {
         assert_eq!(status.last_uploaded_objects, 1);
         assert_eq!(status.merge_revision, 1);
         assert_eq!(status.open_conflicts, 0);
-        assert!(store.pending_host_sync_changes(128).unwrap().is_empty());
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
         let objects = provider.objects.lock().unwrap();
         assert_eq!(objects.len(), 1);
         let encoded = objects.values().next().unwrap();
@@ -1148,7 +1168,7 @@ mod tests {
                 expected_revision: 0,
             })
             .unwrap();
-        let entity_id = store.pending_host_sync_changes(128).unwrap()[0]
+        let entity_id = store.pending_entity_sync_changes(128).unwrap()[0]
             .entity_id
             .clone();
         let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
@@ -1163,7 +1183,14 @@ mod tests {
             &Uuid::new_v4().to_string(),
             Some(&remote_device),
             Some(1),
-            &operation_patch(&remote_device, 1, &entity_id, "address", "remote.example"),
+            &operation_patch(
+                &remote_device,
+                1,
+                "host",
+                &entity_id,
+                "address",
+                "remote.example",
+            ),
         )
         .unwrap()
         .encode()
@@ -1185,7 +1212,85 @@ mod tests {
             serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
         assert_eq!(state["hosts"][0]["host"], "remote.example");
         assert_eq!(state["hosts"][0]["credentialRef"], "ssh-reference");
-        assert!(store.pending_host_sync_changes(128).unwrap().is_empty());
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cycle_encrypts_custom_script_and_projects_remote_body_without_local_metadata() {
+        let root = TempDir::new("app-state-script");
+        let store = test_app_store(&root);
+        let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
+        state["scripts"] = serde_json::json!([{
+            "id": Uuid::new_v4().to_string(),
+            "title": "Audit",
+            "description": "local description",
+            "category": "local category",
+            "command": "echo local",
+            "sourceUrl": "",
+            "risk": "low",
+            "custom": true
+        }]);
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let script_entity = store
+            .pending_entity_sync_changes(128)
+            .unwrap()
+            .into_iter()
+            .find(|change| change.entity_kind == crate::sync_merge::EntityKind::Script)
+            .unwrap()
+            .entity_id;
+        let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let vault_id = Uuid::new_v4().to_string();
+        let remote_device = Uuid::new_v4().to_string();
+        let vault_key = VaultKey::generate().unwrap();
+        let remote = encrypt_sync_object(
+            &vault_key,
+            &vault_id,
+            SyncObjectKind::Event,
+            &Uuid::new_v4().to_string(),
+            Some(&remote_device),
+            Some(1),
+            &operation_patch(
+                &remote_device,
+                1,
+                "script",
+                &script_entity,
+                "body",
+                "echo remote",
+            ),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider.insert(
+            &format!("vpshell/v1/{vault_id}/segments/{remote_device}/1.oseg"),
+            remote,
+        );
+        coordinator
+            .attach_session(provider.clone(), vault_key, &vault_id)
+            .unwrap();
+
+        let status = coordinator.run_once(&store, 1_000).unwrap();
+        assert_eq!(status.last_uploaded_objects, 2);
+        assert_eq!(status.last_downloaded_objects, 1);
+        assert_eq!(status.open_conflicts, 1);
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
+        assert_eq!(state["scripts"][0]["command"], "echo remote");
+        assert_eq!(state["scripts"][0]["description"], "local description");
+        assert_eq!(state["scripts"][0]["category"], "local category");
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+        for encoded in provider.objects.lock().unwrap().values() {
+            assert!(!encoded.windows("local description".len()).any(|window| {
+                window == "local description".as_bytes()
+            }));
+        }
     }
 
     #[test]
@@ -1366,7 +1471,7 @@ mod tests {
                 &Uuid::new_v4().to_string(),
                 Some(&device_id),
                 Some(1),
-                &operation_patch(&device_id, 1, &entity_id, "address", value),
+                &operation_patch(&device_id, 1, "host", &entity_id, "address", value),
             )
             .unwrap()
             .encode()

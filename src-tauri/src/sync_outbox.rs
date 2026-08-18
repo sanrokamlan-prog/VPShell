@@ -14,9 +14,9 @@ use crate::{
         EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object, encrypt_sync_object,
     },
     sync_merge::{
-        LocalHostMutation, MergeError, MergeErrorCode, MergedHostProjection, advance_local_hlc,
-        apply_persisted_operation, build_local_host_operation, load_persisted_state,
-        local_host_operation_matches,
+        EntityKind, LocalEntityMutation, MergeError, MergeErrorCode, MergedEntityProjection,
+        advance_local_hlc, apply_persisted_operation, build_local_entity_operation,
+        load_persisted_state, local_entity_operation_matches,
     },
     sync_provider::validate_key,
 };
@@ -204,9 +204,9 @@ pub(crate) struct RemoteMergeResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct HostMergeProjectionSnapshot {
+pub(crate) struct EntityMergeProjectionSnapshot {
     pub(crate) revision: u64,
-    pub(crate) hosts: Vec<MergedHostProjection>,
+    pub(crate) entities: Vec<MergedEntityProjection>,
 }
 
 fn map_merge_error(error: MergeError) -> JournalError {
@@ -828,11 +828,19 @@ impl SyncJournal {
         })
     }
 
-    pub(crate) fn host_merge_projection(&self) -> JournalResult<HostMergeProjectionSnapshot> {
+    pub(crate) fn host_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
         self.transaction(|transaction| {
             let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
-            let hosts = state.host_projection().map_err(map_merge_error)?;
-            Ok(HostMergeProjectionSnapshot { revision, hosts })
+            let entities = state.host_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
+    pub(crate) fn script_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let entities = state.script_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
         })
     }
 
@@ -883,13 +891,14 @@ impl SyncJournal {
         })
     }
 
-    pub(crate) fn enqueue_local_host_change(
+    pub(crate) fn enqueue_local_entity_change(
         &self,
         vault_key: &VaultKey,
         vault_id: &str,
         operation_id: &str,
+        entity_kind: EntityKind,
         entity_id: &str,
-        mutation: LocalHostMutation,
+        mutation: LocalEntityMutation,
         now_ms: i64,
     ) -> JournalResult<EnqueueOutcome> {
         validate_now(now_ms)?;
@@ -938,9 +947,10 @@ impl SyncJournal {
                             "现有 AppState operation 无法认证",
                         )
                     })?;
-                    if local_host_operation_matches(
+                    if local_entity_operation_matches(
                         &plaintext,
                         &operation_id,
+                        &entity_kind,
                         &entity_id,
                         &mutation,
                     ) {
@@ -1000,13 +1010,14 @@ impl SyncJournal {
                 load_persisted_state(transaction).map_err(map_merge_error)?;
             let (physical_ms, logical) =
                 advance_local_hlc(&state, physical_ms, logical).map_err(map_merge_error)?;
-            let operation = build_local_host_operation(
+            let operation = build_local_entity_operation(
                 &state,
                 &operation_id,
                 &device_id,
                 sequence,
                 physical_ms,
                 logical,
+                entity_kind,
                 &entity_id,
                 mutation,
             )
@@ -1681,15 +1692,16 @@ mod tests {
         let key = VaultKey::generate().unwrap();
         let operation_id = Uuid::new_v4().to_string();
         let entity_id = Uuid::new_v4().to_string();
-        let mutation = LocalHostMutation::Patch(BTreeMap::from([(
+        let mutation = LocalEntityMutation::Patch(BTreeMap::from([(
             "name".to_string(),
             crate::sync_merge::FieldValue::Text("server".to_string()),
         )]));
         assert_eq!(
-            journal.enqueue_local_host_change(
+            journal.enqueue_local_entity_change(
                 &key,
                 VAULT_ID,
                 &operation_id,
+                EntityKind::Host,
                 &entity_id,
                 mutation.clone(),
                 10,
@@ -1698,23 +1710,47 @@ mod tests {
         );
         assert_eq!(journal.merge_status().unwrap().revision, 1);
         assert_eq!(
-            journal.enqueue_local_host_change(
+            journal.enqueue_local_entity_change(
                 &key,
                 VAULT_ID,
                 &operation_id,
+                EntityKind::Host,
                 &entity_id,
-                mutation,
+                mutation.clone(),
                 11,
             ),
             Ok(EnqueueOutcome::AlreadyQueued)
         );
-        let changed = LocalHostMutation::Patch(BTreeMap::from([(
+        assert_eq!(
+            journal
+                .enqueue_local_entity_change(
+                    &key,
+                    VAULT_ID,
+                    &operation_id,
+                    EntityKind::Script,
+                    &entity_id,
+                    mutation,
+                    11,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Conflict
+        );
+        let changed = LocalEntityMutation::Patch(BTreeMap::from([(
             "name".to_string(),
             crate::sync_merge::FieldValue::Text("changed".to_string()),
         )]));
         assert_eq!(
             journal
-                .enqueue_local_host_change(&key, VAULT_ID, &operation_id, &entity_id, changed, 12,)
+                .enqueue_local_entity_change(
+                    &key,
+                    VAULT_ID,
+                    &operation_id,
+                    EntityKind::Host,
+                    &entity_id,
+                    changed,
+                    12,
+                )
                 .unwrap_err()
                 .code,
             JournalErrorCode::Conflict
