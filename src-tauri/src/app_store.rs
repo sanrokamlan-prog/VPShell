@@ -17,10 +17,11 @@ use crate::sync_merge::{
     EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection, entity_fields_are_syncable,
 };
 
-const STORE_SCHEMA_VERSION: i64 = 6;
+const STORE_SCHEMA_VERSION: i64 = 7;
 const TERMINAL_APPEARANCE_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000001";
 const APPLICATION_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000002";
 const ONBOARDING_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000003";
+const MONITOR_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000004";
 const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVENTS: i64 = 10_000;
@@ -360,6 +361,30 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
                 &transaction,
                 None,
                 &state,
+                revision.max(1) as u64,
+                updated_at_ms.max(0),
+            )?;
+        }
+    }
+    if version < 7 {
+        let existing: Option<(i64, String, i64)> = transaction
+            .query_row(
+                "SELECT revision, state_json, updated_at_ms
+                 FROM app_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取待迁移 AppState 监控偏好: {error}"))?;
+        if let Some((revision, state_json, updated_at_ms)) = existing {
+            let state: Value = serde_json::from_str(&state_json)
+                .map_err(|error| format!("待迁移 AppState JSON 损坏: {error}"))?;
+            queue_fixed_setting_sync_change(
+                &transaction,
+                true,
+                MONITOR_PREFERENCES_ENTITY_ID,
+                monitor_preference_sync_fields(&state)?,
+                &default_monitor_preference_sync_fields(),
                 revision.max(1) as u64,
                 updated_at_ms.max(0),
             )?;
@@ -1236,6 +1261,30 @@ fn default_onboarding_sync_fields() -> BTreeMap<String, FieldValue> {
     BTreeMap::from([("onboardingCompleted".to_string(), FieldValue::Flag(false))])
 }
 
+fn monitor_preference_sync_fields(value: &Value) -> Result<BTreeMap<String, FieldValue>, String> {
+    let root = ensure_object(value, "root")?;
+    let settings = ensure_object(
+        root.get("settings")
+            .ok_or_else(|| "本地状态缺少 settings".to_string())?,
+        "settings",
+    )?;
+    let interval = match settings.get("monitorIntervalSeconds") {
+        Some(value) => value
+            .as_i64()
+            .ok_or_else(|| "本地状态 settings.monitorIntervalSeconds 无效".to_string())?,
+        None => 15,
+    };
+    let fields = BTreeMap::from([("monitorInterval".to_string(), FieldValue::Integer(interval))]);
+    if !entity_fields_are_syncable(&EntityKind::Setting, &fields) {
+        return Err("本地状态监控偏好未通过同步字段验证".to_string());
+    }
+    Ok(fields)
+}
+
+fn default_monitor_preference_sync_fields() -> BTreeMap<String, FieldValue> {
+    BTreeMap::from([("monitorInterval".to_string(), FieldValue::Integer(15))])
+}
+
 fn sync_fields_hash(fields: &BTreeMap<String, FieldValue>) -> Result<String, String> {
     let encoded =
         serde_json::to_vec(fields).map_err(|error| format!("无法编码本地同步字段指纹: {error}"))?;
@@ -1355,6 +1404,15 @@ fn queue_setting_sync_changes(
         &default_onboarding_sync_fields(),
         revision,
         now,
+    )?;
+    queue_fixed_setting_sync_change(
+        transaction,
+        initial_state,
+        MONITOR_PREFERENCES_ENTITY_ID,
+        monitor_preference_sync_fields(next)?,
+        &default_monitor_preference_sync_fields(),
+        revision,
+        now,
     )
 }
 
@@ -1392,6 +1450,9 @@ fn validate_setting_projection_fields(
         }
         ONBOARDING_ENTITY_ID => {
             fields.len() == 1 && fields.keys().all(|field| field == "onboardingCompleted")
+        }
+        MONITOR_PREFERENCES_ENTITY_ID => {
+            fields.len() == 1 && fields.keys().all(|field| field == "monitorInterval")
         }
         _ => false,
     };
@@ -2471,6 +2532,7 @@ impl AppStore {
             if setting.entity_id != TERMINAL_APPEARANCE_ENTITY_ID
                 && setting.entity_id != APPLICATION_PREFERENCES_ENTITY_ID
                 && setting.entity_id != ONBOARDING_ENTITY_ID
+                && setting.entity_id != MONITOR_PREFERENCES_ENTITY_ID
             {
                 return Err("AppState 设置同步投影包含未接线实体".to_string());
             }
@@ -2567,6 +2629,10 @@ impl AppStore {
             .iter()
             .find(|setting| setting.entity_id == ONBOARDING_ENTITY_ID)
             .and_then(|setting| setting.fields.as_ref());
+        let monitor_fields = projection
+            .iter()
+            .find(|setting| setting.entity_id == MONITOR_PREFERENCES_ENTITY_ID)
+            .and_then(|setting| setting.fields.as_ref());
         if let Some(fields) = terminal_fields {
             let font_family = match fields.get("fontFamily") {
                 Some(FieldValue::Text(value)) => value.clone(),
@@ -2618,6 +2684,20 @@ impl AppStore {
                 _ => return Err("远端设置同步投影缺少 onboardingCompleted".to_string()),
             };
             root.insert("onboardingCompleted".to_string(), Value::Bool(completed));
+        }
+        if let Some(fields) = monitor_fields {
+            let interval = match fields.get("monitorInterval") {
+                Some(FieldValue::Integer(value)) => *value,
+                _ => return Err("远端设置同步投影缺少 monitorInterval".to_string()),
+            };
+            let settings = root
+                .get_mut("settings")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "AppState settings 损坏".to_string())?;
+            settings.insert(
+                "monitorIntervalSeconds".to_string(),
+                Value::Number(interval.into()),
+            );
         }
         validate_state_json(
             &serde_json::to_string(&next_value)
@@ -3234,6 +3314,112 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.snapshot().unwrap().revision, snapshot.revision);
+    }
+
+    #[test]
+    fn monitor_preference_changefeed_and_remote_projection_are_bounded_and_non_echoing() {
+        let root = TempDir::new("monitor-setting");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        acknowledge_initial_host(&store, &vault_id);
+
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["settings"]["monitorIntervalSeconds"] = Value::Number(30.into());
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        let changes = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].entity_id, MONITOR_PREFERENCES_ENTITY_ID);
+        let LocalEntityMutation::Patch(fields) = &changes[0].mutation else {
+            panic!("monitor preference must be a patch");
+        };
+        assert_eq!(
+            fields,
+            &BTreeMap::from([("monitorInterval".to_string(), FieldValue::Integer(30))])
+        );
+        store
+            .acknowledge_entity_sync_change(&vault_id, &changes[0].operation_id)
+            .unwrap();
+
+        state["settings"]["monitorIntervalSeconds"] = Value::Number(15.into());
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 2,
+            })
+            .unwrap();
+        let restored = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(restored.len(), 1);
+        let LocalEntityMutation::Patch(fields) = &restored[0].mutation else {
+            panic!("restored monitor preference must be a patch");
+        };
+        assert_eq!(fields, &default_monitor_preference_sync_fields());
+        store
+            .acknowledge_entity_sync_change(&vault_id, &restored[0].operation_id)
+            .unwrap();
+
+        let projection = vec![MergedEntityProjection {
+            entity_id: MONITOR_PREFERENCES_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([(
+                "monitorInterval".to_string(),
+                FieldValue::Integer(60),
+            )])),
+        }];
+        assert_eq!(
+            store
+                .apply_remote_setting_projection(&vault_id, 3, &projection, 5_000)
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let snapshot = store.snapshot().unwrap();
+        let projected: Value =
+            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+        assert_eq!(projected["settings"]["monitorIntervalSeconds"], 60);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+        store
+            .save(SaveAppStateRequest {
+                state_json: projected.to_string(),
+                expected_revision: snapshot.revision,
+            })
+            .unwrap();
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+
+        let invalid = vec![MergedEntityProjection {
+            entity_id: MONITOR_PREFERENCES_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([(
+                "monitorInterval".to_string(),
+                FieldValue::Integer(301),
+            )])),
+        }];
+        let revision = store.snapshot().unwrap().revision;
+        assert!(
+            store
+                .apply_remote_setting_projection(&vault_id, 4, &invalid, 5_001)
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, revision);
+
+        let mut invalid_local = projected;
+        invalid_local["settings"]["monitorIntervalSeconds"] = Value::String("fast".into());
+        assert!(
+            store
+                .save(SaveAppStateRequest {
+                    state_json: invalid_local.to_string(),
+                    expected_revision: revision,
+                })
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, revision);
     }
 
     #[test]
@@ -4082,7 +4268,85 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(setting_states, 3);
+        assert_eq!(setting_states, 4);
+    }
+
+    #[test]
+    fn version_six_snapshot_backfills_monitor_fingerprint_or_non_default_change_once() {
+        let default_root = TempDir::new("sync-v6-monitor-default");
+        let default_store = AppStore::load(default_root.0.clone()).unwrap();
+        default_store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        drop(default_store);
+        let default_connection = open_connection(&database_path(&default_root.0)).unwrap();
+        default_connection
+            .execute(
+                "DELETE FROM app_sync_setting_state WHERE entity_id = ?1",
+                params![MONITOR_PREFERENCES_ENTITY_ID],
+            )
+            .unwrap();
+        default_connection
+            .pragma_update(None, "user_version", 6)
+            .unwrap();
+        drop(default_connection);
+        let migrated_default = AppStore::load(default_root.0.clone()).unwrap();
+        let default_changes = migrated_default.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(default_changes.len(), 1);
+        assert_eq!(default_changes[0].entity_kind, EntityKind::Host);
+
+        let changed_root = TempDir::new("sync-v6-monitor-changed");
+        let changed_store = AppStore::load(changed_root.0.clone()).unwrap();
+        changed_store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let mut changed_state: Value = serde_json::from_str(&fixture()).unwrap();
+        changed_state["settings"]["monitorIntervalSeconds"] = Value::Number(30.into());
+        changed_store
+            .save(SaveAppStateRequest {
+                state_json: changed_state.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        drop(changed_store);
+        let changed_connection = open_connection(&database_path(&changed_root.0)).unwrap();
+        changed_connection
+            .execute(
+                "DELETE FROM app_sync_changes WHERE entity_id = ?1",
+                params![MONITOR_PREFERENCES_ENTITY_ID],
+            )
+            .unwrap();
+        changed_connection
+            .execute(
+                "DELETE FROM app_sync_setting_state WHERE entity_id = ?1",
+                params![MONITOR_PREFERENCES_ENTITY_ID],
+            )
+            .unwrap();
+        changed_connection
+            .pragma_update(None, "user_version", 6)
+            .unwrap();
+        drop(changed_connection);
+
+        let migrated_changed = AppStore::load(changed_root.0.clone()).unwrap();
+        let changed = migrated_changed
+            .pending_entity_sync_changes(128)
+            .unwrap()
+            .into_iter()
+            .find(|change| change.entity_id == MONITOR_PREFERENCES_ENTITY_ID)
+            .expect("non-default monitor preference must be backfilled");
+        let LocalEntityMutation::Patch(fields) = changed.mutation else {
+            panic!("migrated monitor preference must be a patch");
+        };
+        assert_eq!(
+            fields,
+            BTreeMap::from([("monitorInterval".to_string(), FieldValue::Integer(30))])
+        );
     }
 
     #[test]

@@ -955,7 +955,7 @@ function App() {
         const snapshot = await invoke<MonitorSnapshotResponse>("start_remote_monitor", {
           request: {
             sessionId: activeSession.id,
-            intervalSeconds: 15,
+            intervalSeconds: appState.settings.monitorIntervalSeconds,
             connection: {
               host: activeHost.host,
               port: activeHost.port,
@@ -979,7 +979,7 @@ function App() {
               history: current[activeSession.id]?.history ?? [],
               loading: false,
               paused: false,
-              intervalSeconds: current[activeSession.id]?.intervalSeconds ?? 15,
+              intervalSeconds: current[activeSession.id]?.intervalSeconds ?? appState.settings.monitorIntervalSeconds,
               totalSamples: current[activeSession.id]?.totalSamples ?? 0,
               droppedSamples: current[activeSession.id]?.droppedSamples ?? 0,
               metrics: current[activeSession.id]?.metrics,
@@ -997,7 +997,7 @@ function App() {
       stopListening?.();
       void invoke("stop_remote_monitor", { sessionId: activeSession.id }).catch(() => undefined);
     };
-  }, [activeHost.credentialRef, activeHost.host, activeHost.identityFile, activeHost.port, activeHost.username, activeIdentityPassphraseRef, activeSession.id, activeSession.state, applyMonitorSnapshot]);
+  }, [activeHost.credentialRef, activeHost.host, activeHost.identityFile, activeHost.port, activeHost.username, activeIdentityPassphraseRef, activeSession.id, activeSession.state, appState.settings.monitorIntervalSeconds, applyMonitorSnapshot]);
 
   const setMonitorPaused = useCallback(async (sessionId: string, paused: boolean) => {
     try {
@@ -1012,6 +1012,10 @@ function App() {
     try {
       const snapshot = await invoke<MonitorSnapshotResponse>("set_remote_monitor_interval", { sessionId, intervalSeconds });
       applyMonitorSnapshot(snapshot);
+      setAppState((current) => ({
+        ...current,
+        settings: { ...current.settings, monitorIntervalSeconds: snapshot.intervalSeconds },
+      }));
     } catch (error) {
       showToast(`无法调整监控频率：${String(error)}`);
     }
@@ -2926,6 +2930,7 @@ function App() {
         <SettingsDialog
           externalEditorPath={appState.settings.externalEditorPath}
           autoUploadEditedFiles={appState.settings.autoUploadEditedFiles}
+          monitorIntervalSeconds={appState.settings.monitorIntervalSeconds}
           onSave={(settings) => setAppState((current) => ({
             ...current,
             settings: { ...current.settings, ...settings },

@@ -1705,6 +1705,77 @@ mod tests {
     }
 
     #[test]
+    fn cycle_syncs_bounded_monitor_preference_into_app_state() {
+        let root = TempDir::new("app-state-monitor-preference");
+        let store = test_app_store(&root);
+        let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
+        state["settings"]["monitorIntervalSeconds"] = serde_json::json!(30);
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let preference_change = store
+            .pending_entity_sync_changes(128)
+            .unwrap()
+            .into_iter()
+            .find(|change| change.entity_kind == crate::sync_merge::EntityKind::Setting)
+            .unwrap();
+        let crate::sync_merge::LocalEntityMutation::Patch(fields) = &preference_change.mutation
+        else {
+            panic!("monitor preference must be a patch");
+        };
+        assert_eq!(
+            fields["monitorInterval"],
+            crate::sync_merge::FieldValue::Integer(30)
+        );
+        let setting_entity = preference_change.entity_id;
+
+        let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let vault_id = Uuid::new_v4().to_string();
+        let remote_device = Uuid::new_v4().to_string();
+        let vault_key = VaultKey::generate().unwrap();
+        let remote = encrypt_sync_object(
+            &vault_key,
+            &vault_id,
+            SyncObjectKind::Event,
+            &Uuid::new_v4().to_string(),
+            Some(&remote_device),
+            Some(1),
+            &operation_integer_patch(
+                &remote_device,
+                1,
+                "setting",
+                &setting_entity,
+                "monitorInterval",
+                60,
+            ),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider.insert(
+            &format!("vpshell/v1/{vault_id}/segments/{remote_device}/1.oseg"),
+            remote,
+        );
+        coordinator
+            .attach_session(provider, vault_key, &vault_id)
+            .unwrap();
+
+        let status = coordinator.run_once(&store, 1_000).unwrap();
+        assert_eq!(status.last_uploaded_objects, 2);
+        assert_eq!(status.last_downloaded_objects, 1);
+        assert_eq!(status.open_conflicts, 1);
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
+        assert_eq!(state["settings"]["monitorIntervalSeconds"], 60);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+    }
+
+    #[test]
     fn cycle_uploads_claimed_objects_and_applies_remote_merge_atomically() {
         let root = TempDir::new("cycle");
         let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();

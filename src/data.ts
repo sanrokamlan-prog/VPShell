@@ -380,6 +380,7 @@ export const initialState: AppState = {
     externalEditorPath: "",
     autoUploadEditedFiles: false,
     packageTransfersEnabled: true,
+    monitorIntervalSeconds: 15,
   },
   onboardingCompleted: false,
 };
@@ -408,6 +409,11 @@ export function migratePersistedAppState(value: AppState): AppState {
     ...(value.settings ?? {}),
   } as ApplicationSettings & { defaultJumpHostId?: unknown };
   delete settings.defaultJumpHostId;
+  if (!Number.isInteger(settings.monitorIntervalSeconds)
+    || settings.monitorIntervalSeconds < 5
+    || settings.monitorIntervalSeconds > 300) {
+    settings.monitorIntervalSeconds = initialState.settings.monitorIntervalSeconds;
+  }
 
   return {
     ...initialState,

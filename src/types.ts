@@ -136,6 +136,7 @@ export interface ApplicationSettings {
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
   packageTransfersEnabled: boolean;
+  monitorIntervalSeconds: number;
 }
 
 export interface AppState {

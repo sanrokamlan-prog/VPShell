@@ -2035,6 +2035,15 @@ mod tests {
                 "onboardingCompleted",
                 FieldValue::Flag(true),
             ),
+            patch(
+                76,
+                DEVICE_A,
+                106,
+                EntityKind::Setting,
+                HOST_ID,
+                "monitorInterval",
+                FieldValue::Integer(30),
+            ),
         ];
         let mut state = MergeState::default();
         for operation in &operations {
@@ -2054,6 +2063,7 @@ mod tests {
                 entity_id: HOST_ID.to_string(),
                 fields: Some(BTreeMap::from([
                     ("fontSize".to_string(), FieldValue::Integer(16)),
+                    ("monitorInterval".to_string(), FieldValue::Integer(30)),
                     (
                         "packageTransfersEnabled".to_string(),
                         FieldValue::Flag(false),
@@ -2064,13 +2074,26 @@ mod tests {
         );
         assert!(
             patch(
-                76,
+                77,
                 DEVICE_A,
-                106,
+                107,
                 EntityKind::Setting,
                 HOST_ID,
                 "packageTransfersEnabled",
                 FieldValue::Text("false".into()),
+            )
+            .encode()
+            .is_err()
+        );
+        assert!(
+            patch(
+                78,
+                DEVICE_A,
+                108,
+                EntityKind::Setting,
+                HOST_ID,
+                "monitorInterval",
+                FieldValue::Integer(4),
             )
             .encode()
             .is_err()
