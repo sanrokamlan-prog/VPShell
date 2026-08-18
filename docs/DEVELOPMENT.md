@@ -36,7 +36,7 @@ WebView 负责展示和用户操作；网络、进程、文件系统、凭据、
 | Network tools | traceroute、限量 HTTP 测速、显式 `iperf3` UDP 测试 | 自动改防火墙、自动安装服务端、无限流量测试 |
 | Local data/history | SQLite 事务、事件历史、路径范围和 outbox | 把整库当同步文件直接覆盖 |
 | Sync/crypto | provider、分段、合并、E2EE、恢复和冲突中心 | 把解密交给 provider，或用 TOTP 代替加密密钥 |
-| Relay/native SSH | 后续中继选路与原生协议引擎 | 在没有中继和实测数据时宣称“智能加速” |
+| Relay/native SSH | 原生引擎、用户自建 Relay 与显式 route readiness 评估 | 在没有真实部署和区域指标时宣称“智能加速”或自动切换 |
 
 当前部分终端逻辑集中在 `src-tauri/src/lib.rs`，界面状态集中在 `src/App.tsx`。新增传输、监控、编辑器和同步能力必须各自进入独立 Rust/React 模块，通过稳定数据结构交互，不能继续扩大这两个入口文件。
 
@@ -274,6 +274,14 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - 服务端只打开 operator allowlist 中的目标 TCP，不接受 wildcard/CIDR/任意目标；不会解析或终止 SSH，也不接收凭据。token 是 32-byte base64url 文件，必须为 regular non-symlink、Unix `0600`，生成器 create-only 且不打印 token。控制面不加密，部署者必须自行提供 ACL 或外层 TLS/VPN 以保护目标元数据。
 - 总连接、单源 IP 连接、认证尝试、会话字节、握手/目标连接/空闲/总时长均有硬上限，source bucket 有数量和 TTL 上限。JSONL audit 只记录 schema/阶段、随机 request id、盐哈希 source/target、稳定 outcome、字节和时长；无 token、key id、原始地址、主机名、凭据、SSH 字节或底层错误。audit sink 出错后新会话拒绝。
 - `relay::tests` 必须覆盖成功回环 opaque bytes、错误 token、allowlist 拒绝、挑战篡改/重放、认证速率/连接容量、字节/空闲/总时长、token/audit 文件权限与审计脱敏。真实多区域部署、firewall、日志轮换、外层 TLS/VPN、长时间丢包和多版本 SSH 服务器仍是外部验收。
+
+### 10.13 原生 route 持续评估（Phase D）
+
+- 测量只能由用户在桌面显式启动；Android capability 不得包含 start/get/stop 三项命令。一个进程最多一个 campaign、每个最多 4 个候选、30–300 秒间隔、3–20 轮滚动窗口和 120 轮。关闭对话框、显式停止或 campaign 代际变化必须取消所有在途 probe。
+- 每个样本必须复用 `native_engine` 的完整 route：逐跳独立解析凭据、认证前固定 host-key、最终实际完成 SFTP readiness 后才算成功。不能用 UI timer、mock 延迟、单独 ping 或未认证 TCP connect 冒充完整路线样本；候选并发仍受 campaign 数量硬限制。
+- 快照只返回 caller-owned candidate ID、样本计数、成功率、中位数、P95、评分、稳定 reason/error code 和可选 `hopIndex`。不得返回 host、username、credential reference、私钥路径、底层库错误或日志；请求严格拒绝未知字段和明文 `password`。
+- 推荐门槛固定为至少 3 个样本、至少 2 次成功和 80% 成功率；评分为 P95 readiness 加失败比例惩罚，候选按 ID 稳定打破同分。已选路线与最低分差异在 15% 内时保留原建议。该结果只是可解释建议，不能自动改写主机 route，也不能称作 UDP 丢包、吞吐、地区质量或加速测量。
+- 当前 UI 只比较同一目标的直连与已配置跳板 route。Relay 候选、持久历史、自动切换、Mosh 和真实多区域网络矩阵是后续独立项；扩大范围前必须保持取消/代际、秘密隔离和四平台编译测试。
 
 ### 10.9 B8 协议回归矩阵（v0.3 工作树）
 

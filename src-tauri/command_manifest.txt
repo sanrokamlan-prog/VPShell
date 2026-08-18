@@ -12,6 +12,9 @@ stop_native_remote_forward
 start_native_dynamic_forward
 list_native_dynamic_forwards
 stop_native_dynamic_forward
+start_native_route_measurement
+get_native_route_measurement_snapshot
+stop_native_route_measurement
 start_ssh_session
 write_terminal
 enable_shell_integration

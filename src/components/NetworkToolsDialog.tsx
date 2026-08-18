@@ -1,9 +1,27 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Activity, ArrowDownToLine, ArrowLeftRight, Copy, Gauge, Network, RefreshCw, Route } from "lucide-react";
+import { Activity, ArrowDownToLine, ArrowLeftRight, Copy, Gauge, Network, Play, RefreshCw, Route, Square, Waypoints } from "lucide-react";
 import { Dialog } from "./Dialog";
 
-export type NetworkToolMode = "trace" | "download" | "udp";
+export type NetworkToolMode = "trace" | "download" | "udp" | "route";
+
+interface NativeRouteHop {
+  hopId: string;
+  host: string;
+  port: number;
+  username: string;
+  hostKeySha256: string;
+  timeoutSeconds: number;
+  credentialRef?: string;
+  identityFile?: string;
+  identityPassphraseRef?: string;
+}
+
+export interface RouteMeasurementOption {
+  candidateId: string;
+  label: string;
+  route: { hops: NativeRouteHop[] };
+}
 
 interface TraceResult {
   command: string;
@@ -36,15 +54,48 @@ interface UdpSummary {
   lostPercent?: number;
 }
 
+interface RouteCandidateSnapshot {
+  candidateId: string;
+  status: "pending" | "ready" | "failed";
+  sampleCount: number;
+  successfulSamples: number;
+  successRatePercent: number;
+  medianDurationMs?: number;
+  p95DurationMs?: number;
+  scoreMs?: number;
+  eligible: boolean;
+  lastSampledAtMs?: number;
+  lastErrorCode?: string;
+  lastErrorRetryable?: boolean;
+  lastErrorHopIndex?: number;
+  reasonCodes: string[];
+}
+
+interface RouteMeasurementSnapshot {
+  schemaVersion: number;
+  campaignId: string;
+  running: boolean;
+  sampling: boolean;
+  intervalSeconds: number;
+  windowSize: number;
+  maxRounds: number;
+  completedRounds: number;
+  startedAtMs: number;
+  selectedCandidateId?: string;
+  selectionReasonCode: string;
+  candidates: RouteCandidateSnapshot[];
+}
+
 interface NetworkToolsDialogProps {
   initialMode: NetworkToolMode;
   defaultHost: string;
   onClose: () => void;
   showToast: (message: string) => void;
+  buildRouteMeasurementOptions: () => RouteMeasurementOption[];
 }
 
 function isDesktopRuntime() {
-  return "__TAURI_INTERNALS__" in window;
+  return "__TAURI_INTERNALS__" in window && !/Android/i.test(navigator.userAgent);
 }
 
 function formatBytes(bytes: number) {
@@ -69,7 +120,32 @@ function parseUdpSummary(output?: string): UdpSummary | null {
   }
 }
 
-export function NetworkToolsDialog({ initialMode, defaultHost, onClose, showToast }: NetworkToolsDialogProps) {
+const selectionReasonLabels: Record<string, string> = {
+  "collecting-baseline": "正在收集基线",
+  "no-reliable-candidate": "暂无可靠路线",
+  "only-reliable-candidate": "唯一达到可靠性门槛",
+  "lowest-observed-score": "观测评分最低",
+  "retained-within-hysteresis": "差异小于 15%，保持当前推荐",
+  "probe-worker-failed": "测量任务异常终止",
+};
+
+function formatRouteDuration(value?: number) {
+  return typeof value === "number" ? `${value} ms` : "-";
+}
+
+function formatRouteError(error: unknown) {
+  if (error && typeof error === "object") {
+    const value = error as { code?: string; message?: string; candidateId?: string; hopIndex?: number };
+    if (value.message) {
+      const candidate = value.candidateId ? `${value.candidateId} · ` : "";
+      const hop = value.hopIndex ? `第 ${value.hopIndex} 跳 · ` : "";
+      return `${candidate}${hop}${value.message}${value.code ? ` (${value.code})` : ""}`;
+    }
+  }
+  return String(error);
+}
+
+export function NetworkToolsDialog({ initialMode, defaultHost, onClose, showToast, buildRouteMeasurementOptions }: NetworkToolsDialogProps) {
   const [mode, setMode] = useState<NetworkToolMode>(initialMode);
   const [traceHost, setTraceHost] = useState(defaultHost);
   const [maxHops, setMaxHops] = useState(30);
@@ -85,7 +161,45 @@ export function NetworkToolsDialog({ initialMode, defaultHost, onClose, showToas
   const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
   const [downloadResult, setDownloadResult] = useState<DownloadResult | null>(null);
   const [udpResult, setUdpResult] = useState<UdpResult | null>(null);
+  const [routeInterval, setRouteInterval] = useState(30);
+  const [routeWindow, setRouteWindow] = useState(5);
+  const [routeMaxRounds, setRouteMaxRounds] = useState(12);
+  const [routeBusy, setRouteBusy] = useState(false);
+  const [routeCampaignId, setRouteCampaignId] = useState<string | null>(null);
+  const [routeSnapshot, setRouteSnapshot] = useState<RouteMeasurementSnapshot | null>(null);
+  const [routeLabels, setRouteLabels] = useState<Record<string, string>>({});
+  const routeCampaignRef = useRef<string | null>(null);
+  const disposedRef = useRef(false);
   const udpSummary = useMemo(() => parseUdpSummary(udpResult?.stdout), [udpResult]);
+
+  useEffect(() => {
+    if (!routeCampaignId || routeSnapshot?.running === false) return;
+    let disposed = false;
+    async function refresh() {
+      try {
+        const snapshot = await invoke<RouteMeasurementSnapshot>("get_native_route_measurement_snapshot", {
+          request: { campaignId: routeCampaignId },
+        });
+        if (!disposed) setRouteSnapshot(snapshot);
+      } catch (error) {
+        if (!disposed) showToast(formatRouteError(error));
+      }
+    }
+    const timer = window.setInterval(() => void refresh(), 1000);
+    void refresh();
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [routeCampaignId, routeSnapshot?.running, showToast]);
+
+  useEffect(() => () => {
+    disposedRef.current = true;
+    const campaignId = routeCampaignRef.current;
+    if (campaignId && isDesktopRuntime()) {
+      void invoke("stop_native_route_measurement", { request: { campaignId } });
+    }
+  }, []);
 
   async function ensureDesktop() {
     if (isDesktopRuntime()) return true;
@@ -100,7 +214,7 @@ export function NetworkToolsDialog({ initialMode, defaultHost, onClose, showToas
     try {
       setTraceResult(await invoke<TraceResult>("trace_route", { request: { host: traceHost, maxHops } }));
     } catch (error) {
-      showToast(String(error));
+      showToast(formatRouteError(error));
     } finally {
       setBusy(false);
     }
@@ -148,12 +262,69 @@ export function NetworkToolsDialog({ initialMode, defaultHost, onClose, showToas
     showToast("iperf3 服务端命令已复制");
   }
 
+  async function startRouteMeasurement() {
+    if (!(await ensureDesktop())) return;
+    setRouteBusy(true);
+    try {
+      const options = buildRouteMeasurementOptions();
+      if (!options.length) throw new Error("当前主机没有可测量的原生路线");
+      const campaignId = crypto.randomUUID();
+      const snapshot = await invoke<RouteMeasurementSnapshot>("start_native_route_measurement", {
+        request: {
+          campaignId,
+          intervalSeconds: routeInterval,
+          windowSize: routeWindow,
+          maxRounds: routeMaxRounds,
+          candidates: options.map(({ candidateId, route }) => ({ candidateId, route })),
+        },
+      });
+      if (disposedRef.current) {
+        await invoke("stop_native_route_measurement", { request: { campaignId } }).catch(() => undefined);
+        return;
+      }
+      setRouteLabels(Object.fromEntries(options.map(({ candidateId, label }) => [candidateId, label])));
+      routeCampaignRef.current = campaignId;
+      setRouteCampaignId(campaignId);
+      setRouteSnapshot(snapshot);
+    } catch (error) {
+      showToast(formatRouteError(error));
+    } finally {
+      setRouteBusy(false);
+    }
+  }
+
+  async function stopRouteMeasurement(silent = false) {
+    const campaignId = routeCampaignRef.current;
+    if (!campaignId) return;
+    setRouteBusy(true);
+    try {
+      await invoke("stop_native_route_measurement", { request: { campaignId } });
+    } catch (error) {
+      if (!silent) showToast(formatRouteError(error));
+    } finally {
+      routeCampaignRef.current = null;
+      setRouteCampaignId(null);
+      setRouteSnapshot((current) => current ? { ...current, running: false, sampling: false } : null);
+      setRouteBusy(false);
+    }
+  }
+
+  async function closeDialog() {
+    await stopRouteMeasurement(true);
+    onClose();
+  }
+
+  const selectedRouteLabel = routeSnapshot?.selectedCandidateId
+    ? routeLabels[routeSnapshot.selectedCandidateId] ?? routeSnapshot.selectedCandidateId
+    : null;
+
   return (
-    <Dialog title="网络诊断" wide onClose={onClose} footer={<button className="secondary-button" type="button" onClick={onClose}>关闭</button>}>
+    <Dialog title="网络诊断" wide onClose={() => void closeDialog()} footer={<button className="secondary-button" type="button" onClick={() => void closeDialog()}>关闭</button>}>
       <div className="network-mode-picker" role="tablist" aria-label="诊断类型">
         <button className={mode === "trace" ? "active" : ""} type="button" onClick={() => setMode("trace")}><Route size={17} /><span>路由追踪</span></button>
         <button className={mode === "download" ? "active" : ""} type="button" onClick={() => setMode("download")}><ArrowDownToLine size={17} /><span>HTTP 下载</span></button>
         <button className={mode === "udp" ? "active" : ""} type="button" onClick={() => setMode("udp")}><ArrowLeftRight size={17} /><span>本机 ↔ VPS UDP</span></button>
+        <button className={mode === "route" ? "active" : ""} type="button" onClick={() => setMode("route")}><Waypoints size={17} /><span>路线评估</span></button>
       </div>
 
       {mode === "trace" ? (
@@ -207,6 +378,41 @@ export function NetworkToolsDialog({ initialMode, defaultHost, onClose, showToas
             </>
           ) : null}
         </form>
+      ) : null}
+
+      {mode === "route" ? (
+        <div className="network-tool-form route-measurement-panel">
+          <div className="form-grid route-measurement-controls">
+            <label className="field"><span>间隔 (秒)</span><input type="number" min="30" max="300" value={routeInterval} disabled={Boolean(routeCampaignId)} onChange={(event) => setRouteInterval(Number(event.target.value))} /></label>
+            <label className="field"><span>滚动窗口 (轮)</span><input type="number" min="3" max="20" value={routeWindow} disabled={Boolean(routeCampaignId)} onChange={(event) => { const value = Number(event.target.value); setRouteWindow(value); setRouteMaxRounds((current) => Math.max(current, value)); }} /></label>
+            <label className="field"><span>最多轮数</span><input type="number" min={routeWindow} max="120" value={routeMaxRounds} disabled={Boolean(routeCampaignId)} onChange={(event) => setRouteMaxRounds(Number(event.target.value))} /></label>
+            {routeCampaignId ? (
+              <button className="secondary-button network-run" type="button" disabled={routeBusy} onClick={() => void stopRouteMeasurement()}><Square size={14} /> 停止</button>
+            ) : (
+              <button className="primary-button network-run" type="button" disabled={routeBusy} onClick={() => void startRouteMeasurement()}>{routeBusy ? <RefreshCw className="spin" size={14} /> : <Play size={14} />} 开始</button>
+            )}
+          </div>
+          {routeSnapshot ? (
+            <>
+              <div className="route-measurement-summary" role="status">
+                <div><span>推荐</span><strong>{selectedRouteLabel ?? "等待基线"}</strong><small>{selectionReasonLabels[routeSnapshot.selectionReasonCode] ?? routeSnapshot.selectionReasonCode}</small></div>
+                <div><span>进度</span><strong>{routeSnapshot.completedRounds} / {routeSnapshot.maxRounds}</strong><small>{routeSnapshot.sampling ? "正在执行完整 SSH/SFTP probe" : routeSnapshot.running ? "等待下一轮" : "已停止"}</small></div>
+              </div>
+              <div className="route-measurement-table">
+                <div className="route-measurement-heading"><span>候选</span><span>成功率</span><span>中位数</span><span>P95</span><span>评分</span></div>
+                {routeSnapshot.candidates.map((candidate) => (
+                  <div className={`route-measurement-row ${candidate.candidateId === routeSnapshot.selectedCandidateId ? "selected" : ""}`} key={candidate.candidateId}>
+                    <span><strong>{routeLabels[candidate.candidateId] ?? candidate.candidateId}</strong><small>{candidate.status === "failed" ? `${candidate.lastErrorHopIndex ? `第 ${candidate.lastErrorHopIndex} 跳 · ` : ""}${candidate.lastErrorCode ?? "probe-failed"}` : `${candidate.successfulSamples}/${candidate.sampleCount} 就绪`}</small></span>
+                    <b>{candidate.sampleCount ? `${candidate.successRatePercent}%` : "-"}</b>
+                    <b>{formatRouteDuration(candidate.medianDurationMs)}</b>
+                    <b>{formatRouteDuration(candidate.p95DurationMs)}</b>
+                    <b>{formatRouteDuration(candidate.scoreMs)}</b>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </div>
       ) : null}
     </Dialog>
   );

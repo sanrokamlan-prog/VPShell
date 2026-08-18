@@ -3322,7 +3322,7 @@ button.sync-status {
 }
 
 .network-mode-picker {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .network-mode-picker button {
@@ -3373,6 +3373,103 @@ button.sync-status {
 
 .speed-result b {
   color: var(--green);
+}
+
+.route-measurement-panel {
+  min-height: 280px;
+}
+
+.route-measurement-controls {
+  align-items: end;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.route-measurement-summary {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.route-measurement-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 9px 10px;
+  background: #f7f8f5;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.route-measurement-summary span,
+.route-measurement-summary small {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.route-measurement-summary strong {
+  overflow: hidden;
+  color: var(--green);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-measurement-table {
+  margin-top: 10px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.route-measurement-heading,
+.route-measurement-row {
+  display: grid;
+  min-width: 590px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  grid-template-columns: minmax(170px, 1.6fr) repeat(4, minmax(70px, 0.7fr));
+}
+
+.route-measurement-heading {
+  color: var(--text-faint);
+  background: #f4f6f3;
+  border-bottom: 1px solid var(--border);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.route-measurement-row + .route-measurement-row {
+  border-top: 1px solid var(--border);
+}
+
+.route-measurement-row.selected {
+  background: var(--green-soft);
+}
+
+.route-measurement-row > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.route-measurement-row strong,
+.route-measurement-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-measurement-row strong,
+.route-measurement-row b {
+  font-size: 10px;
+}
+
+.route-measurement-row small {
+  color: var(--text-faint);
+  font-size: 8px;
 }
 
 .iperf-server-command {

@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            82,
+            85,
             "command manifest contains duplicates or changed count"
         );
 
@@ -172,6 +172,9 @@ mod tests {
             "allow-start-native-dynamic-forward",
             "allow-list-native-dynamic-forwards",
             "allow-stop-native-dynamic-forward",
+            "allow-start-native-route-measurement",
+            "allow-get-native-route-measurement-snapshot",
+            "allow-stop-native-route-measurement",
         ] {
             assert!(!android_permissions.contains(forbidden));
         }
@@ -295,6 +298,48 @@ mod tests {
         assert!(!android.contains("native-local-forward"));
         assert!(!android.contains("native-remote-forward"));
         assert!(!android.contains("native-dynamic-forward"));
+    }
+
+    #[test]
+    fn native_route_measurement_is_bounded_explainable_and_desktop_only() {
+        let measurement = include_str!("route_measurement.rs");
+        let native = include_str!("native_engine.rs");
+        let frontend = include_str!("../../src/components/NetworkToolsDialog.tsx");
+        let application = include_str!("../../src/App.tsx");
+        let desktop = include_str!("../capabilities/default.json");
+        let android = include_str!("../capabilities/android.json");
+
+        assert!(measurement.contains("MAX_CANDIDATES: usize = 4"));
+        assert!(measurement.contains("MIN_INTERVAL_SECONDS: u16 = 30"));
+        assert!(measurement.contains("MAX_ROUNDS: u16 = 120"));
+        assert!(measurement.contains("MIN_SUCCESS_RATE_PERCENT: u8 = 80"));
+        assert!(measurement.contains("SWITCH_HYSTERESIS_PERCENT: u64 = 15"));
+        assert!(measurement.contains("manager.is_current(campaign_id, generation)"));
+        assert!(native.contains("probe_once(validated)"));
+        assert!(native.contains("cancellation.cancelled()"));
+        assert!(frontend.contains("stop_native_route_measurement"));
+        assert!(application.contains("candidateId: \"direct\""));
+        assert!(application.contains("candidateId: \"configured-jump\""));
+        for command in [
+            "start-native-route-measurement",
+            "get-native-route-measurement-snapshot",
+            "stop-native-route-measurement",
+        ] {
+            assert!(desktop.contains(command));
+            assert!(!android.contains(command));
+        }
+        for forbidden in [
+            "pub host:",
+            "pub username:",
+            "pub credential_ref:",
+            "pub identity_file:",
+            "pub password:",
+            ".emit(",
+            "println!",
+            "eprintln!",
+        ] {
+            assert!(!measurement.contains(forbidden));
+        }
     }
 
     #[test]

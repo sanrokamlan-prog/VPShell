@@ -57,7 +57,7 @@ import { FileTransferPanel } from "./components/FileTransferPanel";
 import { HostOverview } from "./components/HostOverview";
 import { KeyManagerDialog } from "./components/KeyManagerDialog";
 import { MigrationDialog, type MigrationImportResult } from "./components/MigrationDialog";
-import { NetworkToolsDialog, type NetworkToolMode } from "./components/NetworkToolsDialog";
+import { NetworkToolsDialog, type NetworkToolMode, type RouteMeasurementOption } from "./components/NetworkToolsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TerminalView } from "./components/TerminalView";
@@ -442,6 +442,31 @@ function nativeRoute(
       };
     }),
   };
+}
+
+function buildRouteMeasurementOptions(
+  host: HostProfile,
+  hosts: HostProfile[],
+  sshKeys: SshKeyProfile[],
+): RouteMeasurementOption[] {
+  const directHost = { ...host, jumpRoute: [] };
+  const options: RouteMeasurementOption[] = [{
+    candidateId: "direct",
+    label: "直连",
+    route: nativeRoute(directHost, hosts, sshKeys),
+  }];
+  if (host.jumpRoute?.length) {
+    const jumpLabels = nativeRouteHosts(host, hosts)
+      .slice(0, -1)
+      .map((routeHost) => routeHost.name)
+      .join(" > ");
+    options.push({
+      candidateId: "configured-jump",
+      label: `跳板 · ${jumpLabels}`,
+      route: nativeRoute(host, hosts, sshKeys),
+    });
+  }
+  return options;
 }
 
 function scoreIntent(query: string, fields: string[]) {
@@ -2470,7 +2495,13 @@ function App() {
       ) : null}
 
       {dialog === "network" ? (
-        <NetworkToolsDialog initialMode={networkMode} defaultHost={activeHost.host} onClose={() => setDialog(null)} showToast={showToast} />
+        <NetworkToolsDialog
+          initialMode={networkMode}
+          defaultHost={activeHost.host}
+          onClose={() => setDialog(null)}
+          showToast={showToast}
+          buildRouteMeasurementOptions={() => buildRouteMeasurementOptions(activeHost, appState.hosts, appState.sshKeys)}
+        />
       ) : null}
 
       {dialog === "local-forward" ? (

@@ -71,13 +71,13 @@ pub(crate) struct NativeEngineProbeRequest {
     route: NativeRouteRequest,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct NativeRouteRequest {
+pub(crate) struct NativeRouteRequest {
     hops: Vec<NativeRouteHopRequest>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NativeRouteHopRequest {
     hop_id: String,
@@ -281,6 +281,18 @@ impl NativeEngineError {
 
     pub(crate) fn user_message(&self) -> &'static str {
         self.message
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub(crate) fn hop_index(&self) -> Option<u8> {
+        self.hop_index
     }
 }
 
@@ -537,6 +549,29 @@ impl NativeEngineManager {
         };
         drop(lease);
         outcome
+    }
+
+    pub(crate) async fn measure_route(
+        &self,
+        route: NativeRouteRequest,
+        cancellation: CancellationToken,
+    ) -> Result<(), NativeEngineError> {
+        let validated = validate_route(route)?;
+        let timeout = validated.operation_timeout();
+        let hop_index = validated.final_hop_index();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(NativeEngineError::cancelled()),
+            result = tokio::time::timeout(timeout, probe_once(validated)) => match result {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(NativeEngineError::new(
+                    "native-engine-timeout",
+                    "原生 SSH/SFTP 检查超时",
+                    true,
+                ).at_hop(hop_index)),
+            }
+        }
     }
 
     pub(crate) async fn start_terminal(
@@ -1607,6 +1642,12 @@ impl NativeEngineManager {
             )
         })
     }
+}
+
+pub(crate) fn validate_measurement_route(
+    route: NativeRouteRequest,
+) -> Result<(), NativeEngineError> {
+    validate_route(route).map(|_| ())
 }
 
 impl Drop for OperationLease {
@@ -4775,27 +4816,32 @@ mod tests {
             .expect_err("mismatched host key must fail before authentication");
         assert_eq!(mismatch.code, "native-engine-host-key-mismatch");
         assert_eq!(mismatch.hop_index, Some(1));
+        let route = NativeRouteRequest {
+            hops: vec![NativeRouteHopRequest {
+                hop_id: Uuid::new_v4().to_string(),
+                host,
+                port,
+                username,
+                host_key_sha256: fingerprint,
+                timeout_seconds: 15,
+                credential_ref: None,
+                identity_file: Some(identity_file),
+                identity_passphrase_ref: None,
+            }],
+        };
         let result = manager
             .probe(NativeEngineProbeRequest {
                 operation_id: Uuid::new_v4().to_string(),
-                route: NativeRouteRequest {
-                    hops: vec![NativeRouteHopRequest {
-                        hop_id: Uuid::new_v4().to_string(),
-                        host,
-                        port,
-                        username,
-                        host_key_sha256: fingerprint,
-                        timeout_seconds: 15,
-                        credential_ref: None,
-                        identity_file: Some(identity_file),
-                        identity_passphrase_ref: None,
-                    }],
-                },
+                route: route.clone(),
             })
             .await
             .expect("real OpenSSH/SFTP probe");
         assert!(result.ssh_ready);
         assert!(result.sftp_ready);
+        manager
+            .measure_route(route, CancellationToken::new())
+            .await
+            .expect("real route measurement probe");
         assert!(manager.lock_operations().unwrap().is_empty());
     }
 

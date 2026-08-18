@@ -153,6 +153,9 @@
 - 自建 Relay 源码测试必须使用真实回环 TCP 完成 challenge/HMAC 双向 proof、opaque SSH-like 字节往返、错误 token、目标篡改/拒绝、challenge 重放、全局/单 IP/认证速率、字节/空闲/总时长/取消、audit fail-closed 和 token/audit 私有文件边界；command manifest、desktop/Android capability 与 WebView 状态中不得出现 Relay token 或启动入口。
 - 外部验收只在自有非生产节点执行：Relay firewall 仅开放预期入口，allowlist 仅包含测试 SSH 目标；客户端仍须显示并验证最终 SSH host-key。分别测试错误 token、错误目标、断网、慢连接、限流、审计磁盘不可写和进程重启，确认没有开放代理、无凭据/SSH bytes/原始 IP/hostname 进入 JSONL。协议 v1 控制面不加密；未配置独立 ACL 或经审计 TLS/VPN 时不得把目标元数据称为保密。
 - 至少两地区节点、长时间丢包/重连、日志轮换、token 轮换/撤销和升级/回退尚未完成前，不宣称自动选路、线路加速或生产 Relay 服务。
+- 路线评估请求必须拒绝非 canonical campaign UUID、空/超过 4 个候选、重复/非法 candidate ID、30 秒以下或 300 秒以上间隔、窗口/总轮数越界、未知字段和 hop 内明文 `password`。Android capability 必须排除 start/get/stop 三项命令。
+- 为同一测试目标配置可直连且可经跳板到达的两条 route；至少完成 3 轮，确认每轮都实际通过各自 host-key/pin 和认证并完成最终 SFTP readiness。错误 pin 应只返回对应候选与 `hopIndex` 的稳定错误码；快照不得包含 host、用户名、credentialRef、私钥路径或底层错误文本。
+- 人为使一条路线失败，确认成功率低于 80% 后不会被推荐；构造小于 15% 的评分波动，确认保持原建议并显示滞后原因。停止和关闭对话框均应取消在途连接且不再增加样本。该页面不得自动修改主机跳板配置，也不得显示 UDP 丢包、吞吐或“加速”结论。
 
 ### J. v0.2 工作区恢复验收（仅源码构建）
 

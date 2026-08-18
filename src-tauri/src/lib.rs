@@ -37,6 +37,8 @@ mod network_tools;
 pub mod relay;
 mod remote_file_ops;
 mod remote_monitor;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod route_measurement;
 mod safe_broadcast;
 mod security_regression;
 mod shell_integration;
@@ -441,6 +443,56 @@ fn cancel_native_engine_operation(
     operation_id: String,
 ) -> Result<(), native_engine::NativeEngineError> {
     manager.cancel(&operation_id)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+async fn start_native_route_measurement(
+    native: State<'_, native_engine::NativeEngineManager>,
+    measurements: State<'_, route_measurement::RouteMeasurementManager>,
+    request: route_measurement::RouteMeasurementStartRequest,
+) -> Result<route_measurement::RouteMeasurementSnapshot, route_measurement::RouteMeasurementError> {
+    measurements.start(native.inner().clone(), request)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn start_native_route_measurement(
+    _request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    Err("路线测量在移动端预览中不可用".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+fn get_native_route_measurement_snapshot(
+    measurements: State<'_, route_measurement::RouteMeasurementManager>,
+    request: route_measurement::RouteMeasurementCampaignRequest,
+) -> Result<route_measurement::RouteMeasurementSnapshot, route_measurement::RouteMeasurementError> {
+    measurements.get(request)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn get_native_route_measurement_snapshot(
+    _request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    Err("路线测量在移动端预览中不可用".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+fn stop_native_route_measurement(
+    measurements: State<'_, route_measurement::RouteMeasurementManager>,
+    request: route_measurement::RouteMeasurementCampaignRequest,
+) -> Result<(), route_measurement::RouteMeasurementError> {
+    measurements.stop(request)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn stop_native_route_measurement(_request: serde_json::Value) -> Result<(), String> {
+    Err("路线测量在移动端预览中不可用".to_string())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -1372,7 +1424,10 @@ pub fn run() {
         .manage(migration::MigrationManager::default())
         .setup(|app| {
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-            app.manage(native_engine::NativeEngineManager::default());
+            {
+                app.manage(native_engine::NativeEngineManager::default());
+                app.manage(route_measurement::RouteMeasurementManager::default());
+            }
             #[cfg(target_os = "android")]
             {
                 initialize_android_keyring()?;
@@ -1428,6 +1483,9 @@ pub fn run() {
             start_native_dynamic_forward,
             list_native_dynamic_forwards,
             stop_native_dynamic_forward,
+            start_native_route_measurement,
+            get_native_route_measurement_snapshot,
+            stop_native_route_measurement,
             start_ssh_session,
             write_terminal,
             enable_shell_integration,
