@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            85,
+            86,
             "command manifest contains duplicates or changed count"
         );
 
