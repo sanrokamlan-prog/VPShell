@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            95,
+            97,
             "command manifest contains duplicates or changed count"
         );
 
@@ -164,6 +164,8 @@ mod tests {
             "allow-configure-local-folder-sync",
             "allow-configure-webdav-sync",
             "allow-store-webdav-credential",
+            "allow-install-webdav-ca",
+            "allow-delete-webdav-ca",
             "allow-run-sync-once",
             "allow-resolve-sync-conflict",
             "allow-cancel-sync",
@@ -230,6 +232,7 @@ mod tests {
     fn desktop_sync_entry_keeps_secrets_in_rust_and_android_read_only() {
         let coordinator = include_str!("sync_coordinator.rs");
         let provider_credentials = include_str!("sync_provider_credentials.rs");
+        let provider_ca = include_str!("sync_provider_ca.rs");
         assert!(coordinator.contains("pub(crate) struct ConfigureLocalFolderSyncRequest"));
         assert!(coordinator.contains("pub(crate) struct ConfigureWebDavSyncRequest"));
         assert!(coordinator.contains("let password = Zeroizing::new(request.password)"));
@@ -240,6 +243,7 @@ mod tests {
         for forbidden in ["println!", "eprintln!", "log::", "tracing::"] {
             assert!(!coordinator.contains(forbidden));
             assert!(!provider_credentials.contains(forbidden));
+            assert!(!provider_ca.contains(forbidden));
         }
 
         let frontend = include_str!("../../src/App.tsx");
@@ -249,6 +253,8 @@ mod tests {
             "configure_local_folder_sync",
             "configure_webdav_sync",
             "store_webdav_credential",
+            "install_webdav_ca",
+            "delete_webdav_ca",
             "run_sync_once",
             "resolve_sync_conflict",
             "cancel_sync",
@@ -260,6 +266,7 @@ mod tests {
         assert!(frontend.contains("Android Preview 中禁用"));
         let types = include_str!("../../src/types.ts");
         assert!(types.contains("providerCredentialRef?: string"));
+        assert!(types.contains("providerCaRef?: string"));
         assert!(!types.contains("providerPassword"));
     }
 

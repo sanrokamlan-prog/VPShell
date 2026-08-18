@@ -115,10 +115,11 @@
 | 完成 | 桌面持久冲突中心：有界分页/预览、revision 防陈旧、Rust-owned 候选解决、加密 outbox 原子入队和 AppState 重投影已实现；PR #1 run `32179217707`（`c717a2e`）全平台 Actions 全绿 |
 | 完成 | onboarding 完成状态作为第三个固定布尔设置实体接入保存、恢复、加密 operation、远端投影与防回声；PR #1 run `32183041743`（`718f96e`）全平台 Actions 全绿 |
 | 完成 | 默认监控采样频率作为第四个固定整数设置实体接入 AppState、会话控制、加密 operation、远端投影与防回声；PR #1 run `32184979352`（`44c5f65`）全平台 Actions 全绿 |
-| 进行中 | 桌面标准 HTTPS WebDAV 产品入口、Rust 系统凭据引用、共享 bootstrap/协调器和自动调度接线；自签 CA 与真实服务矩阵不冒充完成 |
+| 完成 | 桌面标准 HTTPS WebDAV 产品入口、Rust 系统凭据引用、共享 bootstrap/协调器和自动调度接线；PR #1 run `32187922267`（`3e04035`）全平台 Actions 全绿 |
+| 进行中 | 桌面 WebDAV 显式 PEM CA：Rust-owned 私有导入/引用/重读、失败清理和 Android 禁权；真实服务矩阵不冒充完成 |
 | 待实现 | 历史/背景/其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口、主机公开字段、安全自建脚本、四个固定设置实体、桌面持久冲突中心及自动调度均已通过 Actions；标准 HTTPS WebDAV 产品入口正在验证，历史/背景/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/标准 HTTPS WebDAV 产品入口、主机公开字段、安全自建脚本、四个固定设置实体、桌面持久冲突中心及自动调度均已通过 Actions；WebDAV 显式 PEM CA 正在实现，历史/背景/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -260,7 +261,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 桌面 WebDAV 产品入口本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 四份严格 JSON、95-command manifest 唯一项/handler/capability 并集完整对齐、WebDAV 配置与凭据命令只在 desktop capability 且 Android 运行 Sync 继续 disabled、HTTPS/用户名-引用成对/随机 UUID 引用/1–1024 字节密码/AppState 引用本机-only changefeed 的聚焦测试与静态链路、失败新引用清理、共享 bootstrap/调度接线、无新增日志宏、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区起止均为 52%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、SDK 或依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | B9 桌面 WebDAV 产品入口首轮 Actions 与格式修复 | 提交 `a0c0536` 的 PR #1 run `32187151130` 已全部进入终态：frontend 生产构建与 Android aarch64 debug APK/Gradle gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel/arm 都只在首个 `cargo fmt --check` 报告 `sync_coordinator.rs` 两处与 `sync_provider.rs` 一处相同排版差异后失败，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按四个平台一致的 runner diff 机械应用导入、错误返回与结构体构造格式，不改变行为；等待格式修复提交后的完整矩阵。 |
 | 2026-08-18 | B9 桌面 WebDAV 产品入口格式修复本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 四份严格 JSON、95-command manifest 唯一项/handler/capability 并集完整对齐、WebDAV 配置与凭据命令仅桌面授权且 Android 运行 Sync 继续禁权、四个平台 runner 报告的三处精确格式形态、无 `.codex-roadmap-complete`/`.codex-*` 交接残留/`node_modules`/`target` 检查通过；根分区由起始 52% 到交接前 53%，仍低于 65%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、前端依赖、SDK 或大型构建环境；完整四平台 locked fmt/check/test、Linux 真实 fixture、frontend 与 Android 构建交给格式修复提交的 PR #1 Actions。 |
+| 2026-08-18 | B9 桌面标准 HTTPS WebDAV 产品入口（Actions 完成） | 格式修复提交 `3e04035` 的 PR #1 run `32187922267` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 桌面 WebDAV 显式 PEM CA（待 Actions） | 新增 Rust-owned `SyncProviderCaManager`：只接受用户显式选择的 1–4096 字节绝对路径，拒绝控制字符、符号链接/特殊文件、空或超过 64 KiB、不可解析 PEM 及夹带 `PRIVATE KEY` 的文件；以 `sync-webdav-ca-<UUID>` 随机引用写入应用私有目录，Unix 目录/文件分别固定 `0700`/`0600`，读取和删除再次验证引用、文件类型、大小与 PEM。WebView 仅临时持有选择路径并显示文件名，AppState 只保存严格 CA 引用且不会生成 changefeed；配置 worker 由引用重读 PEM，协调器要求引用/受管证书成对并交给固定 30 秒、无重定向的 HTTPS provider。配置失败删除本次新 CA；用户可显式改回系统 CA。为避免 AppState 异步保存失败导致已用信任配置不可恢复，被替换的旧受管 CA 暂不自动删除，后续与旧 keyring 引用一并提供可确认清理。`install_webdav_ca`/`delete_webdav_ca` 仅进入 desktop capability，Android 继续只读且运行 Sync 禁权。聚焦测试覆盖随机引用、导入/重读/删除、非字符串 AppState、路径/大小/PEM/私钥/符号链接、受管文件替换、Unix 权限、引用与字节不匹配、provider 自签 CA 构造；Linux Actions 运行时生成一次性 CA/服务器私钥并启动本机 OpenSSL HTTPS，验证系统 CA 拒绝而显式 CA 完成真实 TLS GET，私钥只留在 `$RUNNER_TEMP` 且不输出。真实 WebDAV 服务、代理、断网和多设备仍为外部矩阵。 |
+| 2026-08-18 | B9 桌面 WebDAV 显式 PEM CA 本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 四份严格 JSON、97-command manifest 唯一项/handler/capability 并集完整对齐、CA 安装/删除/配置仅桌面授权且 Android 运行 Sync 继续禁权、测试 PEM 的 OpenSSL 解析与有效期、Linux TLS fixture `bash -n`、三项 CA manager 测试及 provider/coordinator/AppStore/security 聚焦断言静态清单、失败清理与系统 CA 切换链路、无日志宏/路径错误回显、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区起止均为 52%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、前端依赖、SDK 或大型构建环境；frontend、四平台 locked fmt/check/test、Linux 真实临时 CA TLS fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送桌面 WebDAV 产品入口的 rustfmt 修复；下一轮等待该修复提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后继续评估显式自签 CA 或历史/背景/其他尚未建模设置中的下一个可安全落地项，不以缺少删除语义的 append-only 历史合并冒充完整历史同步，也不在缺少分块/安全安装时宣称背景同步完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/断网/多设备矩阵均如实保留为后续/外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送桌面 WebDAV 显式 PEM CA；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后从历史/背景/其他尚未建模设置中选择下一个可形成安全闭环的业务域，不以缺少删除语义的 append-only 历史合并冒充完整历史同步，也不在缺少分块/安全安装时宣称背景同步完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

@@ -25,6 +25,8 @@ resize_terminal
 stop_terminal
 delete_credential
 store_webdav_credential
+install_webdav_ca
+delete_webdav_ca
 import_finalshell
 initialize_app_store
 save_app_state

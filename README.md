@@ -18,7 +18,7 @@
 ![VPShell 工作台](docs/assets/workspace.png)
 
 > [!IMPORTANT]
-> `v0.1.0-alpha.9` 是 Windows-first 技术预览版。本版包含跨重启传输恢复、远程文件操作、Linux 监控、Shell Integration、配置迁移和同步协议核心预览；Android 仅为独立预览工程。当前源码工作区已加入原生跳板、回环限定的本地/远端/SOCKS5 CONNECT 转发、原生 route 滚动评估、自建 Relay 参考服务与部署/轮换基线；桌面 Local Folder vault 已有显式初始化/解锁、手动单周期和解锁期间的 Rust 自动调度。真实部署、完整端到端同步和 Android 真机验收尚未完成。当前版本不应作为生产密码或私钥管理器。
+> `v0.1.0-alpha.9` 是 Windows-first 技术预览版。本版包含跨重启传输恢复、远程文件操作、Linux 监控、Shell Integration、配置迁移和同步协议核心预览；Android 仅为独立预览工程。当前源码工作区已加入原生跳板、回环限定的本地/远端/SOCKS5 CONNECT 转发、原生 route 滚动评估、自建 Relay 参考服务与部署/轮换基线；桌面 Local Folder 与 HTTPS WebDAV vault 已有显式初始化/解锁、手动单周期和解锁期间的 Rust 自动调度，WebDAV 可选择由 Rust 导入的本机 PEM CA。真实部署、完整端到端同步和 Android 真机验收尚未完成。当前版本不应作为生产密码或私钥管理器。
 
 ## 参与 Alpha 测试
 
@@ -275,7 +275,7 @@ Alpha 发布后的重点验证：
 - 设备 registry 最多 32 台，只记录公开签名键和非敏感标签；撤销单调、最后活动设备不可撤销、已撤销设备不能发布 registry。撤销不能抹除已复制的 VMK，疑似泄露时仍必须轮换主密钥并全量重加密；设备 operation 签名、registry 验证和管理 UI 尚未接线；
 - 独立凭据 vault 策略默认关闭，需活动设备显式启用并逐设备授权；CVK 与业务 VMK 分离，使用 `credentials` keyslot/AAD/HKDF 域。SSH 密码、私钥口令、OpenSSH 私钥和 access token 只进入 Rust 内存中的清零载荷与认证密文，本机 credential reference 不进入对象、错误、日志或事件；系统钥匙串写回、CVK 恢复/轮换和 UI 尚未接线；
 - SFTP、S3-compatible 与自建 Gateway 已通过专用 Rust transport trait 接入同一不可变 provider：严格配置、分页/key/大小、取消、条件创建、同名核对和提交后回读由公共适配层强制。SFTP 配置必须固定 host-key SHA-256，S3/Gateway endpoint 必须 HTTPS；Gateway 密码/TOTP 只传入一次登录调用，provider 会话不保存 TOTP。真实 SFTP 会话、S3 SigV4、Gateway HTTP 客户端与外部兼容矩阵仍未接线；
-- AppState 主机公开字段、安全自建脚本、四个固定设置实体已接入 operation/outbox 事务入队与合并结果回写；桌面解锁期间的启动/变更防抖/周期/失败复查调度及持久冲突解决 UI 已接线；WebDAV 标准 HTTPS/basic-auth 产品入口复用同一协调器，provider 密码使用本机随机引用存入系统凭据管理器且不进入同步包；编辑器路径、自定义字体资产/名称、历史、背景、扩展 provider、WebDAV 自签 CA 产品入口和真实多设备矩阵仍待实现；
+- AppState 主机公开字段、安全自建脚本、四个固定设置实体已接入 operation/outbox 事务入队与合并结果回写；桌面解锁期间的启动/变更防抖/周期/失败复查调度及持久冲突解决 UI 已接线；WebDAV HTTPS/basic-auth 产品入口复用同一协调器，provider 密码使用本机随机引用存入系统凭据管理器，自签 PEM CA 由 Rust 复制到应用私有目录并以本机随机引用加载，两者都不进入同步包；编辑器路径、自定义字体资产/名称、历史、背景、扩展 provider 和真实多设备矩阵仍待实现；
 - TOTP 只保护 Gateway 登录，不替代二级同步密码、恢复密钥或 E2EE 数据密钥。
 
 ### Android Preview - 移动端

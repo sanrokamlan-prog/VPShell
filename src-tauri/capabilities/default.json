@@ -52,6 +52,8 @@
     "allow-stop-terminal",
     "allow-delete-credential",
     "allow-store-webdav-credential",
+    "allow-install-webdav-ca",
+    "allow-delete-webdav-ca",
     "allow-import-finalshell",
     "allow-initialize-app-store",
     "allow-save-app-state",

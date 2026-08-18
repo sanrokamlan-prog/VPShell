@@ -2,7 +2,7 @@
 
 当前实现补充：`onboardingCompleted` 与默认监控采样频率已分别作为第三、第四个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；前者仅含一个布尔字段，后者仅含一个 5–300 秒整数。引导内容、运行中监控状态及设备本地数据仍不入同步包。
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 与标准 HTTPS WebDAV 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；WebDAV basic-auth 密码只保存到系统凭据管理器，前端持久状态/AppState 只保留随机引用。AppState 主机公开字段、安全自建脚本和四个固定设置实体已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。桌面冲突中心以分页有界预览展示持久冲突，前端只回传 snapshot revision、conflict ID 和候选索引；Rust 从持久候选构造、加密并原子入队 resolution operation，再重投影 AppState。主机 credential/key/path/trust pin，provider 凭据，脚本描述、分类和未通过秘密扫描的内容，自定义字体资产/名称，以及设备本地编辑器路径不进入 operation，远端投影也不会替换这些本机数据。历史、背景、其他尚未建模设置、WebDAV 自签 CA/扩展 provider 产品入口、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 与 HTTPS WebDAV 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；WebDAV basic-auth 密码只保存到系统凭据管理器，前端持久状态/AppState 只保留随机引用。显式 PEM CA 由 Rust 限量导入应用私有目录，AppState 同样只保存本机随机引用，源路径和证书内容不持久化或同步。AppState 主机公开字段、安全自建脚本和四个固定设置实体已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。桌面冲突中心以分页有界预览展示持久冲突，前端只回传 snapshot revision、conflict ID 和候选索引；Rust 从持久候选构造、加密并原子入队 resolution operation，再重投影 AppState。主机 credential/key/path/trust pin，provider 凭据，脚本描述、分类和未通过秘密扫描的内容，自定义字体资产/名称，以及设备本地编辑器路径不进入 operation，远端投影也不会替换这些本机数据。历史、背景、其他尚未建模设置、扩展 provider 产品入口、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
 
 ### 当前 v1 密码学边界
 
@@ -53,7 +53,7 @@ TLS 仍然必须启用，但 TLS 只保护传输链路，不能替代客户端�
 | 能力 | v0.1.0 | 目标 |
 | --- | --- | --- |
 | 本地业务存储 | WebView `localStorage` 明文 JSON（legacy） | Rust 管理的 SQLite schema v1 快照 + 有界事件域；同步前再做 E2EE 对象化 |
-| Provider | 桌面 Local Folder 已接入；WebDAV 与扩展 provider 仍只有内部接口/adapter | 可由用户配置、解锁和自动调度的 provider |
+| Provider | 桌面 Local Folder 与 HTTPS WebDAV 已接入；扩展 provider 仍只有内部接口/adapter | 可由用户配置、解锁和自动调度的 provider |
 | 二级密码 | Local Folder bootstrap 已用 Argon2id keyslot 包裹随机 VMK，密码不持久化；轮换/恢复 UI 未接线 | Argon2id 派生 KEK，包裹随机 Vault Master Key |
 | 同步动作 | 桌面可显式运行单周期，并在解锁期间由 Rust 执行启动/业务变化防抖/周期/失败复查；Android 只读状态可见；主机公开字段、安全自建脚本、终端字体族/字号/行高及两个应用行为偏好已接入本地入队与远端事务投影 | 补齐其他业务域、系统网络事件直连触发与完整冲突处理；应用关闭后不伪装为后台服务 |
 | 冲突 | 无 | 事件并集、字段级 LWW、tombstone、冲突中心 |
@@ -119,7 +119,7 @@ put(key, byte stream) -> idempotent result
 
 当前 `sync_provider.rs` 实现上述最小接口但不暴露 Tauri IPC。key 最多 512 bytes/16 层，只接受 ASCII 字母数字、点、下划线和连字符分段，禁止绝对路径、空段、`.`/`..`、反斜杠、控制字符和保留暂存名；对象为 1 byte 至 24 MiB，列表页最多 1,000 项且一次扫描/响应最多 10,000 个对象。所有长读取按 64 KiB 检查取消。
 
-Local Folder 要求现有非符号链接目录，逐级拒绝符号链接/特殊文件，写入同目录随机暂存文件并 `fsync`，再用原子 hard-link 无覆盖提交及回读校验；不支持该原语的文件系统会明确失败，而不会退化为可能覆盖的 rename。崩溃暂存名不进入对象列表。WebDAV endpoint 必须是无 URL 凭据、query、fragment 的 HTTPS URL，禁止重定向，可显式增加最多 64 KiB 的 PEM CA；连接/总请求受 5–60 秒配置上限约束。它使用 MKCOL/PROPFIND/GET/带 `If-None-Match: *` 的 PUT，XML 响应最多 4 MiB，以 `quick-xml` 解析并拒绝 DTD、越界 href 和跨 origin/base 路径；成功或 412 后都回读逐字节核对。上传体与响应流可取消，但阻塞在 TLS/响应头期间最多等待配置超时。对象一旦原子链接或 PUT 成功，迟到取消不能把已提交工作误报成未提交。
+Local Folder 要求现有非符号链接目录，逐级拒绝符号链接/特殊文件，写入同目录随机暂存文件并 `fsync`，再用原子 hard-link 无覆盖提交及回读校验；不支持该原语的文件系统会明确失败，而不会退化为可能覆盖的 rename。崩溃暂存名不进入对象列表。WebDAV endpoint 必须是无 URL 凭据、query、fragment 的 HTTPS URL，禁止重定向，可显式增加最多 64 KiB 的 PEM CA；连接/总请求受 5–60 秒配置上限约束。桌面入口把用户选择的绝对普通文件交给 Rust，拒绝符号链接、空文件、超限和不可解析 PEM，再以 `sync-webdav-ca-<UUID>` 复制到应用私有目录；AppState 只保存引用，配置 worker 每次重读并重新验证。它使用 MKCOL/PROPFIND/GET/带 `If-None-Match: *` 的 PUT，XML 响应最多 4 MiB，以 `quick-xml` 解析并拒绝 DTD、越界 href 和跨 origin/base 路径；成功或 412 后都回读逐字节核对。上传体与响应流可取消，但阻塞在 TLS/响应头期间最多等待配置超时。对象一旦原子链接或 PUT 成功，迟到取消不能把已提交工作误报成未提交。
 
 | Provider | 首次范围 | 说明 |
 | --- | --- | --- |
@@ -391,7 +391,7 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：桌面 Local Folder 和标准 HTTPS WebDAV 已接通初始化/解锁、主机公开字段、安全自建脚本、四个固定设置实体的双向事务交接、持久冲突解决，以及手动与解锁期自动单周期；WebDAV 密码通过随机引用存入系统凭据管理器。仍需历史/背景/其他尚未建模设置业务域入队、显式自签 CA、真实外部服务器兼容矩阵及断网退避测试。
+3. **MVP provider**：桌面 Local Folder 和 HTTPS WebDAV 已接通初始化/解锁、主机公开字段、安全自建脚本、四个固定设置实体的双向事务交接、持久冲突解决，以及手动与解锁期自动单周期；WebDAV 密码通过随机引用存入系统凭据管理器，显式 PEM CA 通过独立本机引用交给 Rust TLS 客户端。仍需历史/背景/其他尚未建模设置业务域入队、真实外部服务器兼容矩阵及断网退避测试。
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心、分页详情和 Rust-owned 候选解决 operation 已接入协调器事务；仍需多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
 6. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。

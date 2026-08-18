@@ -153,6 +153,51 @@ jobs:
           echo "VPSHELL_NATIVE_TEST_JUMP_USER=vpshell-jump-ci" >> "$GITHUB_ENV"
           echo "VPSHELL_NATIVE_TEST_JUMP_IDENTITY_FILE=$JUMP_KEY" >> "$GITHUB_ENV"
           echo "VPSHELL_NATIVE_TEST_JUMP_HOST_KEY_SHA256=$JUMP_HOST_KEY_SHA256" >> "$GITHUB_ENV"
+      - name: Set up ephemeral WebDAV custom-CA TLS fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TLS_DIR="$RUNNER_TEMP/vpshell-webdav-tls"
+          install -d -m 700 "$TLS_DIR"
+          openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
+            -subj '/CN=VPShell CI CA' \
+            -keyout "$TLS_DIR/ca.key" \
+            -out "$TLS_DIR/ca.pem" >/dev/null 2>&1
+          openssl req -newkey rsa:2048 -sha256 -nodes \
+            -subj '/CN=127.0.0.1' \
+            -addext 'subjectAltName=IP:127.0.0.1' \
+            -keyout "$TLS_DIR/server.key" \
+            -out "$TLS_DIR/server.csr" >/dev/null 2>&1
+          openssl x509 -req -sha256 -days 1 \
+            -in "$TLS_DIR/server.csr" \
+            -CA "$TLS_DIR/ca.pem" \
+            -CAkey "$TLS_DIR/ca.key" \
+            -CAcreateserial \
+            -copy_extensions copy \
+            -out "$TLS_DIR/server.pem" >/dev/null 2>&1
+          chmod 600 "$TLS_DIR/ca.key" "$TLS_DIR/server.key"
+          nohup openssl s_server \
+            -accept 127.0.0.1:24443 \
+            -cert "$TLS_DIR/server.pem" \
+            -key "$TLS_DIR/server.key" \
+            -www \
+            -quiet >"$RUNNER_TEMP/vpshell-webdav-tls.log" 2>&1 &
+          echo "$!" > "$TLS_DIR/server.pid"
+          for attempt in {1..20}; do
+            if openssl s_client \
+              -connect 127.0.0.1:24443 \
+              -CAfile "$TLS_DIR/ca.pem" \
+              -verify_return_error </dev/null >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "VPSHELL_WEBDAV_CA_TEST_ENDPOINT=https://127.0.0.1:24443/" >> "$GITHUB_ENV"
+          echo "VPSHELL_WEBDAV_CA_TEST_PEM=$TLS_DIR/ca.pem" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

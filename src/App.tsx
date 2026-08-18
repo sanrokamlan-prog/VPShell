@@ -601,6 +601,9 @@ function App() {
   const [broadcastExecuting, setBroadcastExecuting] = useState(false);
   const [syncPassword, setSyncPassword] = useState("");
   const [webDavPassword, setWebDavPassword] = useState("");
+  const [webDavCaPath, setWebDavCaPath] = useState("");
+  const [webDavCaLabel, setWebDavCaLabel] = useState("");
+  const [webDavUseSystemCa, setWebDavUseSystemCa] = useState(false);
   const [syncSetupMode, setSyncSetupMode] = useState<"unlock" | "initialize">("unlock");
   const [desktopSyncStatus, setDesktopSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
   const [desktopSyncError, setDesktopSyncError] = useState<string | null>(null);
@@ -2056,6 +2059,25 @@ function App() {
     }
   }
 
+  async function chooseWebDavCa() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        title: "选择 WebDAV CA 证书",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "PEM 证书", extensions: ["pem", "crt"] }],
+      });
+      if (typeof selected !== "string") return;
+      const parts = selected.split(/[\\/]/);
+      setWebDavCaPath(selected);
+      setWebDavCaLabel(parts[parts.length - 1] || "已选择证书");
+      setWebDavUseSystemCa(false);
+    } catch (error) {
+      showToast(`选择 WebDAV CA 失败：${String(error)}`);
+    }
+  }
+
   async function applyRemoteWallpaper() {
     try {
       const asset = await invoke<RenderAsset>("install_wallpaper_asset", {
@@ -2120,6 +2142,7 @@ function App() {
     }
     setDesktopSyncBusy(true);
     let createdCredentialRef: string | undefined;
+    let createdCaRef: string | undefined;
     try {
       const provider = appState.sync.provider;
       const username = appState.sync.username.trim();
@@ -2131,8 +2154,16 @@ function App() {
           request: { password: webDavPassword },
         });
       }
+      if (provider === "webdav" && webDavCaPath) {
+        createdCaRef = await invoke<string>("install_webdav_ca", {
+          request: { path: webDavCaPath },
+        });
+      }
       const providerCredentialRef = provider === "webdav" && username
         ? createdCredentialRef ?? appState.sync.providerCredentialRef
+        : undefined;
+      const providerCaRef = provider === "webdav"
+        ? createdCaRef ?? (webDavUseSystemCa ? undefined : appState.sync.providerCaRef)
         : undefined;
       if (provider === "webdav" && Boolean(username) !== Boolean(providerCredentialRef)) {
         throw new Error("WebDAV 用户名需要对应的已保存密码");
@@ -2150,6 +2181,7 @@ function App() {
             endpoint: appState.sync.endpoint.trim(),
             username,
             providerCredentialRef,
+            providerCaRef,
             password: syncPassword,
             mode: syncSetupMode,
           },
@@ -2166,15 +2198,23 @@ function App() {
           providerCredentialRef: provider === "webdav"
             ? providerCredentialRef ?? current.sync.providerCredentialRef
             : current.sync.providerCredentialRef,
+          providerCaRef: provider === "webdav" ? providerCaRef : current.sync.providerCaRef,
         },
       }));
       createdCredentialRef = undefined;
+      createdCaRef = undefined;
       setSyncPassword("");
       setWebDavPassword("");
+      setWebDavCaPath("");
+      setWebDavCaLabel("");
+      setWebDavUseSystemCa(false);
       showToast(syncSetupMode === "initialize" ? "同步 vault 已初始化并解锁" : "同步 vault 已解锁");
     } catch (error) {
       if (createdCredentialRef) {
         await invoke("delete_credential", { reference: createdCredentialRef }).catch(() => undefined);
+      }
+      if (createdCaRef) {
+        await invoke("delete_webdav_ca", { reference: createdCaRef }).catch(() => undefined);
       }
       const message = invokeErrorMessage(error);
       setDesktopSyncError(message);
@@ -2269,6 +2309,9 @@ function App() {
       setSyncConflictOffset(0);
       setSyncPassword("");
       setWebDavPassword("");
+      setWebDavCaPath("");
+      setWebDavCaLabel("");
+      setWebDavUseSystemCa(false);
       setAppState((current) => ({
         ...current,
         sync: { ...current.sync, enabled: false },
@@ -3166,6 +3209,7 @@ function App() {
             {appState.sync.provider === "webdav" ? <>
               <label className="field"><span>WebDAV 用户名</span><input maxLength={256} value={appState.sync.username} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, username: event.target.value } }))} autoComplete="username" placeholder="可留空使用无认证存储" /></label>
               <label className="field"><span>WebDAV 密码</span><input type="password" maxLength={1024} value={webDavPassword} onChange={(event) => setWebDavPassword(event.target.value)} autoComplete="current-password" placeholder={appState.sync.providerCredentialRef ? "留空使用系统已保存密码" : "仅保存到系统凭据管理器"} /></label>
+              <label className="field span-2"><span>TLS 信任根</span><div className="path-picker"><input readOnly value={webDavCaLabel || (!webDavUseSystemCa && appState.sync.providerCaRef ? "已保存自定义 CA" : "系统 CA")} /><button className="secondary-button" type="button" onClick={() => void chooseWebDavCa()}><Upload size={14} /> 选择 PEM</button>{(webDavCaPath || appState.sync.providerCaRef) && !webDavUseSystemCa ? <button className="icon-button" type="button" title="改用系统 CA" aria-label="改用系统 CA" onClick={() => { setWebDavCaPath(""); setWebDavCaLabel(""); setWebDavUseSystemCa(true); }}><X size={15} /></button> : null}</div></label>
             </> : null}
             <label className="field span-2"><span>二级同步密码</span><input type="password" minLength={8} maxLength={1024} value={syncPassword} onChange={(event) => setSyncPassword(event.target.value)} autoComplete="new-password" placeholder="用于端到端加密" /></label>
           </div>

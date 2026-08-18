@@ -675,6 +675,8 @@ fn inspect_json(
                 crate::file_transfer::validate_optional_reference(Some(value), "ssh-")?;
             } else if key == Some("providerCredentialRef") {
                 crate::sync_provider_credentials::validate_webdav_credential_reference(value)?;
+            } else if key == Some("providerCaRef") {
+                crate::sync_provider_ca::validate_webdav_ca_reference(value)?;
             } else if key == Some("passphraseRef") {
                 crate::file_transfer::validate_optional_reference(Some(value), "key-")?;
             } else if key == Some("androidKeyRef") {
@@ -702,7 +704,11 @@ fn inspect_json(
                 return Err("本地状态不能包含私钥正文".to_string());
             }
         }
-        _ => {}
+        _ => {
+            if key == Some("providerCaRef") {
+                return Err("本地状态 WebDAV CA 引用必须是字符串".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -3093,7 +3099,7 @@ mod tests {
     }
 
     #[test]
-    fn webdav_provider_reference_is_local_only_and_never_enters_changefeed() {
+    fn webdav_provider_references_are_local_only_and_never_enter_changefeed() {
         let root = TempDir::new("webdav-provider-reference");
         let store = AppStore::load(root.0.clone()).expect("load store");
         store
@@ -3106,9 +3112,11 @@ mod tests {
         assert_eq!(initial.len(), 1);
 
         let reference = format!("sync-webdav-{}", Uuid::new_v4());
+        let ca_reference = format!("sync-webdav-ca-{}", Uuid::new_v4());
         let mut state: Value = serde_json::from_str(&fixture()).unwrap();
         state["sync"]["username"] = Value::String("webdav-user".to_string());
         state["sync"]["providerCredentialRef"] = Value::String(reference.clone());
+        state["sync"]["providerCaRef"] = Value::String(ca_reference.clone());
         store
             .save(SaveAppStateRequest {
                 state_json: state.to_string(),
@@ -3127,6 +3135,7 @@ mod tests {
             .unwrap();
         assert_eq!(metadata, "[\"sync\"]");
         assert!(!metadata.contains(&reference));
+        assert!(!metadata.contains(&ca_reference));
     }
 
     #[test]
@@ -4451,10 +4460,19 @@ mod tests {
             Value::String("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string());
         android_refs["sync"]["providerCredentialRef"] =
             Value::String(format!("sync-webdav-{}", Uuid::new_v4()));
+        android_refs["sync"]["providerCaRef"] =
+            Value::String(format!("sync-webdav-ca-{}", Uuid::new_v4()));
         assert!(validate_state_json(&android_refs.to_string()).is_ok());
 
         android_refs["sync"]["providerCredentialRef"] =
             Value::String("sync-webdav-not-a-uuid".to_string());
+        assert!(validate_state_json(&android_refs.to_string()).is_err());
+        android_refs["sync"]["providerCredentialRef"] =
+            Value::String(format!("sync-webdav-{}", Uuid::new_v4()));
+        android_refs["sync"]["providerCaRef"] =
+            Value::String("sync-webdav-ca-not-a-uuid".to_string());
+        assert!(validate_state_json(&android_refs.to_string()).is_err());
+        android_refs["sync"]["providerCaRef"] = Value::Number(1.into());
         assert!(validate_state_json(&android_refs.to_string()).is_err());
 
         let mut jump_route: Value = serde_json::from_str(&fixture()).expect("fixture JSON");

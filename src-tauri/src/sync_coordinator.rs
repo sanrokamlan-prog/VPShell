@@ -27,6 +27,7 @@ use crate::{
         PutObjectOutcome, SyncObjectMetadata, SyncObjectProvider, WebDavCredentials,
         WebDavProvider,
     },
+    sync_provider_ca::validate_webdav_ca_reference,
     sync_provider_credentials::{read_webdav_credential, validate_webdav_credential_reference},
 };
 
@@ -61,8 +62,15 @@ pub(crate) struct ConfigureWebDavSyncRequest {
     endpoint: String,
     username: String,
     provider_credential_ref: Option<String>,
+    provider_ca_ref: Option<String>,
     password: String,
     mode: LocalFolderSetupMode,
+}
+
+impl ConfigureWebDavSyncRequest {
+    pub(crate) fn provider_ca_reference(&self) -> Option<&str> {
+        self.provider_ca_ref.as_deref()
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -456,10 +464,19 @@ impl SyncCoordinatorManager {
     pub(crate) fn configure_webdav(
         &self,
         request: ConfigureWebDavSyncRequest,
+        trusted_ca_pem: Option<Vec<u8>>,
     ) -> Result<SyncCoordinatorStatus, String> {
         let _guard = self.begin_configuration()?;
         let password = Zeroizing::new(request.password);
         validate_sync_password(password.as_bytes())?;
+        let trusted_ca_pem = match (request.provider_ca_ref.as_deref(), trusted_ca_pem) {
+            (None, None) => None,
+            (Some(reference), Some(pem)) => {
+                validate_webdav_ca_reference(reference)?;
+                Some(pem)
+            }
+            _ => return Err("WebDAV CA 引用和受管证书必须同时提供，或同时留空".to_string()),
+        };
         let credentials = match (
             request.username.is_empty(),
             request.provider_credential_ref.as_deref(),
@@ -478,7 +495,12 @@ impl SyncCoordinatorManager {
             }
         };
         let provider: Arc<dyn SyncObjectProvider> = Arc::new(
-            WebDavProvider::connect(&request.endpoint, credentials, None, 30)
+            WebDavProvider::connect(
+                &request.endpoint,
+                credentials,
+                trusted_ca_pem.as_deref(),
+                30,
+            )
                 .map_err(|error| provider_setup_error(&error, "WebDAV"))?,
         );
         self.configure_provider_inner(
@@ -2228,13 +2250,14 @@ mod tests {
                 endpoint: endpoint.to_string(),
                 username: username.to_string(),
                 provider_credential_ref: provider_credential_ref.map(str::to_string),
+                provider_ca_ref: None,
                 password: "fixture-password".to_string(),
                 mode: LocalFolderSetupMode::Unlock,
             }
         };
 
         let incomplete = coordinator
-            .configure_webdav(request("https://example.com/dav/", "user", None))
+            .configure_webdav(request("https://example.com/dav/", "user", None), None)
             .unwrap_err();
         assert!(incomplete.contains("同时提供"));
 
@@ -2243,14 +2266,30 @@ mod tests {
                 "https://example.com/dav/",
                 "user",
                 Some("sync-webdav-not-a-uuid"),
-            ))
+            ), None)
             .unwrap_err();
         assert!(invalid_reference.contains("引用无效"));
 
         let insecure = coordinator
-            .configure_webdav(request("http://example.com/dav/", "", None))
+            .configure_webdav(request("http://example.com/dav/", "", None), None)
             .unwrap_err();
         assert!(insecure.contains("WebDAV 配置无效"));
+
+        let mut missing_ca = request("https://example.com/dav/", "", None);
+        missing_ca.provider_ca_ref = Some(format!(
+            "{}{}",
+            crate::sync_provider_ca::WEBDAV_CA_PREFIX,
+            Uuid::new_v4()
+        ));
+        let missing_ca_error = coordinator.configure_webdav(missing_ca, None).unwrap_err();
+        assert!(missing_ca_error.contains("必须同时提供"));
+
+        let mut invalid_ca = request("https://example.com/dav/", "", None);
+        invalid_ca.provider_ca_ref = Some("sync-webdav-ca-not-a-uuid".to_string());
+        let invalid_ca_error = coordinator
+            .configure_webdav(invalid_ca, Some(b"invalid".to_vec()))
+            .unwrap_err();
+        assert!(invalid_ca_error.contains("CA 引用无效"));
         assert!(!coordinator.status().unwrap().configured);
     }
 

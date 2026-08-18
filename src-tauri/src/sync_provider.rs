@@ -521,26 +521,7 @@ impl WebDavProvider {
             .timeout(Duration::from_secs(timeout_seconds))
             .redirect(Policy::none());
         if let Some(pem) = trusted_ca_pem {
-            if pem.is_empty() || pem.len() > MAX_CA_BYTES {
-                return Err(ProviderError::new(
-                    ProviderErrorCode::InvalidInput,
-                    "WebDAV 自定义 CA 必须为 1 字节至 64 KiB",
-                ));
-            }
-            if !pem.starts_with(b"-----BEGIN CERTIFICATE-----")
-                || !pem
-                    .windows(b"-----END CERTIFICATE-----".len())
-                    .any(|window| window == b"-----END CERTIFICATE-----")
-            {
-                return Err(ProviderError::new(
-                    ProviderErrorCode::InvalidInput,
-                    "WebDAV 自定义 CA PEM 无效",
-                ));
-            }
-            let certificate = Certificate::from_pem(pem).map_err(|_| {
-                ProviderError::new(ProviderErrorCode::InvalidInput, "WebDAV 自定义 CA PEM 无效")
-            })?;
-            builder = builder.add_root_certificate(certificate);
+            builder = builder.add_root_certificate(parse_trusted_ca_pem(pem)?);
         }
         let client = builder.build().map_err(|_| {
             ProviderError::new(
@@ -694,6 +675,35 @@ impl WebDavProvider {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_trusted_ca_pem(pem: &[u8]) -> ProviderResult<()> {
+    parse_trusted_ca_pem(pem).map(|_| ())
+}
+
+fn parse_trusted_ca_pem(pem: &[u8]) -> ProviderResult<Certificate> {
+    if pem.is_empty() || pem.len() > MAX_CA_BYTES {
+        return Err(ProviderError::new(
+            ProviderErrorCode::InvalidInput,
+            "WebDAV 自定义 CA 必须为 1 字节至 64 KiB",
+        ));
+    }
+    if !pem.starts_with(b"-----BEGIN CERTIFICATE-----")
+        || !pem
+            .windows(b"-----END CERTIFICATE-----".len())
+            .any(|window| window == b"-----END CERTIFICATE-----")
+        || pem
+            .windows(b"PRIVATE KEY".len())
+            .any(|window| window == b"PRIVATE KEY")
+    {
+        return Err(ProviderError::new(
+            ProviderErrorCode::InvalidInput,
+            "WebDAV 自定义 CA PEM 无效",
+        ));
+    }
+    Certificate::from_pem(pem).map_err(|_| {
+        ProviderError::new(ProviderErrorCode::InvalidInput, "WebDAV 自定义 CA PEM 无效")
+    })
 }
 
 impl SyncObjectProvider for WebDavProvider {
@@ -1228,6 +1238,15 @@ mod tests {
         assert!(WebDavCredentials::new("u:ser".into(), "password".into()).is_err());
         assert!(WebDavCredentials::new("user".into(), "password".into()).is_ok());
         assert!(WebDavProvider::connect("https://example.com/root/", None, Some(b""), 10).is_err());
+        assert!(
+            WebDavProvider::connect(
+                "https://example.com/root/",
+                None,
+                Some(include_bytes!("../fixtures/webdav-test-ca.pem")),
+                10,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1347,6 +1366,26 @@ mod tests {
             parse_multistatus(dtd, &endpoint).unwrap_err().code,
             ProviderErrorCode::Protocol
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn webdav_custom_ca_verifies_real_ephemeral_tls_fixture() {
+        let Ok(endpoint) = std::env::var("VPSHELL_WEBDAV_CA_TEST_ENDPOINT") else {
+            return;
+        };
+        let ca_path = std::env::var("VPSHELL_WEBDAV_CA_TEST_PEM").expect("fixture CA path");
+        let trusted_ca = fs::read(ca_path).expect("read fixture CA");
+        let cancellation = ProviderCancellation::default();
+
+        let untrusted = WebDavProvider::connect(&endpoint, None, None, 5).unwrap();
+        assert_eq!(
+            untrusted.get("probe", &cancellation).unwrap_err().code,
+            ProviderErrorCode::Unavailable
+        );
+
+        let trusted = WebDavProvider::connect(&endpoint, None, Some(&trusted_ca), 5).unwrap();
+        assert!(!trusted.get("probe", &cancellation).unwrap().is_empty());
     }
 
     #[test]

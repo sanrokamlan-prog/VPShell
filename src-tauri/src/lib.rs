@@ -55,6 +55,7 @@ mod sync_outbox;
 mod sync_protocol_regression;
 #[allow(dead_code)] // The outbox/coordinator phases consume the provider boundary.
 mod sync_provider;
+mod sync_provider_ca;
 mod sync_provider_credentials;
 #[allow(dead_code)] // Provider coordination selects these structured backend adapters.
 mod sync_provider_ext;
@@ -1467,17 +1468,24 @@ async fn configure_local_folder_sync(
 async fn configure_webdav_sync(
     app: tauri::AppHandle,
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    ca_manager: State<'_, sync_provider_ca::SyncProviderCaManager>,
     scheduler: State<'_, sync_scheduler::AutomaticSyncScheduler>,
     store: State<'_, app_store::AppStore>,
     request: sync_coordinator::ConfigureWebDavSyncRequest,
 ) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
     sync_scheduler::AutomaticSyncScheduler::ensure_supported()?;
     let coordinator = coordinator.inner().clone();
+    let ca_manager = ca_manager.inner().clone();
     let store = store.inner().clone();
     let worker_coordinator = coordinator.clone();
     let worker_store = store.clone();
+    let provider_ca_ref = request.provider_ca_reference().map(str::to_string);
     let status = tauri::async_runtime::spawn_blocking(move || {
-        worker_coordinator.configure_webdav(request)?;
+        let trusted_ca_pem = provider_ca_ref
+            .as_deref()
+            .map(|reference| ca_manager.read(reference))
+            .transpose()?;
+        worker_coordinator.configure_webdav(request, trusted_ca_pem)?;
         worker_coordinator.status_with_app_store(&worker_store)
     })
     .await
@@ -1729,6 +1737,28 @@ async fn store_webdav_credential(
     .map_err(|error| format!("WebDAV 凭据保存任务异常结束: {error}"))?
 }
 
+#[tauri::command]
+async fn install_webdav_ca(
+    manager: State<'_, sync_provider_ca::SyncProviderCaManager>,
+    request: sync_provider_ca::InstallWebDavCaRequest,
+) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.install(request))
+        .await
+        .map_err(|error| format!("WebDAV CA 导入任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn delete_webdav_ca(
+    manager: State<'_, sync_provider_ca::SyncProviderCaManager>,
+    reference: String,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.delete(&reference))
+        .await
+        .map_err(|error| format!("WebDAV CA 删除任务异常结束: {error}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1764,6 +1794,9 @@ pub fn run() {
             ));
             app.manage(app_store::AppStore::load(app_data_directory.clone())?);
             app.manage(local_assets::LocalAssetManager::load(
+                app_data_directory.clone(),
+            )?);
+            app.manage(sync_provider_ca::SyncProviderCaManager::load(
                 app_data_directory.clone(),
             )?);
             app.manage(sync_coordinator::SyncCoordinatorManager::open(
@@ -1812,6 +1845,8 @@ pub fn run() {
             stop_terminal,
             delete_credential,
             store_webdav_credential,
+            install_webdav_ca,
+            delete_webdav_ca,
             import_finalshell,
             initialize_app_store,
             save_app_state,
