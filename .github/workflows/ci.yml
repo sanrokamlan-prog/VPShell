@@ -31,9 +31,27 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev openssh-server patchelf
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 2m apt-get \
+              -o Acquire::Retries=2 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              update; then
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+          sudo timeout 8m env DEBIAN_FRONTEND=noninteractive apt-get \
+            -o DPkg::Lock::Timeout=60 \
+            -o Dpkg::Use-Pty=0 \
+            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev openssh-server patchelf
       - name: Set up real OpenSSH/SFTP native-engine fixture
         if: runner.os == 'Linux'
         shell: bash
