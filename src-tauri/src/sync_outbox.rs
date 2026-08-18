@@ -363,9 +363,7 @@ fn migrate_schema(connection: &mut Connection) -> JournalResult<()> {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| {
-                JournalError::new(JournalErrorCode::Storage, "无法检查同步本机身份")
-            })?;
+            .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法检查同步本机身份"))?;
         if identity_exists.is_none() {
             transaction
                 .execute(
@@ -704,9 +702,7 @@ where
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
-        .map_err(|_| {
-            JournalError::new(JournalErrorCode::Storage, "无法核对同步 operation 身份")
-        })?;
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法核对同步 operation 身份"))?;
     if relocated.is_some() {
         return Err(JournalError::new(
             JournalErrorCode::Conflict,
@@ -735,9 +731,7 @@ where
                 now_ms,
             ],
         )
-        .map_err(|_| {
-            JournalError::new(JournalErrorCode::Storage, "无法写入本地同步 operation")
-        })?;
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入本地同步 operation"))?;
     transaction
         .execute(
             "INSERT INTO sync_outbox(
@@ -983,10 +977,7 @@ impl SyncJournal {
             } else {
                 (
                     last_hlc_ms.checked_add(1).ok_or_else(|| {
-                        JournalError::new(
-                            JournalErrorCode::LimitExceeded,
-                            "本机同步 HLC 已耗尽",
-                        )
+                        JournalError::new(JournalErrorCode::LimitExceeded, "本机同步 HLC 已耗尽")
                     })?,
                     0_u16,
                 )
@@ -1025,9 +1016,7 @@ impl SyncJournal {
             })?;
             let object = validate_envelope(&encrypted_object)?;
             let hash = object_hash(&encrypted_object);
-            let object_key = format!(
-                "vpshell/v1/{vault_id}/segments/{device_id}/{sequence}.oseg"
-            );
+            let object_key = format!("vpshell/v1/{vault_id}/segments/{device_id}/{sequence}.oseg");
             enqueue_local_in_transaction(
                 transaction,
                 &object_key,
@@ -1051,10 +1040,7 @@ impl SyncJournal {
                             params![physical_ms, i64::from(logical), device_id],
                         )
                         .map_err(|_| {
-                            JournalError::new(
-                                JournalErrorCode::Storage,
-                                "无法推进本机同步 HLC",
-                            )
+                            JournalError::new(JournalErrorCode::Storage, "无法推进本机同步 HLC")
                         })?;
                     Ok(())
                 },
@@ -1714,14 +1700,7 @@ mod tests {
         )]));
         assert_eq!(
             journal
-                .enqueue_local_host_change(
-                    &key,
-                    VAULT_ID,
-                    &operation_id,
-                    &entity_id,
-                    changed,
-                    12,
-                )
+                .enqueue_local_host_change(&key, VAULT_ID, &operation_id, &entity_id, changed, 12,)
                 .unwrap_err()
                 .code,
             JournalErrorCode::Conflict

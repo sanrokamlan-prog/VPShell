@@ -1121,8 +1121,16 @@ mod tests {
         let objects = provider.objects.lock().unwrap();
         assert_eq!(objects.len(), 1);
         let encoded = objects.values().next().unwrap();
-        assert!(!encoded.windows(b"192.0.2.1".len()).any(|value| value == b"192.0.2.1"));
-        assert!(!encoded.windows(b"ssh-reference".len()).any(|value| value == b"ssh-reference"));
+        assert!(
+            !encoded
+                .windows(b"192.0.2.1".len())
+                .any(|value| value == b"192.0.2.1")
+        );
+        assert!(
+            !encoded
+                .windows(b"ssh-reference".len())
+                .any(|value| value == b"ssh-reference")
+        );
     }
 
     #[test]
@@ -1528,9 +1536,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(coordinator
-            .run_once(&test_app_store(&root), 2_000)
-            .is_err());
+        assert!(coordinator.run_once(&test_app_store(&root), 2_000).is_err());
         assert!(coordinator.detach_session().is_err());
         assert!(
             coordinator

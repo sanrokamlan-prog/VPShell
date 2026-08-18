@@ -1436,8 +1436,8 @@ async fn configure_local_folder_sync(
         coordinator.configure_local_folder(request)?;
         coordinator.status_with_app_store(&store)
     })
-        .await
-        .map_err(|error| format!("Local Folder 同步配置任务异常结束: {error}"))?
+    .await
+    .map_err(|error| format!("Local Folder 同步配置任务异常结束: {error}"))?
 }
 
 #[tauri::command]

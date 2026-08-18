@@ -258,7 +258,9 @@ pub(crate) fn build_local_host_operation(
     entity_id: &str,
     mutation: LocalHostMutation,
 ) -> MergeResult<MergeOperation> {
-    let record = state.entities.get(&entity_key(&EntityKind::Host, entity_id));
+    let record = state
+        .entities
+        .get(&entity_key(&EntityKind::Host, entity_id));
     let payload = match mutation {
         LocalHostMutation::Patch(fields) => {
             let observed_fields = fields
@@ -357,9 +359,10 @@ pub(crate) fn advance_local_hlc(
         Ok((maximum.0, maximum.1 + 1))
     } else {
         Ok((
-            maximum.0.checked_add(1).ok_or_else(|| {
-                MergeError::new(MergeErrorCode::LimitExceeded, "同步 HLC 已耗尽")
-            })?,
+            maximum
+                .0
+                .checked_add(1)
+                .ok_or_else(|| MergeError::new(MergeErrorCode::LimitExceeded, "同步 HLC 已耗尽"))?,
             0,
         ))
     }

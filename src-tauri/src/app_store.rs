@@ -679,9 +679,7 @@ fn host_sync_fields(
         host.get("group")
             .and_then(Value::as_str)
             .filter(|value| {
-                !value.is_empty()
-                    && value.len() <= 256
-                    && !value.chars().any(char::is_control)
+                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
             })
             .map(|value| FieldValue::Text(value.to_string()))
             .unwrap_or(FieldValue::Clear),
@@ -707,9 +705,7 @@ fn host_sync_fields(
             value
                 .as_str()
                 .filter(|value| {
-                    !value.is_empty()
-                        && value.len() <= 64
-                        && !value.chars().any(char::is_control)
+                    !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control)
                 })
                 .map(str::to_string)
         })
@@ -765,9 +761,10 @@ fn queue_host_sync_changes(
             changes.push((
                 entity_ids[local_id].clone(),
                 "patch",
-                Some(serde_json::to_string(&next_fields).map_err(|error| {
-                    format!("无法编码脱敏主机同步变更: {error}")
-                })?),
+                Some(
+                    serde_json::to_string(&next_fields)
+                        .map_err(|error| format!("无法编码脱敏主机同步变更: {error}"))?,
+                ),
             ));
         }
     }
@@ -777,7 +774,9 @@ fn queue_host_sync_changes(
         }
     }
     let pending: i64 = transaction
-        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+            row.get(0)
+        })
         .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
     if pending.saturating_add(changes.len() as i64) > MAX_PENDING_SYNC_CHANGES {
         return Err("AppState 同步 changefeed 已达到 10000 项上限；请先完成同步".to_string());
@@ -1091,7 +1090,9 @@ impl AppStore {
             .map_err(|_| "本地事件库锁不可用".to_string())?;
         let connection = open_connection(&self.inner.database_path)?;
         let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+                row.get(0)
+            })
             .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
         Ok(count.max(0) as u64)
     }
