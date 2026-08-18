@@ -33,8 +33,7 @@ pub(crate) struct InstallWebDavCaRequest {
 impl SyncProviderCaManager {
     pub(crate) fn load(app_data_directory: PathBuf) -> Result<Self, String> {
         let directory = app_data_directory.join("sync-provider-ca");
-        fs::create_dir_all(&directory)
-            .map_err(|_| "无法创建 WebDAV CA 私有目录".to_string())?;
+        fs::create_dir_all(&directory).map_err(|_| "无法创建 WebDAV CA 私有目录".to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -103,8 +102,7 @@ impl SyncProviderCaManager {
             .map_err(|_| "WebDAV CA 资产锁不可用".to_string())?;
         let path = self.path_for_reference(reference)?;
         let bytes = read_bounded_ca(&path, "未找到已保存的 WebDAV CA")?;
-        validate_trusted_ca_pem(&bytes)
-            .map_err(|_| "已保存的 WebDAV CA 已损坏".to_string())?;
+        validate_trusted_ca_pem(&bytes).map_err(|_| "已保存的 WebDAV CA 已损坏".to_string())?;
         Ok(bytes)
     }
 
@@ -158,8 +156,8 @@ fn validate_source_path(value: &str) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("WebDAV CA 路径必须是绝对路径".to_string());
     }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| "无法读取 WebDAV CA 文件元数据".to_string())?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| "无法读取 WebDAV CA 文件元数据".to_string())?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("WebDAV CA 必须是普通文件，不能是符号链接".to_string());
     }
@@ -182,7 +180,7 @@ fn read_bounded_ca(path: &Path, error_message: &str) -> Result<Vec<u8>, String> 
         return Err("WebDAV CA 文件在读取期间发生变化".to_string());
     }
     let mut bytes = Vec::with_capacity(opened.len() as usize);
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(MAX_CA_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| error_message.to_string())?;
@@ -276,7 +274,9 @@ mod tests {
         );
         let private_material = root.0.join("private-material.pem");
         let mut combined = TEST_CA.to_vec();
-        combined.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\nforbidden\n-----END PRIVATE KEY-----\n");
+        combined.extend_from_slice(
+            b"-----BEGIN PRIVATE KEY-----\nforbidden\n-----END PRIVATE KEY-----\n",
+        );
         fs::write(&private_material, combined).unwrap();
         assert!(
             manager

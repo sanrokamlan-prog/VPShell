@@ -501,7 +501,7 @@ impl SyncCoordinatorManager {
                 trusted_ca_pem.as_deref(),
                 30,
             )
-                .map_err(|error| provider_setup_error(&error, "WebDAV"))?,
+            .map_err(|error| provider_setup_error(&error, "WebDAV"))?,
         );
         self.configure_provider_inner(
             provider,
@@ -2262,11 +2262,14 @@ mod tests {
         assert!(incomplete.contains("同时提供"));
 
         let invalid_reference = coordinator
-            .configure_webdav(request(
-                "https://example.com/dav/",
-                "user",
-                Some("sync-webdav-not-a-uuid"),
-            ), None)
+            .configure_webdav(
+                request(
+                    "https://example.com/dav/",
+                    "user",
+                    Some("sync-webdav-not-a-uuid"),
+                ),
+                None,
+            )
             .unwrap_err();
         assert!(invalid_reference.contains("引用无效"));
 
