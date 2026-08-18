@@ -1521,7 +1521,10 @@ mod tests {
         let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
         let state: serde_json::Value =
             serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
-        assert_eq!(state["settings"]["externalEditorPath"], "device-only-editor");
+        assert_eq!(
+            state["settings"]["externalEditorPath"],
+            "device-only-editor"
+        );
         assert_eq!(state["settings"]["autoUploadEditedFiles"], false);
         assert_eq!(state["settings"]["packageTransfersEnabled"], false);
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());

@@ -1207,10 +1207,7 @@ fn application_preference_sync_fields(
 
 fn default_application_preference_sync_fields() -> BTreeMap<String, FieldValue> {
     BTreeMap::from([
-        (
-            "autoUploadEditedFiles".to_string(),
-            FieldValue::Flag(false),
-        ),
+        ("autoUploadEditedFiles".to_string(), FieldValue::Flag(false)),
         (
             "packageTransfersEnabled".to_string(),
             FieldValue::Flag(true),
@@ -1350,9 +1347,9 @@ fn validate_setting_projection_fields(
     let fields_match = match entity_id {
         TERMINAL_APPEARANCE_ENTITY_ID => {
             fields.len() == 3
-                && fields.keys().all(|field| {
-                    matches!(field.as_str(), "fontFamily" | "fontSize" | "lineHeight")
-                })
+                && fields
+                    .keys()
+                    .all(|field| matches!(field.as_str(), "fontFamily" | "fontSize" | "lineHeight"))
         }
         APPLICATION_PREFERENCES_ENTITY_ID => {
             fields.len() == 2
@@ -3080,10 +3077,7 @@ mod tests {
         assert_eq!(
             fields,
             &BTreeMap::from([
-                (
-                    "autoUploadEditedFiles".to_string(),
-                    FieldValue::Flag(true),
-                ),
+                ("autoUploadEditedFiles".to_string(), FieldValue::Flag(true),),
                 (
                     "packageTransfersEnabled".to_string(),
                     FieldValue::Flag(false),
@@ -3423,8 +3417,7 @@ mod tests {
         let mut state: Value = serde_json::from_str(&fixture()).unwrap();
         state["terminalAppearance"]["customFontName"] =
             Value::String("device-only-font.ttf".into());
-        state["settings"]["externalEditorPath"] =
-            Value::String("device-only-editor".into());
+        state["settings"]["externalEditorPath"] = Value::String("device-only-editor".into());
         store
             .save(SaveAppStateRequest {
                 state_json: state.to_string(),
@@ -3442,10 +3435,7 @@ mod tests {
             ("lineHeight".to_string(), FieldValue::Integer(150)),
         ]);
         let preference_fields = BTreeMap::from([
-            (
-                "autoUploadEditedFiles".to_string(),
-                FieldValue::Flag(true),
-            ),
+            ("autoUploadEditedFiles".to_string(), FieldValue::Flag(true)),
             (
                 "packageTransfersEnabled".to_string(),
                 FieldValue::Flag(false),
@@ -3481,7 +3471,10 @@ mod tests {
             projected["terminalAppearance"]["customFontName"],
             "device-only-font.ttf"
         );
-        assert_eq!(projected["settings"]["externalEditorPath"], "device-only-editor");
+        assert_eq!(
+            projected["settings"]["externalEditorPath"],
+            "device-only-editor"
+        );
         assert_eq!(projected["settings"]["autoUploadEditedFiles"], true);
         assert_eq!(projected["settings"]["packageTransfersEnabled"], false);
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
