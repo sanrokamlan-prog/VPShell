@@ -237,6 +237,8 @@ pub(crate) struct NativeEngineError {
     retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     hop_index: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_engine: Option<&'static str>,
 }
 
 impl NativeEngineError {
@@ -246,6 +248,7 @@ impl NativeEngineError {
             message,
             retryable,
             hop_index: None,
+            fallback_engine: None,
         }
     }
 
@@ -259,6 +262,20 @@ impl NativeEngineError {
 
     fn at_hop(mut self, hop_index: u8) -> Self {
         self.hop_index = Some(hop_index);
+        self
+    }
+
+    fn with_terminal_fallback(mut self, route_hops: usize) -> Self {
+        if route_hops == 1
+            && matches!(
+                self.code,
+                "native-engine-key-invalid"
+                    | "native-engine-auth-negotiation-failed"
+                    | "native-engine-rsa-sha2-unavailable"
+            )
+        {
+            self.fallback_engine = Some("openssh");
+        }
         self
     }
 
@@ -531,6 +548,7 @@ impl NativeEngineManager {
         let timeout = validated.route.operation_timeout();
         let sftp_timeout = validated.route.final_timeout();
         let hop_index = validated.route.final_hop_index();
+        let route_hops = validated.route.hops.len();
         let generation = self.next_generation()?;
         let cancellation = CancellationToken::new();
         let (sftp_requests, sftp_request_receiver) = mpsc::channel(SFTP_REQUEST_QUEUE);
@@ -570,7 +588,7 @@ impl NativeEngineManager {
             Ok(connection) => connection,
             Err(error) => {
                 self.finish_terminal(session_id, generation);
-                return Err(error);
+                return Err(error.with_terminal_fallback(route_hops));
             }
         };
 
@@ -3663,6 +3681,49 @@ mod tests {
                 .iter()
                 .any(|algorithm| matches!(algorithm, Algorithm::Rsa { hash: None }))
         );
+    }
+
+    #[test]
+    fn terminal_fallback_is_single_hop_and_compatibility_only() {
+        for code in [
+            "native-engine-key-invalid",
+            "native-engine-auth-negotiation-failed",
+            "native-engine-rsa-sha2-unavailable",
+        ] {
+            let error = NativeEngineError::new(code, "compatibility", false)
+                .with_terminal_fallback(1);
+            assert_eq!(error.fallback_engine, Some("openssh"));
+            assert_eq!(
+                serde_json::to_value(error).unwrap()["fallbackEngine"],
+                "openssh"
+            );
+        }
+
+        for code in [
+            "native-engine-host-key-mismatch",
+            "native-engine-host-key-unverified",
+            "native-engine-auth-failed",
+            "native-engine-auth-rejected",
+            "native-terminal-cancelled",
+            "native-terminal-timeout",
+            "native-engine-invalid-request",
+        ] {
+            let error =
+                NativeEngineError::new(code, "fail closed", false).with_terminal_fallback(1);
+            assert_eq!(error.fallback_engine, None, "unexpected fallback for {code}");
+            assert!(
+                serde_json::to_value(error).unwrap()["fallbackEngine"].is_null(),
+                "serialized fallback for {code}"
+            );
+        }
+
+        let multi_hop = NativeEngineError::new(
+            "native-engine-key-invalid",
+            "multi-hop compatibility",
+            false,
+        )
+        .with_terminal_fallback(2);
+        assert_eq!(multi_hop.fallback_engine, None);
     }
 
     #[test]

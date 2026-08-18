@@ -1,6 +1,6 @@
 # VPShell 路线图执行账本
 
-更新时间：2026-08-17（UTC）
+更新时间：2026-08-18（UTC）
 
 本文件记录 `/root/projects/vpshell/VPShell` 未提交工作树中路线图实现的真实状态。它不是发布说明，也不能替代代码、测试、平台验收或安全审计。
 
@@ -124,8 +124,8 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 
 | 状态 | 验收项 |
 | --- | --- |
-| 进行中 | D1 已接通桌面 `russh`/`russh-sftp` 真实就绪检查、用户显式选择的长期 PTY/Shell 终端、同一已认证连接拥有的长期 SFTP 目录浏览会话及 Rust-owned 本地/远端/SOCKS5 CONNECT 回环转发；认证前固定 host-key、Rust-only 凭据解析、xterm 输出回执、有界背压/超时/并发、取消/代际保护及回环 OpenSSH/SFTP/终端 CI 已覆盖。probe/终端/三类转发使用最多四跳、逐跳独立 pin/认证来源的有序 route；首跳 TCP、后续通过上一跳 `direct-tcpip` channel stream 建立独立 SSH 会话，整条链统一持有和逆序关闭。动态转发代码与测试等待当前提交 Actions；添加主机界面可选择一台已有跳板，模型支持最多三台跳板；大传输/变更仍为不支持跳板的独立连接，下一项为系统 OpenSSH 兼容回退及跨引擎测试 |
-| 待实现 | 系统 OpenSSH 兼容回退及跨引擎行为/安全测试 |
+| 完成 | D1 已接通桌面 `russh`/`russh-sftp` 真实就绪检查、用户显式选择的长期 PTY/Shell 终端、同一已认证连接拥有的长期 SFTP 目录浏览会话及 Rust-owned 本地/远端/SOCKS5 CONNECT 回环转发；认证前固定 host-key、Rust-only 凭据解析、xterm 输出回执、有界背压/超时/并发、取消/代际保护及回环 OpenSSH/SFTP/终端 CI 已覆盖。probe/终端/三类转发使用最多四跳、逐跳独立 pin/认证来源的有序 route；首跳 TCP、后续通过上一跳 `direct-tcpip` channel stream 建立独立 SSH 会话，整条链统一持有和逆序关闭。添加主机界面可选择一台已有跳板，模型支持最多三台跳板；大传输/变更仍为不支持跳板的独立连接；PR #1 run `32089113649` 全绿 |
+| 进行中 | 系统 OpenSSH 兼容回退及跨引擎行为/安全测试：单跳终端仅对 Rust 标记的密钥格式/RSA SHA-2 协商错误回退；host-key、认证、取消、超时、无效请求与多跳 route fail closed；严格系统请求/实际引擎响应、生产参数单测及 Linux 真实 OpenSSH fixture 已实现，等待 Actions |
 | 待实现 | 用户自建 Relay 参考实现、认证协议、限流、审计和安全测试 |
 | 待实现 | 持续测速、可解释选路与可选 Mosh；没有真实数据不使用“加速”表述 |
 | 待实现 | 自建部署文档、协议版本/升级/撤销和故障恢复演练 |
@@ -175,7 +175,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | D1 远端转发与有界 Linux 安装（Actions 完成） | 提交 `51b596c` 的 PR #1 run `32087276608` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实双跳本地/远端转发 fixture，以及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`。旧头 `32c4904` 的 run `32084465003` 仍停在已被替代的依赖安装步骤，不作为当前 head 门禁。 |
 | 2026-08-18 | D1 Rust-owned SOCKS5 CONNECT 动态转发（待 Actions） | 新增 desktop-only `start/list/stop_native_dynamic_forward`：请求只接受 UUID、已验证 route 和回环端口，Rust 固定监听 `127.0.0.1`，最多 8 条、每条 32 个连接。10 秒有界 SOCKS5 握手仅协商无认证 CONNECT，严格解析 IPv4/ASCII DNS 标签/IPv6 和非零端口，拒绝 BIND、UDP ASSOCIATE、未知类型与无效目标；每个成功请求只在最终已认证 hop 打开独立 `direct-tcpip` channel。停止/超时会中止连接、逆序关闭 route 并按 generation 清理，状态不返回请求目标或流量内容。桌面对话框已接线，Android capability 明确排除三项命令；单测覆盖协议、未知/秘密字段、容量、计数、取消和代际，Linux 双 sshd fixture 经动态 listener 完成 SOCKS5 CONNECT 并读取真实 OpenSSH banner。本机 `git diff --check`、严格 JSON、82-command 唯一性及 handler/desktop+Android capability 分离、SOCKS/fixture 静态契约和 workflow 两段 `bash -n` 通过；无 Cargo/rustfmt/node_modules/target，根分区前后均 46%。等待 PR #1 四平台 locked fmt/check/test、真实 fixture、frontend 与 Android 矩阵。 |
 | 2026-08-18 | D1 SOCKS5 动态转发首轮 Actions 与格式修复 | 提交 `6fcc358` 的 PR #1 run `32088699321` 已进入终态：frontend 生产构建与 Android aarch64 debug APK/Gradle gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 和 macOS arm 都只在首个 `cargo fmt --check` 步骤报告相同六处 `native_engine.rs` 差异后失败，尚未执行 locked check/test 或 Linux 真实 SOCKS5 fixture。已严格按 runner 输出机械应用动态快照调用、DNS 标签链、协议断言、请求字节及 fixture timeout 的格式，未改行为。本机 `git diff --check`、严格 JSON、82-command 清单、workflow fixture `bash -n` 及无大型构建产物检查通过，无 Cargo/rustfmt/node_modules/target，根分区 46%。等待修复提交后的四平台 locked fmt/check/test、Linux 真实双跳 SOCKS5 fixture、frontend 与 Android 矩阵完整验证。 |
+| 2026-08-18 | D1 SOCKS5 动态转发完整 Actions | 格式修复提交 `2bea713` 的 PR #1 run `32089113649` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实双跳 SOCKS5 fixture及 Android aarch64 debug APK/Gradle gate全部 `COMPLETED/SUCCESS`；当前 head 与 PR head 一致。 |
+| 2026-08-18 | D1 系统 OpenSSH 安全兼容回退（待 Actions） | 原生错误新增 value-free `fallbackEngine`，只在单跳终端的密钥格式、认证算法协商或 RSA SHA-2 不可用三类稳定错误出现；前端以同值白名单复核后用同一 host/user/identity/credential reference 启动系统 OpenSSH并记录实际引擎。host-key 不匹配/未验证、认证失败/拒绝、取消、超时、无效请求和多跳均不附带回退。`start_ssh_session` 现拒绝未知字段，硬验证 canonical UUID、host/user/port、PTY 尺寸、私钥路径和引用，固定 `StrictHostKeyChecking=yes`、安全 KEX、选项终止符、一次 AskPass，响应返回 schema/engine/session。单测覆盖回退正负矩阵、秘密引用不进 argv、ProxyCommand/选项注入拒绝和响应契约，仓库级安全回归锁定双白名单/桌面能力边界；Linux fixture 为系统 OpenSSH 写入精确临时 host key并用生产参数构造器执行真实命令。本机 `git diff --check`、严格 JSON、fixture shell `bash -n`、82-command 清单未变、Android 排除系统 OpenSSH command及无大型构建产物检查通过，根分区前后 46%；无 Cargo/rustfmt/node_modules，完整矩阵等待 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 D1 SOCKS5 动态转发提交的新 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后实现系统 OpenSSH 兼容回退及跨引擎行为/安全测试。C4 真机泄漏矩阵保持外部验收；Android Sync capability 继续 disabled。
+等待系统 OpenSSH 安全兼容回退提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入用户自建 Relay 参考实现、认证协议、限流、审计和安全测试。C4 真机泄漏矩阵保持外部验收；Android Sync capability 继续 disabled。

@@ -189,6 +189,12 @@ interface NativeTerminalStartResult {
   sessionId: string;
 }
 
+interface OpenSshTerminalStartResult {
+  schemaVersion: number;
+  engine: "openssh";
+  sessionId: string;
+}
+
 interface NativeLocalForwardSnapshot {
   schemaVersion: number;
   forwardId: string;
@@ -238,6 +244,21 @@ interface NativeEngineErrorPayload {
   message?: string;
   retryable?: boolean;
   hopIndex?: number;
+  fallbackEngine?: "openssh";
+}
+
+const nativeOpenSshFallbackCodes = new Set([
+  "native-engine-key-invalid",
+  "native-engine-auth-negotiation-failed",
+  "native-engine-rsa-sha2-unavailable",
+]);
+
+function canFallbackNativeTerminalToOpenSsh(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const payload = error as NativeEngineErrorPayload;
+  return payload.fallbackEngine === "openssh"
+    && typeof payload.code === "string"
+    && nativeOpenSshFallbackCodes.has(payload.code);
 }
 
 function invokeErrorMessage(error: unknown) {
@@ -968,32 +989,8 @@ function App() {
     const identityPassphraseRef = appState.sshKeys.find(
       (key) => key.privateKeyPath === host.identityFile,
     )?.passphraseRef;
-    updateSession(session.id, { state: "connecting" });
-    if (session.engine === "russh") {
-      if (!hostKeySha256) throw new Error("原生终端需要已验证的 SHA256 主机指纹");
-      if (!host.identityFile && !host.credentialRef) {
-        throw new Error("原生终端目前需要已保存的密码或显式私钥；可切回 OpenSSH 使用 agent 等兼容认证");
-      }
-      setNativeTerminalStartingIds((current) => current.includes(session.id) ? current : [...current, session.id]);
-      let result: NativeTerminalStartResult;
-      try {
-        result = await invoke<NativeTerminalStartResult>("start_native_terminal", {
-          request: {
-            sessionId: session.id,
-            route: nativeRoute(host, appState.hosts, appState.sshKeys, hostKeySha256),
-            cols: 120,
-            rows: 32,
-          },
-        });
-      } finally {
-        setNativeTerminalStartingIds((current) => current.filter((sessionId) => sessionId !== session.id));
-      }
-      if (result.schemaVersion !== 1 || result.engine !== "russh" || result.sessionId !== session.id) {
-        await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
-        throw new Error("原生终端返回了不受支持的会话结果");
-      }
-    } else {
-      await invoke("start_ssh_session", {
+    const startOpenSshTerminal = async () => {
+      const result = await invoke<OpenSshTerminalStartResult>("start_ssh_session", {
         request: {
           sessionId: session.id,
           host: host.host,
@@ -1006,6 +1003,46 @@ function App() {
           rows: 32,
         },
       });
+      if (result.schemaVersion !== 1 || result.engine !== "openssh" || result.sessionId !== session.id) {
+        await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+        throw new Error("OpenSSH 返回了不受支持的会话结果");
+      }
+    };
+    updateSession(session.id, { state: "connecting" });
+    let effectiveEngine = session.engine;
+    let usedCompatibilityFallback = false;
+    if (session.engine === "russh") {
+      if (!hostKeySha256) throw new Error("原生终端需要已验证的 SHA256 主机指纹");
+      if (!host.identityFile && !host.credentialRef) {
+        throw new Error("原生终端目前需要已保存的密码或显式私钥；可切回 OpenSSH 使用 agent 等兼容认证");
+      }
+      setNativeTerminalStartingIds((current) => current.includes(session.id) ? current : [...current, session.id]);
+      let result: NativeTerminalStartResult | undefined;
+      try {
+        result = await invoke<NativeTerminalStartResult>("start_native_terminal", {
+          request: {
+            sessionId: session.id,
+            route: nativeRoute(host, appState.hosts, appState.sshKeys, hostKeySha256),
+            cols: 120,
+            rows: 32,
+          },
+        });
+      } catch (error) {
+        if (host.jumpRoute?.length || !canFallbackNativeTerminalToOpenSsh(error)) throw error;
+        await startOpenSshTerminal();
+        effectiveEngine = "openssh";
+        usedCompatibilityFallback = true;
+        updateSession(session.id, { engine: "openssh" });
+      } finally {
+        setNativeTerminalStartingIds((current) => current.filter((sessionId) => sessionId !== session.id));
+      }
+      if (effectiveEngine === "russh"
+        && (!result || result.schemaVersion !== 1 || result.engine !== "russh" || result.sessionId !== session.id)) {
+        await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+        throw new Error("原生终端返回了不受支持的会话结果");
+      }
+    } else {
+      await startOpenSshTerminal();
     }
     updateSession(session.id, { state: "connected" });
     setAppState((current) => ({
@@ -1017,7 +1054,10 @@ function App() {
         path: session.currentPath,
       }, ...(current.connectionHistory ?? [])],
     }));
-    showToast(`已通过 ${session.engine === "russh" ? "原生 russh" : "OpenSSH"} 连接 ${host.name}`);
+    const engineLabel = effectiveEngine === "russh"
+      ? "原生 russh"
+      : usedCompatibilityFallback ? "OpenSSH 兼容回退" : "OpenSSH";
+    showToast(`已通过 ${engineLabel} 连接 ${host.name}`);
   }
 
   async function connectActiveSession() {

@@ -228,6 +228,24 @@ mod tests {
     }
 
     #[test]
+    fn openssh_fallback_is_structured_bounded_and_desktop_only() {
+        let backend = include_str!("lib.rs");
+        let native = include_str!("native_engine.rs");
+        let frontend = include_str!("../../src/App.tsx");
+        let android = include_str!("../capabilities/android.json");
+        assert!(backend.contains("rename_all = \"camelCase\", deny_unknown_fields"));
+        assert!(backend.contains("StrictHostKeyChecking=yes"));
+        assert!(backend.contains("NumberOfPasswordPrompts=1"));
+        assert!(backend.contains("OPENSSH_ENGINE_NAME"));
+        assert!(native.contains("fn with_terminal_fallback"));
+        assert!(native.contains("route_hops == 1"));
+        assert!(frontend.contains("nativeOpenSshFallbackCodes"));
+        assert!(frontend.contains("canFallbackNativeTerminalToOpenSsh(error)"));
+        assert!(frontend.contains("result.engine !== \"openssh\""));
+        assert!(!android.contains("allow-start-ssh-session"));
+    }
+
+    #[test]
     fn native_forwards_are_bounded_loopback_only_and_android_denied() {
         let native = include_str!("native_engine.rs");
         let frontend = include_str!("../../src/App.tsx");

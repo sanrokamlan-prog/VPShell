@@ -104,8 +104,15 @@ struct TerminalManager {
     next_generation: AtomicU64,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+const OPENSSH_ENGINE_NAME: &str = "openssh";
+const MIN_TERMINAL_CELLS: u16 = 2;
+const MAX_TERMINAL_CELLS: u16 = 1000;
+const MAX_SSH_HOST_BYTES: usize = 253;
+const MAX_SSH_USERNAME_BYTES: usize = 128;
+const MAX_SSH_IDENTITY_PATH_BYTES: usize = 4096;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StartSshRequest {
     session_id: Option<String>,
     host: String,
@@ -118,9 +125,23 @@ struct StartSshRequest {
     rows: Option<u16>,
 }
 
+struct ValidatedStartSshRequest {
+    session_id: String,
+    host: String,
+    port: u16,
+    username: String,
+    identity_file: Option<String>,
+    credential_ref: Option<String>,
+    identity_passphrase_ref: Option<String>,
+    cols: u16,
+    rows: u16,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StartSshResponse {
+    schema_version: u16,
+    engine: &'static str,
     session_id: String,
 }
 
@@ -229,9 +250,137 @@ fn configure_ssh_askpass(
     if let Some(reference) = key_passphrase_ref {
         command.env(ASKPASS_KEY_REF_ENV, reference);
     }
-    command.arg("-o");
-    command.arg("NumberOfPasswordPrompts=1");
     Ok(())
+}
+
+impl TryFrom<StartSshRequest> for ValidatedStartSshRequest {
+    type Error = String;
+
+    fn try_from(request: StartSshRequest) -> Result<Self, Self::Error> {
+        if request.host.is_empty()
+            || request.host.len() > MAX_SSH_HOST_BYTES
+            || request.host.starts_with('-')
+            || request.host.contains('/')
+            || request.host.contains('\\')
+            || request
+                .host
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err("主机地址格式无效".to_string());
+        }
+        if request.username.is_empty()
+            || request.username.len() > MAX_SSH_USERNAME_BYTES
+            || request.username.starts_with('-')
+            || request.username.contains('@')
+            || request
+                .username
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err("SSH 用户名格式无效".to_string());
+        }
+        if request.port == 0 {
+            return Err("SSH 端口无效".to_string());
+        }
+        let cols = request.cols.unwrap_or(120);
+        let rows = request.rows.unwrap_or(32);
+        if !(MIN_TERMINAL_CELLS..=MAX_TERMINAL_CELLS).contains(&cols)
+            || !(MIN_TERMINAL_CELLS..=MAX_TERMINAL_CELLS).contains(&rows)
+        {
+            return Err("终端行列必须在 2 到 1000 之间".to_string());
+        }
+        let session_id = match request.session_id {
+            Some(value) => {
+                let parsed = uuid::Uuid::parse_str(&value)
+                    .map_err(|_| "终端会话标识无效".to_string())?;
+                if value.len() != 36 || parsed.to_string() != value {
+                    return Err("终端会话标识无效".to_string());
+                }
+                value
+            }
+            None => uuid::Uuid::new_v4().to_string(),
+        };
+        let identity_file = request
+            .identity_file
+            .filter(|value| !value.trim().is_empty());
+        if identity_file.as_ref().is_some_and(|value| {
+            value.len() > MAX_SSH_IDENTITY_PATH_BYTES || value.chars().any(char::is_control)
+        }) {
+            return Err("SSH 私钥路径无效".to_string());
+        }
+        if request.identity_passphrase_ref.is_some() && identity_file.is_none() {
+            return Err("未选择私钥时不能提供私钥口令引用".to_string());
+        }
+        file_transfer::validate_optional_reference(request.credential_ref.as_deref(), "ssh-")?;
+        file_transfer::validate_optional_reference(
+            request.identity_passphrase_ref.as_deref(),
+            "key-",
+        )?;
+
+        Ok(Self {
+            session_id,
+            host: request.host,
+            port: request.port,
+            username: request.username,
+            identity_file,
+            credential_ref: request.credential_ref,
+            identity_passphrase_ref: request.identity_passphrase_ref,
+            cols,
+            rows,
+        })
+    }
+}
+
+fn openssh_terminal_arguments(request: &ValidatedStartSshRequest, kex: &str) -> Vec<String> {
+    let mut arguments = vec![
+        "-tt".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=30".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=yes".to_string(),
+        "-o".to_string(),
+        format!("KexAlgorithms={kex}"),
+        "-p".to_string(),
+        request.port.to_string(),
+    ];
+    if let Some(identity_file) = request.identity_file.as_deref() {
+        arguments.extend([
+            "-o".to_string(),
+            "IdentitiesOnly=yes".to_string(),
+            "-i".to_string(),
+            identity_file.to_string(),
+        ]);
+    }
+    if request.credential_ref.is_some() {
+        arguments.extend([
+            "-o".to_string(),
+            "IdentitiesOnly=yes".to_string(),
+            "-o".to_string(),
+            if request.identity_file.is_some() {
+                "PreferredAuthentications=publickey,keyboard-interactive,password".to_string()
+            } else {
+                "PreferredAuthentications=keyboard-interactive,password".to_string()
+            },
+            "-o".to_string(),
+            "PasswordAuthentication=yes".to_string(),
+            "-o".to_string(),
+            "KbdInteractiveAuthentication=yes".to_string(),
+        ]);
+    }
+    if request.credential_ref.is_some() || request.identity_passphrase_ref.is_some() {
+        arguments.extend([
+            "-o".to_string(),
+            "NumberOfPasswordPrompts=1".to_string(),
+        ]);
+    }
+    arguments.extend([
+        "--".to_string(),
+        format!("{}@{}", request.username, request.host),
+    ]);
+    arguments
 }
 
 /// Entry point used when OpenSSH starts the VPShell executable as SSH_ASKPASS.
@@ -713,25 +862,8 @@ fn start_ssh_session(
     manager: State<'_, TerminalManager>,
     request: StartSshRequest,
 ) -> Result<StartSshResponse, String> {
-    if request.host.trim().is_empty() || request.username.trim().is_empty() {
-        return Err("主机地址和用户名不能为空".to_string());
-    }
-    if request.host.starts_with('-')
-        || request.host.chars().any(char::is_whitespace)
-        || request.host.chars().any(char::is_control)
-    {
-        return Err("主机地址格式无效".to_string());
-    }
-    if request.username.starts_with('-')
-        || request.username.contains('@')
-        || request.username.chars().any(char::is_whitespace)
-        || request.username.chars().any(char::is_control)
-    {
-        return Err("SSH 用户名格式无效".to_string());
-    }
-    let session_id = request
-        .session_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let request = ValidatedStartSshRequest::try_from(request)?;
+    let session_id = request.session_id.clone();
 
     if lock_sessions(&manager)?.contains_key(&session_id) {
         return Err("该终端会话已经连接".to_string());
@@ -741,54 +873,17 @@ fn start_ssh_session(
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
-            rows: request.rows.unwrap_or(32),
-            cols: request.cols.unwrap_or(120),
+            rows: request.rows,
+            cols: request.cols,
             pixel_width: 0,
             pixel_height: 0,
         })
         .map_err(|error| format!("无法创建终端: {error}"))?;
 
     let mut command = CommandBuilder::new("ssh");
-    command.arg("-tt");
-    command.arg("-o");
-    command.arg("ServerAliveInterval=30");
-    command.arg("-o");
-    command.arg("ServerAliveCountMax=3");
-    command.arg("-o");
-    command.arg("StrictHostKeyChecking=yes");
-    command.arg("-o");
-    command.arg(format!(
-        "KexAlgorithms={}",
-        file_transfer::openssh_kex_algorithms()?
-    ));
-    command.arg("-p");
-    command.arg(request.port.to_string());
-
-    let identity_file = request
-        .identity_file
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    if let Some(identity_file) = identity_file {
-        command.arg("-o");
-        command.arg("IdentitiesOnly=yes");
-        command.arg("-i");
-        command.arg(identity_file);
-    }
-
-    if request.credential_ref.is_some() {
-        // Do not let unrelated agent keys exhaust sshd MaxAuthTries before the imported password.
-        command.arg("-o");
-        command.arg("IdentitiesOnly=yes");
-        command.arg("-o");
-        command.arg(if identity_file.is_some() {
-            "PreferredAuthentications=publickey,keyboard-interactive,password"
-        } else {
-            "PreferredAuthentications=keyboard-interactive,password"
-        });
-        command.arg("-o");
-        command.arg("PasswordAuthentication=yes");
-        command.arg("-o");
-        command.arg("KbdInteractiveAuthentication=yes");
+    let kex = file_transfer::openssh_kex_algorithms()?;
+    for argument in openssh_terminal_arguments(&request, &kex) {
+        command.arg(argument);
     }
 
     configure_ssh_askpass(
@@ -797,8 +892,6 @@ fn start_ssh_session(
         request.identity_passphrase_ref.as_deref(),
     )?;
 
-    command.arg("--");
-    command.arg(format!("{}@{}", request.username, request.host));
     command.env("TERM", "xterm-256color");
 
     let mut child = pair
@@ -911,7 +1004,11 @@ fn start_ssh_session(
         }
     });
 
-    Ok(StartSshResponse { session_id })
+    Ok(StartSshResponse {
+        schema_version: 1,
+        engine: OPENSSH_ENGINE_NAME,
+        session_id,
+    })
 }
 
 #[tauri::command]
@@ -1407,7 +1504,26 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalOutputEvent, select_askpass_reference};
+    use super::{
+        StartSshRequest, StartSshResponse, TerminalOutputEvent, ValidatedStartSshRequest,
+        openssh_terminal_arguments, select_askpass_reference,
+    };
+
+    fn openssh_request() -> StartSshRequest {
+        StartSshRequest {
+            session_id: Some("018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string()),
+            host: "host.example".to_string(),
+            port: 22,
+            username: "operator".to_string(),
+            identity_file: Some("/tmp/vpshell-test-key".to_string()),
+            credential_ref: Some("ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212".to_string()),
+            identity_passphrase_ref: Some(
+                "key-018f1f55-26f8-7a9f-9cd8-4d7558482213".to_string(),
+            ),
+            cols: Some(120),
+            rows: Some(32),
+        }
+    }
 
     #[test]
     fn askpass_only_selects_secrets_for_authentication_prompts() {
@@ -1454,5 +1570,114 @@ mod tests {
         })
         .unwrap();
         assert_eq!(native["deliveryId"], 7);
+    }
+
+    #[test]
+    fn openssh_request_and_arguments_are_bounded_and_fail_closed() {
+        let validated = ValidatedStartSshRequest::try_from(openssh_request()).unwrap();
+        let arguments = openssh_terminal_arguments(&validated, "curve25519-sha256");
+        let has_pair = |first: &str, second: &str| {
+            arguments
+                .windows(2)
+                .any(|pair| pair[0] == first && pair[1] == second)
+        };
+        assert!(has_pair("-o", "StrictHostKeyChecking=yes"));
+        assert!(has_pair("-o", "IdentitiesOnly=yes"));
+        assert!(has_pair("-o", "NumberOfPasswordPrompts=1"));
+        assert!(has_pair("--", "operator@host.example"));
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.starts_with("ssh-"))
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.starts_with("key-"))
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.contains("ProxyCommand"))
+        );
+
+        let mut invalid = openssh_request();
+        invalid.host = "-oProxyCommand=bad".to_string();
+        assert!(ValidatedStartSshRequest::try_from(invalid).is_err());
+        let mut invalid = openssh_request();
+        invalid.username = "operator@other".to_string();
+        assert!(ValidatedStartSshRequest::try_from(invalid).is_err());
+        let mut invalid = openssh_request();
+        invalid.port = 0;
+        assert!(ValidatedStartSshRequest::try_from(invalid).is_err());
+        let mut invalid = openssh_request();
+        invalid.cols = Some(1001);
+        assert!(ValidatedStartSshRequest::try_from(invalid).is_err());
+        let mut invalid = openssh_request();
+        invalid.session_id = Some("not-a-uuid".to_string());
+        assert!(ValidatedStartSshRequest::try_from(invalid).is_err());
+        assert!(
+            serde_json::from_value::<StartSshRequest>(serde_json::json!({
+                "host": "host.example",
+                "port": 22,
+                "username": "operator",
+                "proxyCommand": "unsafe"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn openssh_response_identifies_the_effective_engine() {
+        let value = serde_json::to_value(StartSshResponse {
+            schema_version: 1,
+            engine: "openssh",
+            session_id: "018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string(),
+        })
+        .unwrap();
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["engine"], "openssh");
+        assert_eq!(value["sessionId"], "018f1f55-26f8-7a9f-9cd8-4d7558482211");
+    }
+
+    #[test]
+    fn real_system_openssh_terminal_when_configured() {
+        let Ok(host) = std::env::var("VPSHELL_NATIVE_TEST_HOST") else {
+            return;
+        };
+        let port = std::env::var("VPSHELL_NATIVE_TEST_PORT")
+            .expect("OpenSSH test port")
+            .parse()
+            .expect("numeric OpenSSH test port");
+        let username =
+            std::env::var("VPSHELL_NATIVE_TEST_USER").expect("OpenSSH test username");
+        let identity_file = std::env::var("VPSHELL_NATIVE_TEST_IDENTITY_FILE")
+            .expect("OpenSSH test identity file");
+        let request = ValidatedStartSshRequest::try_from(StartSshRequest {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            host,
+            port,
+            username,
+            identity_file: Some(identity_file),
+            credential_ref: None,
+            identity_passphrase_ref: None,
+            cols: Some(120),
+            rows: Some(32),
+        })
+        .expect("validated OpenSSH fixture request");
+        let kex = super::file_transfer::openssh_kex_algorithms().expect("OpenSSH KEX policy");
+        let mut arguments = openssh_terminal_arguments(&request, &kex);
+        arguments.push("printf 'VPSHELL_SYSTEM_OPENSSH_OK\\n'".to_string());
+        let output = std::process::Command::new("ssh")
+            .args(arguments)
+            .output()
+            .expect("run system OpenSSH fixture");
+        let combined = [output.stdout, output.stderr].concat();
+        assert!(output.status.success(), "system OpenSSH failed");
+        assert!(
+            combined
+                .windows(b"VPSHELL_SYSTEM_OPENSSH_OK".len())
+                .any(|window| window == b"VPSHELL_SYSTEM_OPENSSH_OK")
+        );
     }
 }
