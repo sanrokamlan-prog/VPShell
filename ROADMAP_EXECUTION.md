@@ -116,10 +116,11 @@
 | 完成 | onboarding 完成状态作为第三个固定布尔设置实体接入保存、恢复、加密 operation、远端投影与防回声；PR #1 run `32183041743`（`718f96e`）全平台 Actions 全绿 |
 | 完成 | 默认监控采样频率作为第四个固定整数设置实体接入 AppState、会话控制、加密 operation、远端投影与防回声；PR #1 run `32184979352`（`44c5f65`）全平台 Actions 全绿 |
 | 完成 | 桌面标准 HTTPS WebDAV 产品入口、Rust 系统凭据引用、共享 bootstrap/协调器和自动调度接线；PR #1 run `32187922267`（`3e04035`）全平台 Actions 全绿 |
-| 进行中 | 桌面 WebDAV 显式 PEM CA：Rust-owned 私有导入/引用/重读、失败清理和 Android 禁权；真实服务矩阵不冒充完成 |
-| 待实现 | 历史/背景/其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
+| 完成 | 桌面 WebDAV 显式 PEM CA：Rust-owned 私有导入/引用/重读、失败清理、真实临时 CA TLS fixture 和 Android 禁权；PR #1 run `32190493641`（`717bb41`）全平台 Actions 全绿 |
+| 进行中 | 背景可见度作为第五个固定 setting 实体接入事务 operation、远端投影和防回声；背景图片来源/资产仍保持本机 |
+| 待实现 | 历史/背景图片 blob/其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/标准 HTTPS WebDAV 产品入口、主机公开字段、安全自建脚本、四个固定设置实体、桌面持久冲突中心及自动调度均已通过 Actions；WebDAV 显式 PEM CA 正在实现，历史/背景/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、四个既有固定设置实体、桌面持久冲突中心及自动调度均已通过 Actions；第五个背景可见度 setting 正在实现，历史/背景图片 blob/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -266,7 +267,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 桌面 WebDAV 显式 PEM CA 本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 四份严格 JSON、97-command manifest 唯一项/handler/capability 并集完整对齐、CA 安装/删除/配置仅桌面授权且 Android 运行 Sync 继续禁权、测试 PEM 的 OpenSSL 解析与有效期、Linux TLS fixture `bash -n`、三项 CA manager 测试及 provider/coordinator/AppStore/security 聚焦断言静态清单、失败清理与系统 CA 切换链路、无日志宏/路径错误回显、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区起止均为 52%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、前端依赖、SDK 或大型构建环境；frontend、四平台 locked fmt/check/test、Linux 真实临时 CA TLS fixture 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | B9 桌面 WebDAV 显式 PEM CA 首轮 Actions 与编译/格式修复 | 提交 `45b3c12` 的 PR #1 run `32189828275` 已全部进入终态：frontend 生产构建 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel/arm 均在首个 `cargo fmt --check` 报告 coordinator 两处和 CA manager 四处一致排版差异后失败，locked check/test 与 Linux 真实 TLS fixture 因而跳过；Android frontend 构建成功，Rust 编译在 CA 有界读取的 `File::by_ref` 因 `Read`/`Write` 同名方法歧义失败。已严格按 runner diff 机械排版，并改为显式 `Read::by_ref(&mut file)`，不改变读取上限或信任行为；等待修复提交后的完整矩阵。 |
 | 2026-08-18 | B9 桌面 WebDAV 显式 PEM CA 编译/格式修复本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 四份严格 JSON、97-command manifest 唯一项/handler/`allow-<kebab-case>` capability 并集完整对齐、Android CA/配置/运行/解决/取消/锁定 Sync 命令禁权、runner 报告的六处精确 rustfmt 形态、`Read::by_ref(&mut file)` 显式消歧、无 CA 日志宏、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区保持 52%。VPS 未下载工具链、前端依赖、SDK 或大型构建环境；完整四平台 locked fmt/check/test、Linux 真实临时 CA TLS fixture、frontend 与 Android 构建交给修复提交的 PR #1 Actions。 |
+| 2026-08-18 | B9 桌面 WebDAV 显式 PEM CA（Actions 完成） | 编译/格式修复提交 `717bb41` 的 PR #1 run `32190493641` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实临时自签 CA TLS fixture及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。真实 WebDAV 服务、代理、断网与多设备矩阵保持外部验收。 |
+| 2026-08-18 | B9 背景可见度固定 setting（待 Actions） | `vpshell-state.sqlite3` 升级 schema v8，为固定 UUID 的第五个 setting 实体回填内容指纹；旧状态为默认 20% 时只记录指纹，合法非默认值才入队。AppState `wallpaper.opacity` 必须为 0.05–0.65 且以百分之一为步长，operation 只含 5–65 的 `wallpaperOpacity` 整数；远端投影要求恰好一个完整字段，只写回 opacity，并保留本机 `source/value`。普通保存、远端投影与迁移复用按实体指纹防回声；删除、额外/错误类型、越界和高精度值 fail closed。移除原有未接线的禁用背景同步占位控件，不宣称图片同步。聚焦测试覆盖本地 35% patch/恢复默认、v7 默认与非默认迁移、远端 60% 投影及资产保留、防回声、非法字段原子回滚、merge 白名单，以及真实协调器周期中的本地密文、远端并发冲突和 AppState 写回。背景图片来源、缓存资产、分块 blob 与回收仍待独立实现。 |
+| 2026-08-18 | B9 背景可见度固定 setting 本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 四份严格 JSON、97-command manifest 唯一项/handler/`allow-<kebab-case>` capability 并集完整对齐、Android 配置/运行/解决/取消/锁定 Sync 禁权、schema v8 迁移/第五固定实体/提取/默认/入队/精确投影/按实体指纹链路、AppStore/merge/coordinator 三层聚焦测试清单、背景同步占位控件移除、CSS 括号、偏好 operation 只含整数 opacity、无新增日志宏、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区从 52% 到 53%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、前端依赖、SDK 或大型构建环境；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送桌面 WebDAV 显式 PEM CA 的编译/格式修复；下一轮等待该修复提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后从历史/背景/其他尚未建模设置中选择下一个可形成安全闭环的业务域，不以缺少删除语义的 append-only 历史合并冒充完整历史同步，也不在缺少分块/安全安装时宣称背景同步完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送背景可见度固定 setting；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后继续选择历史/背景图片 blob/其他尚未建模设置中的下一个安全闭环；不以缺少删除语义的 append-only 历史合并冒充完整历史同步，也不在缺少分块/安全安装时宣称背景图片同步完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

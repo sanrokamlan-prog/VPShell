@@ -1394,8 +1394,7 @@ button.sync-status {
 .broadcast-targets input,
 .package-toggle input,
 .sync-options input,
-.wallpaper-options input,
-.sync-wallpaper input {
+.wallpaper-options input {
   accent-color: var(--green);
 }
 
@@ -2908,15 +2907,6 @@ button.sync-status {
   color: var(--text-muted);
   font-size: 10px;
   text-align: right;
-}
-
-.sync-wallpaper {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 14px;
-  color: var(--text-muted);
-  font-size: 10px;
 }
 
 .appearance-divider {

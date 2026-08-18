@@ -1371,6 +1371,11 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
         {
             Ok(())
         }
+        (EntityKind::Setting, "wallpaperOpacity", FieldValue::Integer(value))
+            if (5..=65).contains(value) =>
+        {
+            Ok(())
+        }
         (
             EntityKind::Setting,
             "autoUploadEditedFiles" | "packageTransfersEnabled",
@@ -1455,6 +1460,7 @@ fn field_allowed(kind: &EntityKind, field: &str) -> bool {
                 | "fontSize"
                 | "lineHeight"
                 | "monitorInterval"
+                | "wallpaperOpacity"
                 | "locale"
                 | "autoUploadEditedFiles"
                 | "packageTransfersEnabled"
@@ -2044,6 +2050,15 @@ mod tests {
                 "monitorInterval",
                 FieldValue::Integer(30),
             ),
+            patch(
+                77,
+                DEVICE_A,
+                107,
+                EntityKind::Setting,
+                HOST_ID,
+                "wallpaperOpacity",
+                FieldValue::Integer(35),
+            ),
         ];
         let mut state = MergeState::default();
         for operation in &operations {
@@ -2069,14 +2084,15 @@ mod tests {
                         FieldValue::Flag(false),
                     ),
                     ("onboardingCompleted".to_string(), FieldValue::Flag(true)),
+                    ("wallpaperOpacity".to_string(), FieldValue::Integer(35)),
                 ])),
             }]
         );
         assert!(
             patch(
-                77,
+                78,
                 DEVICE_A,
-                107,
+                108,
                 EntityKind::Setting,
                 HOST_ID,
                 "packageTransfersEnabled",
@@ -2087,13 +2103,26 @@ mod tests {
         );
         assert!(
             patch(
-                78,
+                79,
                 DEVICE_A,
-                108,
+                109,
                 EntityKind::Setting,
                 HOST_ID,
                 "monitorInterval",
                 FieldValue::Integer(4),
+            )
+            .encode()
+            .is_err()
+        );
+        assert!(
+            patch(
+                80,
+                DEVICE_A,
+                110,
+                EntityKind::Setting,
+                HOST_ID,
+                "wallpaperOpacity",
+                FieldValue::Integer(66),
             )
             .encode()
             .is_err()

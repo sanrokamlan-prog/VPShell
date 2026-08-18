@@ -17,11 +17,12 @@ use crate::sync_merge::{
     EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection, entity_fields_are_syncable,
 };
 
-const STORE_SCHEMA_VERSION: i64 = 7;
+const STORE_SCHEMA_VERSION: i64 = 8;
 const TERMINAL_APPEARANCE_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000001";
 const APPLICATION_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000002";
 const ONBOARDING_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000003";
 const MONITOR_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000004";
+const WALLPAPER_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000005";
 const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVENTS: i64 = 10_000;
@@ -385,6 +386,30 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
                 MONITOR_PREFERENCES_ENTITY_ID,
                 monitor_preference_sync_fields(&state)?,
                 &default_monitor_preference_sync_fields(),
+                revision.max(1) as u64,
+                updated_at_ms.max(0),
+            )?;
+        }
+    }
+    if version < 8 {
+        let existing: Option<(i64, String, i64)> = transaction
+            .query_row(
+                "SELECT revision, state_json, updated_at_ms
+                 FROM app_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取待迁移 AppState 背景可见度偏好: {error}"))?;
+        if let Some((revision, state_json, updated_at_ms)) = existing {
+            let state: Value = serde_json::from_str(&state_json)
+                .map_err(|error| format!("待迁移 AppState JSON 损坏: {error}"))?;
+            queue_fixed_setting_sync_change(
+                &transaction,
+                true,
+                WALLPAPER_PREFERENCES_ENTITY_ID,
+                wallpaper_preference_sync_fields(&state)?,
+                &default_wallpaper_preference_sync_fields(),
                 revision.max(1) as u64,
                 updated_at_ms.max(0),
             )?;
@@ -1294,6 +1319,36 @@ fn default_monitor_preference_sync_fields() -> BTreeMap<String, FieldValue> {
     BTreeMap::from([("monitorInterval".to_string(), FieldValue::Integer(15))])
 }
 
+fn wallpaper_preference_sync_fields(
+    value: &Value,
+) -> Result<BTreeMap<String, FieldValue>, String> {
+    let root = ensure_object(value, "root")?;
+    let wallpaper = ensure_object(
+        root.get("wallpaper")
+            .ok_or_else(|| "本地状态缺少 wallpaper".to_string())?,
+        "wallpaper",
+    )?;
+    let opacity = wallpaper
+        .get("opacity")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "本地状态 wallpaper.opacity 无效".to_string())?;
+    let opacity_scaled = (opacity * 100.0).round();
+    if !opacity.is_finite() || (opacity * 100.0 - opacity_scaled).abs() > 0.000_001 {
+        return Err("本地状态 wallpaper.opacity 必须以百分之一为步长".to_string());
+    }
+    let opacity = i64::try_from(opacity_scaled as i128)
+        .map_err(|_| "本地状态 wallpaper.opacity 超出范围".to_string())?;
+    let fields = BTreeMap::from([("wallpaperOpacity".to_string(), FieldValue::Integer(opacity))]);
+    if !entity_fields_are_syncable(&EntityKind::Setting, &fields) {
+        return Err("本地状态背景可见度偏好未通过同步字段验证".to_string());
+    }
+    Ok(fields)
+}
+
+fn default_wallpaper_preference_sync_fields() -> BTreeMap<String, FieldValue> {
+    BTreeMap::from([("wallpaperOpacity".to_string(), FieldValue::Integer(20))])
+}
+
 fn sync_fields_hash(fields: &BTreeMap<String, FieldValue>) -> Result<String, String> {
     let encoded =
         serde_json::to_vec(fields).map_err(|error| format!("无法编码本地同步字段指纹: {error}"))?;
@@ -1422,6 +1477,15 @@ fn queue_setting_sync_changes(
         &default_monitor_preference_sync_fields(),
         revision,
         now,
+    )?;
+    queue_fixed_setting_sync_change(
+        transaction,
+        initial_state,
+        WALLPAPER_PREFERENCES_ENTITY_ID,
+        wallpaper_preference_sync_fields(next)?,
+        &default_wallpaper_preference_sync_fields(),
+        revision,
+        now,
     )
 }
 
@@ -1462,6 +1526,9 @@ fn validate_setting_projection_fields(
         }
         MONITOR_PREFERENCES_ENTITY_ID => {
             fields.len() == 1 && fields.keys().all(|field| field == "monitorInterval")
+        }
+        WALLPAPER_PREFERENCES_ENTITY_ID => {
+            fields.len() == 1 && fields.keys().all(|field| field == "wallpaperOpacity")
         }
         _ => false,
     };
@@ -2542,6 +2609,7 @@ impl AppStore {
                 && setting.entity_id != APPLICATION_PREFERENCES_ENTITY_ID
                 && setting.entity_id != ONBOARDING_ENTITY_ID
                 && setting.entity_id != MONITOR_PREFERENCES_ENTITY_ID
+                && setting.entity_id != WALLPAPER_PREFERENCES_ENTITY_ID
             {
                 return Err("AppState 设置同步投影包含未接线实体".to_string());
             }
@@ -2642,6 +2710,10 @@ impl AppStore {
             .iter()
             .find(|setting| setting.entity_id == MONITOR_PREFERENCES_ENTITY_ID)
             .and_then(|setting| setting.fields.as_ref());
+        let wallpaper_fields = projection
+            .iter()
+            .find(|setting| setting.entity_id == WALLPAPER_PREFERENCES_ENTITY_ID)
+            .and_then(|setting| setting.fields.as_ref());
         if let Some(fields) = terminal_fields {
             let font_family = match fields.get("fontFamily") {
                 Some(FieldValue::Text(value)) => value.clone(),
@@ -2707,6 +2779,19 @@ impl AppStore {
                 "monitorIntervalSeconds".to_string(),
                 Value::Number(interval.into()),
             );
+        }
+        if let Some(fields) = wallpaper_fields {
+            let opacity = match fields.get("wallpaperOpacity") {
+                Some(FieldValue::Integer(value)) => *value,
+                _ => return Err("远端设置同步投影缺少 wallpaperOpacity".to_string()),
+            };
+            let opacity = serde_json::Number::from_f64(opacity as f64 / 100.0)
+                .ok_or_else(|| "远端设置同步 wallpaperOpacity 无效".to_string())?;
+            let wallpaper = root
+                .get_mut("wallpaper")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "AppState wallpaper 损坏".to_string())?;
+            wallpaper.insert("opacity".to_string(), Value::Number(opacity));
         }
         validate_state_json(
             &serde_json::to_string(&next_value)
@@ -3460,6 +3545,134 @@ mod tests {
 
         let mut invalid_local = projected;
         invalid_local["settings"]["monitorIntervalSeconds"] = Value::String("fast".into());
+        assert!(
+            store
+                .save(SaveAppStateRequest {
+                    state_json: invalid_local.to_string(),
+                    expected_revision: revision,
+                })
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, revision);
+    }
+
+    #[test]
+    fn wallpaper_opacity_changefeed_preserves_local_asset_and_is_bounded_and_non_echoing() {
+        let root = TempDir::new("wallpaper-opacity-setting");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        acknowledge_initial_host(&store, &vault_id);
+
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["wallpaper"] = serde_json::json!({
+            "source": "local",
+            "value": "device-only-wallpaper.webp",
+            "opacity": 0.35
+        });
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        let changes = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].entity_id, WALLPAPER_PREFERENCES_ENTITY_ID);
+        let LocalEntityMutation::Patch(fields) = &changes[0].mutation else {
+            panic!("wallpaper opacity preference must be a patch");
+        };
+        assert_eq!(
+            fields,
+            &BTreeMap::from([("wallpaperOpacity".to_string(), FieldValue::Integer(35))])
+        );
+        store
+            .acknowledge_entity_sync_change(&vault_id, &changes[0].operation_id)
+            .unwrap();
+
+        state["wallpaper"]["opacity"] = serde_json::json!(0.2);
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 2,
+            })
+            .unwrap();
+        let restored = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(restored.len(), 1);
+        let LocalEntityMutation::Patch(fields) = &restored[0].mutation else {
+            panic!("restored wallpaper opacity must be a patch");
+        };
+        assert_eq!(fields, &default_wallpaper_preference_sync_fields());
+        store
+            .acknowledge_entity_sync_change(&vault_id, &restored[0].operation_id)
+            .unwrap();
+
+        let projection = vec![MergedEntityProjection {
+            entity_id: WALLPAPER_PREFERENCES_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([(
+                "wallpaperOpacity".to_string(),
+                FieldValue::Integer(60),
+            )])),
+        }];
+        assert_eq!(
+            store
+                .apply_remote_setting_projection(&vault_id, 3, &projection, 5_000)
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let snapshot = store.snapshot().unwrap();
+        let projected: Value =
+            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+        assert_eq!(projected["wallpaper"]["source"], "local");
+        assert_eq!(projected["wallpaper"]["value"], "device-only-wallpaper.webp");
+        assert_eq!(projected["wallpaper"]["opacity"], 0.6);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+        store
+            .save(SaveAppStateRequest {
+                state_json: projected.to_string(),
+                expected_revision: snapshot.revision,
+            })
+            .unwrap();
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+
+        let out_of_range = vec![MergedEntityProjection {
+            entity_id: WALLPAPER_PREFERENCES_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([(
+                "wallpaperOpacity".to_string(),
+                FieldValue::Integer(66),
+            )])),
+        }];
+        let revision = store.snapshot().unwrap().revision;
+        assert!(
+            store
+                .apply_remote_setting_projection(&vault_id, 4, &out_of_range, 5_001)
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, revision);
+        let wrong_shape = vec![MergedEntityProjection {
+            entity_id: WALLPAPER_PREFERENCES_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([
+                (
+                    "wallpaperOpacity".to_string(),
+                    FieldValue::Text("60".into()),
+                ),
+                ("fontSize".to_string(), FieldValue::Integer(13)),
+            ])),
+        }];
+        assert!(
+            store
+                .apply_remote_setting_projection(&vault_id, 4, &wrong_shape, 5_002)
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, revision);
+
+        let mut invalid_local = projected;
+        invalid_local["wallpaper"]["opacity"] = serde_json::json!(0.651);
         assert!(
             store
                 .save(SaveAppStateRequest {
@@ -4317,7 +4530,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(setting_states, 4);
+        assert_eq!(setting_states, 5);
     }
 
     #[test]
@@ -4395,6 +4608,84 @@ mod tests {
         assert_eq!(
             fields,
             BTreeMap::from([("monitorInterval".to_string(), FieldValue::Integer(30))])
+        );
+    }
+
+    #[test]
+    fn version_seven_snapshot_backfills_wallpaper_opacity_fingerprint_or_change_once() {
+        let default_root = TempDir::new("sync-v7-wallpaper-opacity-default");
+        let default_store = AppStore::load(default_root.0.clone()).unwrap();
+        default_store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        drop(default_store);
+        let default_connection = open_connection(&database_path(&default_root.0)).unwrap();
+        default_connection
+            .execute(
+                "DELETE FROM app_sync_setting_state WHERE entity_id = ?1",
+                params![WALLPAPER_PREFERENCES_ENTITY_ID],
+            )
+            .unwrap();
+        default_connection
+            .pragma_update(None, "user_version", 7)
+            .unwrap();
+        drop(default_connection);
+        let migrated_default = AppStore::load(default_root.0.clone()).unwrap();
+        let default_changes = migrated_default.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(default_changes.len(), 1);
+        assert_eq!(default_changes[0].entity_kind, EntityKind::Host);
+
+        let changed_root = TempDir::new("sync-v7-wallpaper-opacity-changed");
+        let changed_store = AppStore::load(changed_root.0.clone()).unwrap();
+        changed_store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let mut changed_state: Value = serde_json::from_str(&fixture()).unwrap();
+        changed_state["wallpaper"]["opacity"] = serde_json::json!(0.35);
+        changed_store
+            .save(SaveAppStateRequest {
+                state_json: changed_state.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        drop(changed_store);
+        let changed_connection = open_connection(&database_path(&changed_root.0)).unwrap();
+        changed_connection
+            .execute(
+                "DELETE FROM app_sync_changes WHERE entity_id = ?1",
+                params![WALLPAPER_PREFERENCES_ENTITY_ID],
+            )
+            .unwrap();
+        changed_connection
+            .execute(
+                "DELETE FROM app_sync_setting_state WHERE entity_id = ?1",
+                params![WALLPAPER_PREFERENCES_ENTITY_ID],
+            )
+            .unwrap();
+        changed_connection
+            .pragma_update(None, "user_version", 7)
+            .unwrap();
+        drop(changed_connection);
+
+        let migrated_changed = AppStore::load(changed_root.0.clone()).unwrap();
+        let changed = migrated_changed
+            .pending_entity_sync_changes(128)
+            .unwrap()
+            .into_iter()
+            .find(|change| change.entity_id == WALLPAPER_PREFERENCES_ENTITY_ID)
+            .expect("non-default wallpaper opacity must be backfilled");
+        let LocalEntityMutation::Patch(fields) = changed.mutation else {
+            panic!("migrated wallpaper opacity must be a patch");
+        };
+        assert_eq!(
+            fields,
+            BTreeMap::from([("wallpaperOpacity".to_string(), FieldValue::Integer(35))])
         );
     }
 

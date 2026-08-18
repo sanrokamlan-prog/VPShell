@@ -3227,7 +3227,6 @@ function App() {
           </div>
           <label className="field full"><span>图片地址</span><div className="path-picker"><input type="url" disabled={appState.wallpaper.source !== "url"} value={appState.wallpaper.source === "url" ? appState.wallpaper.value : ""} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: event.target.value } }))} placeholder="https://image.example.com/background.webp" /><button className="secondary-button" type="button" disabled={appState.wallpaper.source !== "url" || !appState.wallpaper.value.trim()} onClick={() => void applyRemoteWallpaper()}><Download size={14} /> 应用</button></div></label>
           <label className="slider-field"><span>背景可见度</span><input type="range" min="0.05" max="0.65" step="0.05" value={appState.wallpaper.opacity} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, opacity: Number(event.target.value) } }))} /><output>{Math.round(appState.wallpaper.opacity * 100)}%</output></label>
-          <label className="sync-wallpaper"><input type="checkbox" disabled /><span>加密同步接通后可选择同步</span></label>
           <div className="appearance-divider" />
           <div className="appearance-heading"><Type size={16} /><strong>终端字体</strong>{appState.terminalAppearance.customFontName ? <small>{appState.terminalAppearance.customFontName}</small> : null}</div>
           <div className="font-controls">

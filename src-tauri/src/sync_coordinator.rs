@@ -1858,6 +1858,89 @@ mod tests {
     }
 
     #[test]
+    fn cycle_syncs_bounded_wallpaper_opacity_without_device_asset() {
+        let root = TempDir::new("app-state-wallpaper-opacity");
+        let store = test_app_store(&root);
+        let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
+        state["wallpaper"] = serde_json::json!({
+            "source": "local",
+            "value": "device-only-wallpaper.webp",
+            "opacity": 0.35
+        });
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let preference_change = store
+            .pending_entity_sync_changes(128)
+            .unwrap()
+            .into_iter()
+            .find(|change| {
+                matches!(
+                    &change.mutation,
+                    crate::sync_merge::LocalEntityMutation::Patch(fields)
+                        if fields.contains_key("wallpaperOpacity")
+                )
+            })
+            .unwrap();
+        let crate::sync_merge::LocalEntityMutation::Patch(fields) = &preference_change.mutation
+        else {
+            panic!("wallpaper opacity must be a patch");
+        };
+        assert_eq!(
+            fields["wallpaperOpacity"],
+            crate::sync_merge::FieldValue::Integer(35)
+        );
+        let setting_entity = preference_change.entity_id;
+
+        let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let vault_id = Uuid::new_v4().to_string();
+        let remote_device = Uuid::new_v4().to_string();
+        let vault_key = VaultKey::generate().unwrap();
+        let remote = encrypt_sync_object(
+            &vault_key,
+            &vault_id,
+            SyncObjectKind::Event,
+            &Uuid::new_v4().to_string(),
+            Some(&remote_device),
+            Some(1),
+            &operation_integer_patch(
+                &remote_device,
+                1,
+                "setting",
+                &setting_entity,
+                "wallpaperOpacity",
+                60,
+            ),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider.insert(
+            &format!("vpshell/v1/{vault_id}/segments/{remote_device}/1.oseg"),
+            remote,
+        );
+        coordinator
+            .attach_session(provider, vault_key, &vault_id)
+            .unwrap();
+
+        let status = coordinator.run_once(&store, 1_000).unwrap();
+        assert_eq!(status.last_uploaded_objects, 2);
+        assert_eq!(status.last_downloaded_objects, 1);
+        assert_eq!(status.open_conflicts, 1);
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
+        assert_eq!(state["wallpaper"]["source"], "local");
+        assert_eq!(state["wallpaper"]["value"], "device-only-wallpaper.webp");
+        assert_eq!(state["wallpaper"]["opacity"], 0.6);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+    }
+
+    #[test]
     fn cycle_uploads_claimed_objects_and_applies_remote_merge_atomically() {
         let root = TempDir::new("cycle");
         let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();
