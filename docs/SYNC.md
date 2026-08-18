@@ -1,6 +1,6 @@
 # VPShell 加密同步设计
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。设置与密钥解锁、自动触发和冲突解决 UI、真实扩展 transport/Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把内部原语描述成可用同步产品。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 已接入显式初始化/解锁和手动单周期；AppState operation 入队/回写、自动触发和冲突解决 UI、WebDAV/扩展 provider 产品凭据、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
 
 ### 当前 v1 密码学边界
 
@@ -8,7 +8,7 @@
 
 业务对象按 event/blob/index/checkpoint/device-registry 五个 HKDF-SHA256 label 派生不同密钥；vault ID 参与 extract salt，对象类型、对象 ID、设备/序号、算法和密文长度进入 AAD。对象明文最多 16 MiB，JSON 信封最多 24 MiB，keyslot 最多 16 KiB；UUID、base64url、类型与序号组合逐字段验证，未知字段和未知版本拒绝。每次生产加密都从 OS CSPRNG 取得随机 nonce；固定 nonce/salt 入口只在单元测试中用于稳定向量。
 
-该格式能认证对象身份并阻止把密文搬到另一域/vault/设备/序号后解密，但相同完整对象的重放需要后续 outbox/head/sequence 状态机检测。当前没有任何 IPC 返回 VMK、KEK、密码或解密明文；provider 也尚未由产品同步流程调用。
+该格式能认证对象身份并阻止把密文搬到另一域/vault/设备/序号后解密，但相同完整对象的重放需要后续 outbox/head/sequence 状态机检测。当前没有任何 IPC 返回 VMK、KEK、密码或解密明文；产品流程只调用 Local Folder，WebDAV 与扩展 provider 尚未开放。
 
 ## 1. 目标
 
@@ -51,9 +51,9 @@ TLS 仍然必须启用，但 TLS 只保护传输链路，不能替代客户端�
 | 能力 | v0.1.0 | 目标 |
 | --- | --- | --- |
 | 本地业务存储 | WebView `localStorage` 明文 JSON（legacy） | Rust 管理的 SQLite schema v1 快照 + 有界事件域；同步前再做 E2EE 对象化 |
-| Provider | 设置页仍是草稿；Rust 已实现 Local Folder/WebDAV 不可变对象接口并接入内部协调器 | 可由用户配置、解锁和自动调度的 provider |
-| 二级密码 | 设置 UI 仍只是本地草稿；Rust v1 密码学层已能用 Argon2id 派生 KEK 并包裹随机 VMK，但尚未接入 UI/provider | Argon2id 派生 KEK，包裹随机 Vault Master Key |
-| 同步动作 | UI 仍只写本地草稿；Rust 单周期协调器已连接 provider、outbox、密码学和 merge，Android 只读状态可见 | 启动/网络恢复/业务变更/手动触发的自动调度与完整冲突处理 |
+| Provider | 桌面 Local Folder 已接入；WebDAV 与扩展 provider 仍只有内部接口/adapter | 可由用户配置、解锁和自动调度的 provider |
+| 二级密码 | Local Folder bootstrap 已用 Argon2id keyslot 包裹随机 VMK，密码不持久化；轮换/恢复 UI 未接线 | Argon2id 派生 KEK，包裹随机 Vault Master Key |
+| 同步动作 | 桌面可显式运行单周期，Android 只读状态可见；业务 operation 入队/回写与自动调度未接线 | 启动/网络恢复/业务变更/手动触发的自动调度与完整冲突处理 |
 | 冲突 | 无 | 事件并集、字段级 LWW、tombstone、冲突中心 |
 | TOTP | 只有 Gateway 条件开关 | 只用于自建 Gateway 账户登录 |
 | 凭据同步 | 只有开关 | 默认关闭的独立凭据密钥域 |
@@ -386,7 +386,7 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：内部 Local Folder/WebDAV、outbox 与单周期协调器已接通；仍需产品设置/解锁/自动触发、真实外部服务器兼容矩阵及断网退避测试。
+3. **MVP provider**：桌面 Local Folder 已接通初始化/解锁和手动单周期；仍需业务 operation 入队/回写、自动触发、WebDAV 产品入口、真实外部服务器兼容矩阵及断网退避测试。
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心和远端路径作用域已接入协调器事务；仍需冲突详情/解决 UI 和多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
 6. **大对象**：背景和自建脚本附件分块、限额、安全图片处理和垃圾回收。

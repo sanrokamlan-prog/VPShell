@@ -7,17 +7,22 @@
 
 use std::{
     collections::BTreeSet,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::{
-    sync_crypto::{EncryptedSyncObject, SyncObjectKind, VaultKey},
+    sync_crypto::{
+        Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
+        create_password_keyslot, open_password_keyslot,
+    },
     sync_outbox::{AttemptFailure, JournalErrorCode, RemoteApplyOutcome, SyncJournal},
     sync_provider::{
-        ProviderCancellation, ProviderError, ProviderErrorCode, SyncObjectMetadata,
-        SyncObjectProvider,
+        LocalFolderProvider, ProviderCancellation, ProviderError, ProviderErrorCode,
+        PutObjectOutcome, SyncObjectMetadata, SyncObjectProvider,
     },
 };
 
@@ -26,6 +31,33 @@ const MAX_PUSH_OBJECTS_PER_CYCLE: usize = 128;
 const MAX_PULL_OBJECTS_PER_CYCLE: usize = 1_000;
 const MAX_PULL_BYTES_PER_CYCLE: u64 = 64 * 1024 * 1024;
 const LIST_PAGE_SIZE: usize = 250;
+const BOOTSTRAP_FORMAT_VERSION: u16 = 1;
+const BOOTSTRAP_OBJECT_KEY: &str = "vpshell/v1/bootstrap.json";
+const MAX_BOOTSTRAP_BYTES: usize = 32 * 1024;
+const MAX_LOCAL_FOLDER_PATH_BYTES: usize = 4096;
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum LocalFolderSetupMode {
+    Initialize,
+    Unlock,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfigureLocalFolderSyncRequest {
+    root_path: String,
+    password: String,
+    mode: LocalFolderSetupMode,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncBootstrap {
+    format_version: u16,
+    vault_id: String,
+    password_keyslot: PasswordKeyslot,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +104,7 @@ struct CoordinatorSession {
 struct CoordinatorRuntime {
     phase: SyncCoordinatorPhase,
     session: Option<CoordinatorSession>,
+    configuring: bool,
     running: bool,
     generation: u64,
     cancellation: ProviderCancellation,
@@ -86,6 +119,7 @@ impl Default for CoordinatorRuntime {
         Self {
             phase: SyncCoordinatorPhase::NotConfigured,
             session: None,
+            configuring: false,
             running: false,
             generation: 0,
             cancellation: ProviderCancellation::default(),
@@ -97,9 +131,22 @@ impl Default for CoordinatorRuntime {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct SyncCoordinatorManager {
     journal: SyncJournal,
-    runtime: Mutex<CoordinatorRuntime>,
+    runtime: Arc<Mutex<CoordinatorRuntime>>,
+}
+
+struct ConfigurationGuard<'a> {
+    coordinator: &'a SyncCoordinatorManager,
+}
+
+impl Drop for ConfigurationGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut runtime) = self.coordinator.runtime.lock() {
+            runtime.configuring = false;
+        }
+    }
 }
 
 struct RemoteCandidate {
@@ -121,7 +168,7 @@ impl SyncCoordinatorManager {
             .map_err(|_| "无法初始化同步协调器 journal".to_string())?;
         Ok(Self {
             journal,
-            runtime: Mutex::new(CoordinatorRuntime::default()),
+            runtime: Arc::new(Mutex::new(CoordinatorRuntime::default())),
         })
     }
 
@@ -129,6 +176,16 @@ impl SyncCoordinatorManager {
         self.runtime
             .lock()
             .map_err(|_| "同步协调器状态已损坏".to_string())
+    }
+
+    fn begin_configuration(&self) -> Result<ConfigurationGuard<'_>, String> {
+        let mut runtime = self.lock_runtime()?;
+        if runtime.running || runtime.configuring {
+            return Err("同步运行或配置期间不能开始新的配置".to_string());
+        }
+        runtime.configuring = true;
+        drop(runtime);
+        Ok(ConfigurationGuard { coordinator: self })
     }
 
     pub(crate) fn status(&self) -> Result<SyncCoordinatorStatus, String> {
@@ -170,6 +227,9 @@ impl SyncCoordinatorManager {
 
     pub(crate) fn cancel(&self) -> Result<(), String> {
         let mut runtime = self.lock_runtime()?;
+        if !runtime.running {
+            return Err("当前没有正在运行的同步周期".to_string());
+        }
         runtime.cancellation.cancel();
         runtime.generation = runtime.generation.saturating_add(1);
         runtime.phase = SyncCoordinatorPhase::Cancelled;
@@ -198,12 +258,22 @@ impl SyncCoordinatorManager {
         vault_key: VaultKey,
         vault_id: &str,
     ) -> Result<(), String> {
+        self.attach_session_inner(provider, vault_key, vault_id, false)
+    }
+
+    fn attach_session_inner(
+        &self,
+        provider: Arc<dyn SyncObjectProvider>,
+        vault_key: VaultKey,
+        vault_id: &str,
+        from_configuration: bool,
+    ) -> Result<(), String> {
         let vault_id = uuid::Uuid::parse_str(vault_id)
             .map_err(|_| "同步 vault ID 格式无效".to_string())?
             .to_string();
         let mut runtime = self.lock_runtime()?;
-        if runtime.running {
-            return Err("同步运行期间不能替换 provider 会话".to_string());
+        if runtime.running || (runtime.configuring && !from_configuration) {
+            return Err("同步运行或配置期间不能替换 provider 会话".to_string());
         }
         runtime.cancellation.cancel();
         runtime.generation = runtime.generation.saturating_add(1);
@@ -221,6 +291,9 @@ impl SyncCoordinatorManager {
 
     pub(crate) fn detach_session(&self) -> Result<(), String> {
         let mut runtime = self.lock_runtime()?;
+        if runtime.configuring {
+            return Err("同步配置期间不能锁定 vault".to_string());
+        }
         runtime.cancellation.cancel();
         runtime.generation = runtime.generation.saturating_add(1);
         runtime.running = false;
@@ -230,14 +303,97 @@ impl SyncCoordinatorManager {
         Ok(())
     }
 
+    pub(crate) fn configure_local_folder(
+        &self,
+        request: ConfigureLocalFolderSyncRequest,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        self.configure_local_folder_with_kdf(request, Argon2Parameters::default())
+    }
+
+    fn configure_local_folder_with_kdf(
+        &self,
+        request: ConfigureLocalFolderSyncRequest,
+        kdf: Argon2Parameters,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        let _guard = self.begin_configuration()?;
+        self.configure_local_folder_inner(request, kdf)
+    }
+
+    fn configure_local_folder_inner(
+        &self,
+        request: ConfigureLocalFolderSyncRequest,
+        kdf: Argon2Parameters,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        validate_local_folder_path(&request.root_path)?;
+        let password = Zeroizing::new(request.password);
+        validate_sync_password(password.as_bytes())?;
+        let provider = Arc::new(
+            LocalFolderProvider::open(PathBuf::from(&request.root_path))
+                .map_err(|error| provider_setup_error(&error))?,
+        );
+        let cancellation = ProviderCancellation::default();
+        let (vault_id, vault_key) = match request.mode {
+            LocalFolderSetupMode::Initialize => {
+                match provider.get(BOOTSTRAP_OBJECT_KEY, &cancellation) {
+                    Ok(_) => return Err("同步目录已经初始化；请改用解锁已有 vault".to_string()),
+                    Err(error) if error.code == ProviderErrorCode::NotFound => {}
+                    Err(error) => return Err(provider_setup_error(&error)),
+                }
+                let vault_id = uuid::Uuid::new_v4().to_string();
+                let vault_key = VaultKey::generate()?;
+                let keyslot = create_password_keyslot(
+                    password.as_bytes(),
+                    &vault_id,
+                    &vault_key,
+                    kdf,
+                )?;
+                let bootstrap = encode_bootstrap(&SyncBootstrap {
+                    format_version: BOOTSTRAP_FORMAT_VERSION,
+                    vault_id: vault_id.clone(),
+                    password_keyslot: keyslot,
+                })?;
+                match provider.put(BOOTSTRAP_OBJECT_KEY, &bootstrap, &cancellation) {
+                    Ok(PutObjectOutcome::Created) => {}
+                    Ok(PutObjectOutcome::AlreadyPresent) => {
+                        return Err("同步目录初始化发生并发冲突；请改用解锁重试".to_string());
+                    }
+                    Err(error) if error.code == ProviderErrorCode::Conflict => {
+                        return Err("同步目录已被另一台设备初始化；请改用解锁".to_string());
+                    }
+                    Err(error) => return Err(provider_setup_error(&error)),
+                }
+                (vault_id, vault_key)
+            }
+            LocalFolderSetupMode::Unlock => {
+                let encoded = provider
+                    .get(BOOTSTRAP_OBJECT_KEY, &cancellation)
+                    .map_err(|error| {
+                        if error.code == ProviderErrorCode::NotFound {
+                            "同步目录尚未初始化；请明确选择初始化新 vault".to_string()
+                        } else {
+                            provider_setup_error(&error)
+                        }
+                    })?;
+                let bootstrap = decode_bootstrap(&encoded)?;
+                let vault_key = open_password_keyslot(
+                    password.as_bytes(),
+                    &bootstrap.password_keyslot,
+                )?;
+                (bootstrap.vault_id, vault_key)
+            }
+        };
+        self.attach_session_inner(provider, vault_key, &vault_id, true)?;
+        self.status()
+    }
+
     pub(crate) fn run_once(&self, now_ms: i64) -> Result<SyncCoordinatorStatus, String> {
         if now_ms < 0 {
             return Err("同步协调器时间不能为负数".to_string());
         }
         let (generation, provider, vault_key, vault_id, remote_prefix, cancellation) = {
             let mut runtime = self.lock_runtime()?;
-            if runtime.running {
-                return Err("同一 vault 已有同步 worker 运行".to_string());
+            if runtime.running || runtime.configuring {
+                return Err("同一 vault 已有同步配置或 worker 运行".to_string());
             }
             let (provider, vault_key, vault_id, remote_prefix) = {
                 let session = runtime
@@ -578,6 +734,64 @@ impl SyncCoordinatorManager {
         runtime.last_error_code = Some(code.to_string());
         Ok(())
     }
+}
+
+fn validate_local_folder_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.len() > MAX_LOCAL_FOLDER_PATH_BYTES
+        || path.contains('\0')
+        || path.chars().any(char::is_control)
+    {
+        return Err("Local Folder 路径为空、过长或包含控制字符".to_string());
+    }
+    Ok(())
+}
+
+fn validate_sync_password(password: &[u8]) -> Result<(), String> {
+    if !(8..=1024).contains(&password.len()) {
+        return Err("二级同步密码必须为 8 至 1024 字节".to_string());
+    }
+    Ok(())
+}
+
+fn encode_bootstrap(bootstrap: &SyncBootstrap) -> Result<Vec<u8>, String> {
+    if bootstrap.format_version != BOOTSTRAP_FORMAT_VERSION
+        || uuid::Uuid::parse_str(&bootstrap.vault_id).is_err()
+        || bootstrap.password_keyslot.vault_id() != bootstrap.vault_id
+    {
+        return Err("同步 bootstrap 版本或 vault identity 无效".to_string());
+    }
+    bootstrap.password_keyslot.encode()?;
+    let encoded = serde_json::to_vec(bootstrap)
+        .map_err(|_| "无法编码同步 bootstrap".to_string())?;
+    if encoded.is_empty() || encoded.len() > MAX_BOOTSTRAP_BYTES {
+        return Err("同步 bootstrap 为空或超过 32 KiB 上限".to_string());
+    }
+    Ok(encoded)
+}
+
+fn decode_bootstrap(encoded: &[u8]) -> Result<SyncBootstrap, String> {
+    if encoded.is_empty() || encoded.len() > MAX_BOOTSTRAP_BYTES {
+        return Err("同步 bootstrap 为空或超过 32 KiB 上限".to_string());
+    }
+    let bootstrap: SyncBootstrap = serde_json::from_slice(encoded)
+        .map_err(|_| "同步 bootstrap 损坏或包含不支持字段".to_string())?;
+    encode_bootstrap(&bootstrap)?;
+    Ok(bootstrap)
+}
+
+fn provider_setup_error(error: &ProviderError) -> String {
+    match error.code {
+        ProviderErrorCode::Cancelled => "同步配置已取消",
+        ProviderErrorCode::Unavailable => "Local Folder 当前不可用",
+        ProviderErrorCode::Conflict => "Local Folder 对象发生不可变冲突",
+        ProviderErrorCode::Protocol => "Local Folder provider 协议错误",
+        ProviderErrorCode::NotFound => "Local Folder 对象不存在",
+        ProviderErrorCode::InvalidInput => "Local Folder 配置无效",
+        ProviderErrorCode::LimitExceeded => "Local Folder 超过资源上限",
+        ProviderErrorCode::UnsafePath => "Local Folder 路径不安全",
+    }
+    .to_string()
 }
 
 fn provider_failure(error: &ProviderError) -> (AttemptFailure, &'static str) {
@@ -1064,5 +1278,163 @@ mod tests {
         assert_eq!(status.phase, SyncCoordinatorPhase::Cancelled);
         assert_eq!(status.last_error_code.as_deref(), Some("cancelled"));
         assert_eq!(status.pending_objects, 1);
+    }
+
+    #[test]
+    fn local_folder_bootstrap_requires_explicit_initialize_then_password_unlock() {
+        let root = TempDir::new("local-bootstrap");
+        let app_data = root.0.join("app-data");
+        let remote = root.0.join("remote");
+        fs::create_dir_all(&app_data).unwrap();
+        fs::create_dir_all(&remote).unwrap();
+        let coordinator = SyncCoordinatorManager::open(app_data).unwrap();
+        let password = "fixture-password-that-must-not-be-persisted";
+
+        let initialized = coordinator
+            .configure_local_folder_with_kdf(
+                ConfigureLocalFolderSyncRequest {
+                    root_path: remote.to_string_lossy().into_owned(),
+                    password: password.to_string(),
+                    mode: LocalFolderSetupMode::Initialize,
+                },
+                Argon2Parameters::minimum_for_tests(),
+            )
+            .unwrap();
+        assert!(initialized.configured);
+        assert_eq!(initialized.phase, SyncCoordinatorPhase::Idle);
+        let bootstrap = fs::read(remote.join(BOOTSTRAP_OBJECT_KEY)).unwrap();
+        assert!(!String::from_utf8_lossy(&bootstrap).contains(password));
+        assert_eq!(decode_bootstrap(&bootstrap).unwrap().format_version, 1);
+
+        coordinator.detach_session().unwrap();
+        let wrong_password = coordinator
+            .configure_local_folder_with_kdf(
+                ConfigureLocalFolderSyncRequest {
+                    root_path: remote.to_string_lossy().into_owned(),
+                    password: "different-password".to_string(),
+                    mode: LocalFolderSetupMode::Unlock,
+                },
+                Argon2Parameters::minimum_for_tests(),
+            )
+            .unwrap_err();
+        assert!(wrong_password.contains("密码错误") || wrong_password.contains("篡改"));
+        assert!(!coordinator.status().unwrap().configured);
+
+        let unlocked = coordinator
+            .configure_local_folder_with_kdf(
+                ConfigureLocalFolderSyncRequest {
+                    root_path: remote.to_string_lossy().into_owned(),
+                    password: password.to_string(),
+                    mode: LocalFolderSetupMode::Unlock,
+                },
+                Argon2Parameters::minimum_for_tests(),
+            )
+            .unwrap();
+        assert!(unlocked.configured);
+        assert_eq!(coordinator.run_once(2_000).unwrap().phase, SyncCoordinatorPhase::Idle);
+    }
+
+    #[test]
+    fn local_folder_bootstrap_refuses_implicit_create_reinitialize_and_unknown_version() {
+        let root = TempDir::new("local-bootstrap-fail-closed");
+        let app_data = root.0.join("app-data");
+        let remote = root.0.join("remote");
+        fs::create_dir_all(&app_data).unwrap();
+        fs::create_dir_all(&remote).unwrap();
+        let coordinator = SyncCoordinatorManager::open(app_data).unwrap();
+        let request = |mode| ConfigureLocalFolderSyncRequest {
+            root_path: remote.to_string_lossy().into_owned(),
+            password: "fixture-password".to_string(),
+            mode,
+        };
+
+        let short_password = coordinator
+            .configure_local_folder_with_kdf(
+                ConfigureLocalFolderSyncRequest {
+                    root_path: remote.to_string_lossy().into_owned(),
+                    password: "short".to_string(),
+                    mode: LocalFolderSetupMode::Initialize,
+                },
+                Argon2Parameters::minimum_for_tests(),
+            )
+            .unwrap_err();
+        assert!(short_password.contains("8 至 1024"));
+
+        let missing = coordinator
+            .configure_local_folder_with_kdf(
+                request(LocalFolderSetupMode::Unlock),
+                Argon2Parameters::minimum_for_tests(),
+            )
+            .unwrap_err();
+        assert!(missing.contains("尚未初始化"));
+        coordinator
+            .configure_local_folder_with_kdf(
+                request(LocalFolderSetupMode::Initialize),
+                Argon2Parameters::minimum_for_tests(),
+            )
+            .unwrap();
+        coordinator.detach_session().unwrap();
+        let duplicate = coordinator
+            .configure_local_folder_with_kdf(
+                request(LocalFolderSetupMode::Initialize),
+                Argon2Parameters::minimum_for_tests(),
+            )
+            .unwrap_err();
+        assert!(duplicate.contains("已经初始化"));
+
+        let bootstrap_path = remote.join(BOOTSTRAP_OBJECT_KEY);
+        let mut bootstrap: serde_json::Value =
+            serde_json::from_slice(&fs::read(&bootstrap_path).unwrap()).unwrap();
+        bootstrap["formatVersion"] = serde_json::json!(2);
+        fs::write(&bootstrap_path, serde_json::to_vec(&bootstrap).unwrap()).unwrap();
+        let unsupported = coordinator
+            .configure_local_folder_with_kdf(
+                request(LocalFolderSetupMode::Unlock),
+                Argon2Parameters::minimum_for_tests(),
+            )
+            .unwrap_err();
+        assert!(unsupported.contains("版本") || unsupported.contains("identity"));
+    }
+
+    #[test]
+    fn configuration_gate_blocks_concurrent_cycle_lock_and_session_replacement() {
+        let root = TempDir::new("configuration-gate");
+        let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        let guard = coordinator.begin_configuration().unwrap();
+
+        assert!(
+            coordinator
+                .configure_local_folder_with_kdf(
+                    ConfigureLocalFolderSyncRequest {
+                        root_path: root.0.to_string_lossy().into_owned(),
+                        password: "fixture-password".to_string(),
+                        mode: LocalFolderSetupMode::Initialize,
+                    },
+                    Argon2Parameters::minimum_for_tests(),
+                )
+                .is_err()
+        );
+        assert!(coordinator.run_once(2_000).is_err());
+        assert!(coordinator.detach_session().is_err());
+        assert!(
+            coordinator
+                .attach_session(
+                    Arc::new(MemoryProvider::default()),
+                    VaultKey::generate().unwrap(),
+                    &vault_id,
+                )
+                .is_err()
+        );
+
+        drop(guard);
+        coordinator
+            .attach_session(
+                Arc::new(MemoryProvider::default()),
+                VaultKey::generate().unwrap(),
+                &vault_id,
+            )
+            .unwrap();
+        assert!(coordinator.status().unwrap().configured);
     }
 }

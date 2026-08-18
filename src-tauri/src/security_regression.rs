@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            86,
+            91,
             "command manifest contains duplicates or changed count"
         );
 
@@ -159,6 +159,11 @@ mod tests {
             "allow-sync-run-once",
             "allow-sync-attach-session",
             "allow-sync-acknowledge-reconciliation",
+            "allow-desktop-sync-status",
+            "allow-configure-local-folder-sync",
+            "allow-run-sync-once",
+            "allow-cancel-sync",
+            "allow-lock-sync",
             "allow-native-engine-probe",
             "allow-cancel-native-engine-operation",
             "allow-start-native-terminal",
@@ -215,6 +220,33 @@ mod tests {
                 "{name} writes localStorage"
             );
         }
+    }
+
+    #[test]
+    fn desktop_sync_entry_keeps_secrets_in_rust_and_android_read_only() {
+        let coordinator = include_str!("sync_coordinator.rs");
+        assert!(coordinator.contains("pub(crate) struct ConfigureLocalFolderSyncRequest"));
+        assert!(coordinator.contains("let password = Zeroizing::new(request.password)"));
+        assert!(
+            coordinator
+                .contains("const BOOTSTRAP_OBJECT_KEY: &str = \"vpshell/v1/bootstrap.json\"")
+        );
+        for forbidden in ["println!", "eprintln!", "log::", "tracing::"] {
+            assert!(!coordinator.contains(forbidden));
+        }
+
+        let frontend = include_str!("../../src/App.tsx");
+        for command in [
+            "desktop_sync_status",
+            "configure_local_folder_sync",
+            "run_sync_once",
+            "cancel_sync",
+            "lock_sync",
+        ] {
+            assert!(frontend.contains(command));
+        }
+        assert!(frontend.contains("disabled={provider !== \"local\"}"));
+        assert!(frontend.contains("Android Preview 中禁用"));
     }
 
     #[test]

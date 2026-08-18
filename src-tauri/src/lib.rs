@@ -42,7 +42,6 @@ mod route_measurement;
 mod safe_broadcast;
 mod security_regression;
 mod shell_integration;
-#[allow(dead_code)] // Product setup currently exposes only the Android value-free status view.
 mod sync_coordinator;
 #[allow(dead_code)] // The coordinator/UI phases consume this opt-in credential vault API.
 mod sync_credential_vault;
@@ -1418,6 +1417,58 @@ async fn save_app_state(
 }
 
 #[tauri::command]
+fn desktop_sync_status(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    coordinator.status()
+}
+
+#[tauri::command]
+async fn configure_local_folder_sync(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    request: sync_coordinator::ConfigureLocalFolderSyncRequest,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || coordinator.configure_local_folder(request))
+        .await
+        .map_err(|error| format!("Local Folder 同步配置任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn run_sync_once(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(i64::MAX);
+        coordinator.run_once(now_ms)
+    })
+    .await
+    .map_err(|error| format!("同步单周期任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+fn cancel_sync(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    coordinator.cancel()?;
+    coordinator.status()
+}
+
+#[tauri::command]
+fn lock_sync(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    coordinator.detach_session()?;
+    coordinator.status()
+}
+
+#[tauri::command]
 async fn install_wallpaper_asset(
     manager: State<'_, local_assets::LocalAssetManager>,
     request: local_assets::InstallWallpaperRequest,
@@ -1656,6 +1707,11 @@ pub fn run() {
             import_finalshell,
             initialize_app_store,
             save_app_state,
+            desktop_sync_status,
+            configure_local_folder_sync,
+            run_sync_once,
+            cancel_sync,
+            lock_sync,
             install_wallpaper_asset,
             load_wallpaper_asset,
             install_font_asset,

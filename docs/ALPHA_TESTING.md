@@ -123,8 +123,8 @@
 - 修改主机、历史、脚本、打包传输、编辑器和背景设置，重启应用确认从 `vpshell-state.sqlite3` 恢复；旧 WebView 状态只在 SQLite 初始化成功后删除。
 - 在测试副本中截断 SQLite 文件，确认显示恢复诊断、最多保留两个 `.corrupt-*` 备份且不崩溃。不要把数据库或备份上传到 Issue。
 - 静态核对生产 CSP 不为 `null`，`object/frame/form` 禁止，capability 没有 core/plugin `default` 集合；Linux 构建不能替代 Windows/macOS WebView 与安装器权限验收。
-- 当前资料保存在本机 SQLite/受管资产缓存；内部 E2EE、Local Folder/WebDAV provider、持久 outbox 与 Rust 单周期协调器已有单元/本机协议夹具，但尚未接入设置、解锁或自动调度，应用仍不会自动同步。Android 只显示 value-free 恢复/冲突/队列状态且 Sync capability 保持禁用。真实 WebDAV 服务、自签 CA、代理、断网和平台目录兼容仍需外部矩阵；S3/SFTP 真实同步 transport 尚未实现。
-- 内部 `vpshell-sync.sqlite3` outbox 夹具应覆盖业务/operation/outbox 原子回滚、两分钟过期租约、暂停/显式恢复、六次退避上限、发布后拒绝重试、损坏隔离后的 `reconcile-required`、未来 schema 原样保留、未发布保留，以及 AEAD/序号/对象身份重放拒绝。它尚无 UI/worker，不能通过手工点击宣称自动同步验收。
+- 当前资料保存在本机 SQLite/受管资产缓存；桌面 Local Folder 已把不可变 bootstrap、二级密码解锁和 Rust 单周期 worker 接入设置页，但 AppState operation 入队/回写与自动调度仍未实现。初始化空目录后应确认 bootstrap 不含录入密码；“解锁已有”对空目录失败，“初始化新 vault”对已有 bootstrap 失败，错误密码、未知版本、符号链接和特殊文件均 fail closed。Android 只显示 value-free 恢复/冲突/队列状态且 Sync capability 保持禁用。真实 WebDAV 服务、自签 CA、代理、断网和平台目录兼容仍需外部矩阵；S3/SFTP 真实同步 transport 尚未实现。
+- 内部 `vpshell-sync.sqlite3` outbox 夹具应覆盖业务/operation/outbox 原子回滚、两分钟过期租约、暂停/显式恢复、六次退避上限、发布后拒绝重试、损坏隔离后的 `reconcile-required`、未来 schema 原样保留、未发布保留，以及 AEAD/序号/对象身份重放拒绝。当前手动 worker 只处理已存在的 journal 项，不能通过空周期点击宣称业务数据已完成端到端同步。
 - merge 夹具必须把同一组 host/script/setting/background/history operation 以不同顺序应用并比较完整状态；覆盖 observed update 不误报、未观察 edit/delete 冲突、删除保持/明确恢复、并发冲突解决、风险降低、history 并集、revision 冲突、损坏/未知 schema，以及 password/Token/private key/credentialRef/trust pin/本机路径拒绝。当前冲突中心没有 UI，源码测试不能替代多设备人工可用性验收。
 - 恢复密钥夹具必须覆盖可打印格式往返（包括 base64url 正文含 `-`）、校验码、错误密钥、独立 keyslot 域、篡改和未知字段；恢复密钥、VMK 和解密明文不得出现在导出 JSON、日志或前端事件中。
 - device registry 夹具必须覆盖 revision 冲突、公钥身份不可替换、最后活动设备保护、撤销不可逆、撤销后标签不可变、不同合并顺序和已撤销发布者拒绝。撤销后的报告必须要求 VMK 轮换，不能声称远程擦除。

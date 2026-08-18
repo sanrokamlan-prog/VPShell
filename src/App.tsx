@@ -540,6 +540,10 @@ function App() {
   const [broadcastResult, setBroadcastResult] = useState<BroadcastResultResponse | null>(null);
   const [broadcastExecuting, setBroadcastExecuting] = useState(false);
   const [syncPassword, setSyncPassword] = useState("");
+  const [syncSetupMode, setSyncSetupMode] = useState<"unlock" | "initialize">("unlock");
+  const [desktopSyncStatus, setDesktopSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
+  const [desktopSyncError, setDesktopSyncError] = useState<string | null>(null);
+  const [desktopSyncBusy, setDesktopSyncBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [installedFonts, setInstalledFonts] = useState<string[]>([]);
   const [fontRevision, setFontRevision] = useState(0);
@@ -579,6 +583,17 @@ function App() {
       setAndroidSyncError(null);
     } catch (error) {
       setAndroidSyncError(String(error));
+    }
+  }, []);
+
+  const refreshDesktopSyncStatus = useCallback(async () => {
+    if (!isDesktopRuntime()) return;
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("desktop_sync_status");
+      setDesktopSyncStatus(status);
+      setDesktopSyncError(null);
+    } catch (error) {
+      setDesktopSyncError(invokeErrorMessage(error));
     }
   }, []);
 
@@ -632,6 +647,16 @@ function App() {
     const timer = window.setInterval(() => void refreshAndroidSyncStatus(), 15_000);
     return () => window.clearInterval(timer);
   }, [refreshAndroidSyncStatus]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
+    void refreshDesktopSyncStatus();
+    const timer = window.setInterval(
+      () => void refreshDesktopSyncStatus(),
+      dialog === "sync" ? 1_000 : 15_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [dialog, refreshDesktopSyncStatus]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return undefined;
@@ -1951,18 +1976,96 @@ function App() {
     }
   }
 
-  function saveSyncSettings() {
+  async function configureLocalFolderSync() {
+    if (appState.sync.provider !== "local") {
+      showToast("当前只开放 Local Folder 同步");
+      return;
+    }
+    if (!appState.sync.endpoint.trim()) {
+      showToast("请输入已存在的同步目录");
+      return;
+    }
     if (!syncPassword) {
       showToast("请输入二级同步密码");
       return;
     }
-    setAppState((current) => ({
-      ...current,
-      sync: { ...current.sync, enabled: false, lastSyncedAt: undefined },
-    }));
-    setSyncPassword("");
-    setDialog(null);
-    showToast("同步配置草稿已保存；同步后端尚未启用");
+    setDesktopSyncBusy(true);
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("configure_local_folder_sync", {
+        request: {
+          rootPath: appState.sync.endpoint.trim(),
+          password: syncPassword,
+          mode: syncSetupMode,
+        },
+      });
+      setDesktopSyncStatus(status);
+      setDesktopSyncError(null);
+      setAppState((current) => ({
+        ...current,
+        sync: { ...current.sync, enabled: true, provider: "local" },
+      }));
+      setSyncPassword("");
+      showToast(syncSetupMode === "initialize" ? "同步 vault 已初始化并解锁" : "同步 vault 已解锁");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setDesktopSyncError(message);
+      showToast(`同步配置失败：${message}`);
+    } finally {
+      setDesktopSyncBusy(false);
+    }
+  }
+
+  async function runDesktopSyncOnce() {
+    setDesktopSyncBusy(true);
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("run_sync_once");
+      setDesktopSyncStatus(status);
+      setDesktopSyncError(null);
+      const completedAtMs = status.lastCompletedAtMs;
+      if (completedAtMs) {
+        setAppState((current) => ({
+          ...current,
+          sync: { ...current.sync, enabled: true, lastSyncedAt: new Date(completedAtMs).toISOString() },
+        }));
+      }
+      showToast(`同步周期完成：上传 ${status.lastUploadedObjects}，下载 ${status.lastDownloadedObjects}`);
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setDesktopSyncError(message);
+      showToast(`同步失败：${message}`);
+      await refreshDesktopSyncStatus();
+    } finally {
+      setDesktopSyncBusy(false);
+    }
+  }
+
+  async function cancelDesktopSync() {
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("cancel_sync");
+      setDesktopSyncStatus(status);
+      showToast("已请求取消同步");
+    } catch (error) {
+      showToast(`取消同步失败：${invokeErrorMessage(error)}`);
+    }
+  }
+
+  async function lockDesktopSync() {
+    setDesktopSyncBusy(true);
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("lock_sync");
+      setDesktopSyncStatus(status);
+      setDesktopSyncError(null);
+      setSyncPassword("");
+      setAppState((current) => ({
+        ...current,
+        sync: { ...current.sync, enabled: false },
+      }));
+      showToast("同步 vault 已锁定");
+    } catch (error) {
+      showToast(`锁定同步失败：${invokeErrorMessage(error)}`);
+    } finally {
+      setDesktopSyncBusy(false);
+    }
   }
 
   const currentPathHistory = appState.pathHistory[activeHost.id] ?? [];
@@ -1986,14 +2089,14 @@ function App() {
         <div className="topbar-right">
           <div className="topbar-actions">
             <button
-              className={`sync-status ${(isAndroidRuntime() ? androidSyncStatus?.phase === "idle" : appState.sync.enabled) ? "is-synced" : ""}`}
+              className={`sync-status ${(isAndroidRuntime() ? androidSyncStatus?.phase === "idle" : desktopSyncStatus?.phase === "idle") ? "is-synced" : ""}`}
               type="button"
               onClick={() => setDialog("sync")}
             >
-              {(isAndroidRuntime() ? androidSyncStatus?.configured : appState.sync.enabled) ? <Cloud size={15} /> : <CloudOff size={15} />}
+              {(isAndroidRuntime() ? androidSyncStatus?.configured : desktopSyncStatus?.configured) ? <Cloud size={15} /> : <CloudOff size={15} />}
               <span>{isAndroidRuntime()
                 ? androidSyncError ? "同步状态不可用" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取同步状态"
-                : appState.sync.enabled ? relativeTime(appState.sync.lastSyncedAt) : appState.sync.endpoint ? "同步后端未启用" : "同步未配置"}</span>
+                : desktopSyncError ? "同步状态不可用" : desktopSyncStatus ? syncPhaseLabels[desktopSyncStatus.phase] : "正在读取同步状态"}</span>
             </button>
             <span className="route-status"><Route size={15} /> 路线：{activeRouteLabel}</span>
             <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
@@ -2769,7 +2872,7 @@ function App() {
       ) : null}
 
       {dialog === "sync" ? (
-        <Dialog title={isAndroidRuntime() ? "同步状态" : "加密同步（设计预览）"} wide onClose={() => setDialog(null)} footer={isAndroidRuntime() ? <><button className="secondary-button" type="button" onClick={() => void refreshAndroidSyncStatus()}><RefreshCw size={14} /> 刷新</button><button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button></> : <><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" onClick={saveSyncSettings}><ShieldCheck size={14} /> 保存草稿</button></>}>
+        <Dialog title={isAndroidRuntime() ? "同步状态" : "加密同步"} wide onClose={() => setDialog(null)} footer={isAndroidRuntime() ? <><button className="secondary-button" type="button" onClick={() => void refreshAndroidSyncStatus()}><RefreshCw size={14} /> 刷新</button><button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button></> : desktopSyncStatus?.configured ? <><button className="secondary-button" type="button" disabled={desktopSyncBusy} onClick={() => void lockDesktopSync()}><KeyRound size={14} /> 锁定</button>{desktopSyncStatus.running ? <button className="danger-button" type="button" onClick={() => void cancelDesktopSync()}><Square size={14} /> 取消同步</button> : <button className="primary-button" type="button" disabled={desktopSyncBusy || desktopSyncStatus.recoveryRequired} onClick={() => void runDesktopSyncOnce()}><RefreshCw size={14} /> 立即同步</button>}</> : <><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" disabled={desktopSyncBusy} onClick={() => void configureLocalFolderSync()}><ShieldCheck size={14} /> {syncSetupMode === "initialize" ? "初始化并解锁" : "解锁"}</button></>}>
           {isAndroidRuntime() ? (
             <div className="sync-readonly-status" aria-live="polite">
               <div><span>协调阶段</span><strong>{androidSyncError ? "状态读取失败" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取"}</strong></div>
@@ -2783,25 +2886,35 @@ function App() {
               {androidSyncError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {androidSyncError}</p> : null}
             </div>
           ) : <>
+          <div className="sync-readonly-status" aria-live="polite">
+            <div><span>协调阶段</span><strong>{desktopSyncError ? "状态读取失败" : desktopSyncStatus ? syncPhaseLabels[desktopSyncStatus.phase] : "正在读取"}</strong></div>
+            <div><span>运行状态</span><strong>{desktopSyncStatus?.running ? "单周期执行中" : desktopSyncStatus?.configured ? "vault 已解锁" : "vault 已锁定"}</strong></div>
+            <div><span>待发布对象</span><strong>{desktopSyncStatus ? `${desktopSyncStatus.pendingObjects} 项 / ${desktopSyncStatus.pendingBytes.toLocaleString("zh-CN")} B` : "-"}</strong></div>
+            <div><span>合并状态</span><strong>{desktopSyncStatus ? `revision ${desktopSyncStatus.mergeRevision} / ${desktopSyncStatus.openConflicts} 个冲突` : "-"}</strong></div>
+            <div><span>最近周期</span><strong>{desktopSyncStatus?.lastCompletedAtMs ? new Date(desktopSyncStatus.lastCompletedAtMs).toLocaleString("zh-CN", { hour12: false }) : "尚未运行"}</strong></div>
+            <div><span>本周期对象</span><strong>{desktopSyncStatus ? `上传 ${desktopSyncStatus.lastUploadedObjects} / 下载 ${desktopSyncStatus.lastDownloadedObjects}` : "-"}</strong></div>
+            {desktopSyncStatus?.lastErrorCode ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncStatus.lastErrorCode}</p> : null}
+            {desktopSyncStatus?.recoveryNote ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncStatus.recoveryNote}</p> : null}
+            {desktopSyncError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncError}</p> : null}
+          </div>
+          {!desktopSyncStatus?.configured ? <>
           <div className="provider-grid">
             {(Object.keys(providerLabels) as SyncProviderKind[]).map((provider) => (
-              <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
+              <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} disabled={provider !== "local"} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
                 {provider === "local" ? <HardDrive size={18} /> : provider === "webdav" ? <Globe2 size={18} /> : provider === "sftp" ? <SquareTerminal size={18} /> : provider === "s3" ? <Database size={18} /> : <Cloud size={18} />}
                 <span>{providerLabels[provider]}</span>
               </button>
             ))}
           </div>
+          <div className="sync-mode-switch" role="group" aria-label="同步目录模式">
+            <button type="button" className={syncSetupMode === "unlock" ? "active" : ""} onClick={() => setSyncSetupMode("unlock")}>解锁已有 vault</button>
+            <button type="button" className={syncSetupMode === "initialize" ? "active" : ""} onClick={() => setSyncSetupMode("initialize")}>初始化新 vault</button>
+          </div>
           <div className="form-grid sync-form">
-            <label className="field span-2"><span>同步地址</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder={appState.sync.provider === "local" ? "D:\\VPShellSync" : "https://example.com/dav/"} /></label>
-            <label className="field span-2"><span>远端目录</span><input value={appState.sync.remotePath} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, remotePath: event.target.value } }))} /></label>
-            <label className="field span-2"><span>账户</span><input value={appState.sync.username} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, username: event.target.value } }))} autoComplete="off" /></label>
-            <label className="field span-2"><span>二级同步密码</span><input type="password" value={syncPassword} onChange={(event) => setSyncPassword(event.target.value)} autoComplete="new-password" placeholder="用于端到端加密" /></label>
+            <label className="field span-2"><span>同步目录</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder="D:\\VPShellSync" /></label>
+            <label className="field span-2"><span>二级同步密码</span><input type="password" minLength={8} maxLength={1024} value={syncPassword} onChange={(event) => setSyncPassword(event.target.value)} autoComplete="new-password" placeholder="用于端到端加密" /></label>
           </div>
-          <div className="sync-options">
-            <label><input type="checkbox" checked readOnly /><span><strong>同步全部自建内容</strong><small>主机、脚本、命令、路径、参数、背景和附件</small></span></label>
-            <label><input type="checkbox" checked={appState.sync.syncSecrets} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, syncSecrets: event.target.checked } }))} /><span><strong>同步主机凭据与私钥</strong><small>使用独立密钥域加密，默认关闭</small></span></label>
-            <label className={appState.sync.provider !== "gateway" ? "disabled" : ""}><input type="checkbox" disabled={appState.sync.provider !== "gateway"} checked={appState.sync.totpEnabled} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, totpEnabled: event.target.checked } }))} /><span><strong>Google Authenticator</strong><small>仅自建同步网关支持 TOTP 身份验证</small></span></label>
-          </div>
+          </> : null}
           </>}
         </Dialog>
       ) : null}

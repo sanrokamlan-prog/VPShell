@@ -268,7 +268,7 @@ impl Argon2Parameters {
     }
 
     #[cfg(test)]
-    fn minimum_for_tests() -> Self {
+    pub(crate) fn minimum_for_tests() -> Self {
         Self {
             memory_kib: MIN_MEMORY_KIB,
             iterations: MIN_ITERATIONS,

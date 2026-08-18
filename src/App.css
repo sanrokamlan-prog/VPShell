@@ -2586,6 +2586,16 @@ button.sync-status {
   border-color: var(--border-strong);
 }
 
+.provider-grid button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.provider-grid button:disabled:hover {
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
 .provider-grid button.active {
   color: var(--green);
   background: var(--green-soft);
@@ -2600,6 +2610,38 @@ button.sync-status {
 
 .sync-form {
   margin-bottom: 14px;
+}
+
+.sync-readonly-status + .provider-grid {
+  margin-top: 15px;
+}
+
+.sync-mode-switch {
+  display: grid;
+  width: min(100%, 360px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 14px;
+  padding: 2px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.sync-mode-switch button {
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 9px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+.sync-mode-switch button.active {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border);
 }
 
 .sync-readonly-status {

@@ -105,8 +105,10 @@
 | 完成 | 默认关闭的凭据 vault，独立密钥域，秘密不进入日志/事件/明文包 |
 | 完成 | SFTP、S3-compatible、自建 Gateway 结构化 provider；TOTP 仅保护 Gateway 登录 |
 | 完成 | 篡改、重放、冲突、断网、截断、升级、恢复失败和真实 provider 测试报告 |
+| 进行中 | 桌面 Local Folder 产品入口：不可变 bootstrap、显式初始化/解锁、手动单周期、取消/锁定和 value-free 状态已接线，等待 Actions |
+| 待实现 | AppState operation 事务入队/合并回写、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归已完成，Rust 协调器内核也已接通 outbox/provider/merge；但产品配置与自动触发、真实外部 provider、多设备和完整用户界面仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归已完成，Rust 协调器内核也已接通 outbox/provider/merge；Local Folder 产品入口正在验证，但业务 operation、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
 
 ## Phase C：Android Preview
 
@@ -129,7 +131,7 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 完成 | 用户自建 Relay 参考实现、认证协议、限流、审计和安全测试：desktop-only 可运行 serve/loopback connect、challenge-bound HMAC-SHA256 双向 proof、精确目标 allowlist、token/audit 私有文件、全局/单 IP/认证/字节/空闲/总时长硬上限、盐哈希 JSONL 审计和真实回环 TCP 测试已实现；PR #1 run `32095165679` 全绿，真实部署与 TLS/VPN 为外部验收 |
 | 完成 | Rust-owned 持续 route readiness 测量与可解释选路建议：真实比较同一目标直连/已配置跳板的逐跳认证、host-key pin 和最终 SFTP readiness，滚动成功率/中位数/P95/失败惩罚、可靠性门槛、切换滞后、取消/代际及脱敏快照已接线；PR #1 run `32098321338` 全绿；不自动改写 route，不称“加速” |
 | 完成 | 可选 Mosh 独立交互模式：桌面直连显式选择、Rust 固定 SSH bootstrap/server/UDP 参数、复用 PTY 生命周期且不替代 SSH/SFTP/转发；PR #1 run `32101043636` 全绿，真实网络行为保持外部验收 |
-| 进行中 | 自建部署、协议版本/升级/撤销和故障恢复演练：1–4 token 有界重叠轮换与撤销、未知版本拒绝、真实回环测试、hardened systemd/logrotate 基线及部署/升级/回退/恢复 runbook 已实现，等待 Actions |
+| 完成 | 自建部署、协议版本/升级/撤销和故障恢复演练：1–4 token 有界重叠轮换与撤销、未知版本拒绝、真实回环测试、hardened systemd/logrotate 基线及部署/升级/回退/恢复 runbook 已实现；PR #1 run `32102760264` 全绿 |
 | 外部验收 | 多区域真实部署、长时间网络测试和各桌面/移动平台兼容性 |
 
 托管中继、团队协作和企业支持不在没有服务边界与真实部署的情况下伪装为已实现生产服务。
@@ -197,7 +199,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | D2 Relay 自建部署、轮换与恢复（待 Actions） | `RelayTokenSet` 现只允许 1–4 个不同 key id，`serve --token-file` 可重复加载私有 token；服务端按请求 key id 有界选择后验证完整 HMAC，未知/已撤销 token 不连接目标，删除磁盘文件不会伪装为内存撤销。新增真实回环测试先证明旧/新 token 同时认证，再以仅新 token 的重启实例证明旧 token 失败；另有空/重复/超限集合、未知 wire version 在认证前拒绝，以及 audit 故障实例拒绝后只能由全新健康实例恢复的测试。仓库新增无秘密环境示例、无 capability 的 hardened systemd unit、私有审计 logrotate 重启策略，`docs/RELAY.md` 给出构建校验、firewall/TLS 边界、重叠轮换/紧急撤销、并行端口升级/回退及 audit/token/进程/限额故障恢复演练；安全回归继续锁定 Relay 不进入 Tauri command/capability/Android/WebView。真实主机部署、TLS/VPN、firewall、轮换执行、多区域和长时间网络仍为外部验收。 |
 | 2026-08-18 | D2 Relay 部署/恢复本机轻量门禁 | `git diff --check`、Tauri/package/capability 严格 JSON、86-command manifest/唯一项/handler 对齐、Relay 12 个测试及其中轮换/撤销/版本/audit 恢复 4 个关键测试静态清单、最多 4 token/重复 token 拒绝、重复 CLI token 路径解析、Relay 无 Tauri/Android/WebView surface、systemd capability/只读配置/私有可写审计/受限地址族、logrotate 私有创建与禁用 `copytruncate` 检查通过；`systemd-analyze verify` 只报告本 VPS 未安装文档目标 binary，`logrotate --debug` 只报告尚未创建外部部署用户。无 `node_modules`/`target`，根分区从起始 48% 到检查时 49%。VPS 无 Cargo/rustfmt，未下载工具链、依赖或服务；完整格式、编译、12 项 Relay 测试和四平台矩阵交给 PR #1 Actions。 |
 | 2026-08-18 | D2 Relay 首轮 Actions 与格式修复 | 提交 `85f44d7` 的 PR #1 run `32102290084` 中 frontend、Android aarch64 debug APK/Gradle gate 成功；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告 `relay.rs` 相同 4 段 token-set/rotation/test 调用排版差异后失败，尚未执行 locked check/test 或 Linux Relay fixture。已严格按 Ubuntu job `95605010048`、Windows job `95605010003` 与 macOS 输出机械应用全部格式，不改行为；修复后本机 `git diff --check`、严格 JSON、86-command manifest/唯一项/handler、Relay 12 项测试与 4 项关键属性、无 Tauri/Android/WebView surface 及无 `node_modules`/`target` 检查通过，根分区保持 49%。VPS 继续无 Cargo/rustfmt 且未下载依赖；等待修复提交后的完整矩阵。 |
+| 2026-08-18 | D2 Relay 自建部署、轮换与恢复（Actions 完成） | 格式修复提交 `6996de1` 的 PR #1 run `32102760264` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test（含 12 项 Relay 测试与 Linux 真实回环 fixture）及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。真实公网/多区域、TLS/VPN、firewall、日志轮换执行和运维演练保持外部验收。 |
+| 2026-08-18 | B9 桌面 Local Folder 初始化/解锁与手动单周期（待 Actions） | Rust coordinator 新增不可变 schema-v1 bootstrap：用户明确初始化时生成随机 vault/VMK并只写 Argon2id 认证 keyslot，解锁模式对缺失对象不隐式创建，初始化对已有对象不覆盖；密码仅在 `Zeroizing` 内存持有。桌面接入 value-free 状态、初始化/解锁、blocking 单周期、取消和锁定，顶部状态不再读取草稿布尔值；新增命令只在 desktop capability，Android 继续只读且 Sync disabled。聚焦测试覆盖初始化、bootstrap 无密码、错误/正确密码解锁、空目录、重复初始化、未知版本和空周期；AppState operation 入队/回写、自动调度、冲突解决、WebDAV 产品入口与真实多设备明确未完成。 |
+| 2026-08-18 | B9 Local Folder 产品入口本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest/唯一项/handler/capability 对齐、五个新增命令仅 desktop 授权且 Android 零暴露、bootstrap/version/mode/清零密码与无日志静态边界、CSS 括号、三项聚焦测试属性（含配置并发门）、无 `node_modules`/`target` 检查通过；根分区交接前 49%。VPS 无 Cargo/rustfmt/本地 TypeScript 依赖，未下载工具链、SDK 或项目依赖；frontend、四平台 locked fmt/check/test 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 Relay 部署/轮换/恢复提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后重新扫描路线图、README 与 docs 的剩余代码/Actions 可实现项。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待桌面 Local Folder 初始化/解锁与手动单周期提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入 AppState 到具名 merge operation/outbox 的事务入队与安全回写。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

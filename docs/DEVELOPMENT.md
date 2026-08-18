@@ -245,6 +245,13 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - Gateway transport 必须实现版本化登录/session/object 协议、TLS、限流与重放保护。密码/TOTP 只借给 login，session 类型不得保存 TOTP；TOTP 只验证 Gateway 账户，不能解锁或派生 VMK/CVK。所有底层认证错误映射为无秘密稳定诊断。
 - 当前内存 transport 只验证 adapter 契约。真实 SFTP/S3/Gateway transport、服务端参考实现和故障/兼容矩阵没有完成前，不得将对应 provider 标为用户可用。
 
+### 10.9 Local Folder 产品入口（v0.3 工作树）
+
+- 桌面 Local Folder 只接受已存在、非符号链接的专用目录。用户必须明确选择“初始化新 vault”或“解锁已有 vault”；解锁缺失 bootstrap 时不得隐式创建，初始化已有 bootstrap 时不得覆盖。
+- `vpshell/v1/bootstrap.json` 是不可变 schema-v1 对象，只包含 canonical vault UUID 和 Argon2id 认证 keyslot。二级密码进入 Rust 后立即由清零容器拥有，不得持久化、序列化、调试、记录或返回前端；状态响应只包含阶段、计数、代际和稳定错误码。
+- 配置与 Argon2id 解锁、手动单周期均在 blocking worker 执行；取消使当前 provider token 与 generation 同时失效，锁定清除运行时 provider/VMK。五个桌面命令只能进入 `capabilities/default.json`，Android capability 必须持续排除。
+- 当前入口不会把 AppState 快照直接上传，也尚未生成本地 merge operation。AppState 到具名 operation/outbox 的事务入队与合并回写、自动调度、冲突解决、WebDAV 产品凭据和真实多设备矩阵必须作为后续独立项完成。
+
 ### 10.10 Android Preview 共享契约（Phase C）
 
 - `src-tauri/src/android_preview.rs` 是桌面与移动端共用的 Rust 策略模型；`android_mobile.rs` 是唯一移动 IPC/会话 owner，不能调用系统 `ssh` 或复用桌面进程命令。新增 Android command 必须进入 command manifest、仅加入 `capabilities/android.json`，并由安全回归证明没有落入桌面 capability。

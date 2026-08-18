@@ -27,6 +27,11 @@ delete_credential
 import_finalshell
 initialize_app_store
 save_app_state
+desktop_sync_status
+configure_local_folder_sync
+run_sync_once
+cancel_sync
+lock_sync
 install_wallpaper_asset
 load_wallpaper_asset
 install_font_asset
