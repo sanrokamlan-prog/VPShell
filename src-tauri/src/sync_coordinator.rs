@@ -1179,10 +1179,10 @@ mod tests {
         let status = coordinator.run_once(&store, 1_000).unwrap();
         assert_eq!(status.last_uploaded_objects, 1);
         assert_eq!(status.last_downloaded_objects, 1);
-        let snapshot = store.snapshot().unwrap();
-        assert_eq!(snapshot.revision, 2);
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
+        assert_eq!(snapshot["revision"].as_u64(), Some(2));
         let state: serde_json::Value =
-            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
         assert_eq!(state["hosts"][0]["host"], "remote.example");
         assert_eq!(state["hosts"][0]["credentialRef"], "ssh-reference");
         assert!(store.pending_host_sync_changes(128).unwrap().is_empty());
