@@ -251,7 +251,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - 桌面 Local Folder 只接受已存在、非符号链接的专用目录。用户必须明确选择“初始化新 vault”或“解锁已有 vault”；解锁缺失 bootstrap 时不得隐式创建，初始化已有 bootstrap 时不得覆盖。
 - `vpshell/v1/bootstrap.json` 是不可变 schema-v1 对象，只包含 canonical vault UUID 和 Argon2id 认证 keyslot。二级密码进入 Rust 后立即由清零容器拥有，不得持久化、序列化、调试、记录或返回前端；状态响应只包含阶段、计数、代际和稳定错误码。
 - 配置与 Argon2id 解锁、手动单周期均在 blocking worker 执行；取消使当前 provider token 与 generation 同时失效，锁定清除运行时 provider/VMK。五个桌面命令只能进入 `capabilities/default.json`，Android capability 必须持续排除。
-- 当前入口不会把 AppState 快照直接上传。主机公开字段、通过秘密扫描的 `custom=true` 脚本及终端字体族/字号/行高会经业务库 changefeed、具名 operation、加密 outbox 与独立远端投影交接；内置脚本及 description/category 不同步，安全脚本变为不安全时只发 tombstone，本机不安全脚本拒绝远端覆盖/删除。自定义字体资产/名称、历史、背景、其余设置、自动调度、冲突解决、WebDAV 产品凭据和真实多设备矩阵必须作为后续独立项完成。
+- 当前入口不会把 AppState 快照直接上传。主机公开字段、通过秘密扫描的 `custom=true` 脚本、终端字体族/字号/行高及自动上传编辑文件/包传输两个行为偏好会经业务库 changefeed、具名 operation、加密 outbox 与独立远端投影交接；内置脚本及 description/category 不同步，安全脚本变为不安全时只发 tombstone，本机不安全脚本拒绝远端覆盖/删除。自定义字体资产/名称、设备本地编辑器路径、历史、背景、其他尚未建模设置、自动调度、冲突解决、WebDAV 产品凭据和真实多设备矩阵必须作为后续独立项完成。
 
 ### 10.10 Android Preview 共享契约（Phase C）
 

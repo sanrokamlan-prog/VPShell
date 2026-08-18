@@ -579,7 +579,7 @@ impl SyncCoordinatorManager {
                 .map_err(|_| "app-state-handoff".to_string())?;
         }
         app_store
-            .ensure_setting_sync_change(now_ms)
+            .ensure_setting_sync_changes(now_ms)
             .map_err(|_| "app-state-handoff".to_string())?;
         Ok(())
     }
@@ -970,7 +970,7 @@ mod tests {
             "sync": {"enabled": true, "provider": "local", "endpoint": "", "remotePath": "/vpshell", "username": "", "totpEnabled": false, "syncSecrets": false},
             "wallpaper": {"source": "none", "value": "", "opacity": 0.2},
             "terminalAppearance": {"fontFamily": "Cascadia Code", "fontSize": 13, "lineHeight": 1.25},
-            "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false},
+            "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false, "packageTransfersEnabled": true},
             "onboardingCompleted": true
         })
         .to_string()
@@ -1133,6 +1133,24 @@ mod tests {
             entity_id,
             field,
             serde_json::json!({ "type": "integer", "value": value }),
+        )
+    }
+
+    fn operation_flag_patch(
+        device_id: &str,
+        sequence: u64,
+        entity_kind: &str,
+        entity_id: &str,
+        field: &str,
+        value: bool,
+    ) -> Vec<u8> {
+        operation_field_patch(
+            device_id,
+            sequence,
+            entity_kind,
+            entity_id,
+            field,
+            serde_json::json!({ "type": "flag", "value": value }),
         )
     }
 
@@ -1425,6 +1443,88 @@ mod tests {
                     .any(|window| window == "device-only-font.ttf".as_bytes())
             );
         }
+    }
+
+    #[test]
+    fn cycle_syncs_application_preferences_without_device_editor_path() {
+        let root = TempDir::new("app-state-preferences");
+        let store = test_app_store(&root);
+        let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
+        state["settings"] = serde_json::json!({
+            "externalEditorPath": "device-only-editor",
+            "autoUploadEditedFiles": true,
+            "packageTransfersEnabled": false
+        });
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let preference_change = store
+            .pending_entity_sync_changes(128)
+            .unwrap()
+            .into_iter()
+            .find(|change| change.entity_kind == crate::sync_merge::EntityKind::Setting)
+            .unwrap();
+        let crate::sync_merge::LocalEntityMutation::Patch(fields) = &preference_change.mutation
+        else {
+            panic!("application preferences must be a patch");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(
+            fields["autoUploadEditedFiles"],
+            crate::sync_merge::FieldValue::Flag(true)
+        );
+        assert_eq!(
+            fields["packageTransfersEnabled"],
+            crate::sync_merge::FieldValue::Flag(false)
+        );
+        let setting_entity = preference_change.entity_id;
+
+        let coordinator = SyncCoordinatorManager::open(root.0.join("journal")).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let vault_id = Uuid::new_v4().to_string();
+        let remote_device = Uuid::new_v4().to_string();
+        let vault_key = VaultKey::generate().unwrap();
+        let remote = encrypt_sync_object(
+            &vault_key,
+            &vault_id,
+            SyncObjectKind::Event,
+            &Uuid::new_v4().to_string(),
+            Some(&remote_device),
+            Some(1),
+            &operation_flag_patch(
+                &remote_device,
+                1,
+                "setting",
+                &setting_entity,
+                "autoUploadEditedFiles",
+                false,
+            ),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider.insert(
+            &format!("vpshell/v1/{vault_id}/segments/{remote_device}/1.oseg"),
+            remote,
+        );
+        coordinator
+            .attach_session(provider, vault_key, &vault_id)
+            .unwrap();
+
+        let status = coordinator.run_once(&store, 1_000).unwrap();
+        assert_eq!(status.last_uploaded_objects, 2);
+        assert_eq!(status.last_downloaded_objects, 1);
+        assert_eq!(status.open_conflicts, 1);
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
+        assert_eq!(state["settings"]["externalEditorPath"], "device-only-editor");
+        assert_eq!(state["settings"]["autoUploadEditedFiles"], false);
+        assert_eq!(state["settings"]["packageTransfersEnabled"], false);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
     }
 
     #[test]

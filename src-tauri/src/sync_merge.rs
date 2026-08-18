@@ -1210,7 +1210,16 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
         {
             Ok(())
         }
-        (EntityKind::Setting, _, FieldValue::Text(value)) if valid_text(value, 256) => Ok(()),
+        (
+            EntityKind::Setting,
+            "autoUploadEditedFiles" | "packageTransfersEnabled",
+            FieldValue::Flag(_),
+        ) => Ok(()),
+        (
+            EntityKind::Setting,
+            "terminalTheme" | "fontFamily" | "locale",
+            FieldValue::Text(value),
+        ) if valid_text(value, 256) => Ok(()),
         (EntityKind::Background, "kind", FieldValue::Text(value))
             if matches!(value.as_str(), "none" | "managed-blob") =>
         {
@@ -1285,6 +1294,8 @@ fn field_allowed(kind: &EntityKind, field: &str) -> bool {
                 | "lineHeight"
                 | "monitorInterval"
                 | "locale"
+                | "autoUploadEditedFiles"
+                | "packageTransfersEnabled"
         ),
         EntityKind::Background => matches!(field, "kind" | "blobId" | "opacity"),
     }
@@ -1765,6 +1776,15 @@ mod tests {
                 "opacity",
                 FieldValue::Integer(35),
             ),
+            patch(
+                74,
+                DEVICE_A,
+                104,
+                EntityKind::Setting,
+                HOST_ID,
+                "packageTransfersEnabled",
+                FieldValue::Flag(false),
+            ),
         ];
         let mut state = MergeState::default();
         for operation in &operations {
@@ -1778,11 +1798,27 @@ mod tests {
             state.setting_projection().unwrap(),
             vec![MergedEntityProjection {
                 entity_id: HOST_ID.to_string(),
-                fields: Some(BTreeMap::from([(
-                    "fontSize".to_string(),
-                    FieldValue::Integer(16),
-                )])),
+                fields: Some(BTreeMap::from([
+                    ("fontSize".to_string(), FieldValue::Integer(16)),
+                    (
+                        "packageTransfersEnabled".to_string(),
+                        FieldValue::Flag(false),
+                    ),
+                ])),
             }]
+        );
+        assert!(
+            patch(
+                75,
+                DEVICE_A,
+                105,
+                EntityKind::Setting,
+                HOST_ID,
+                "packageTransfersEnabled",
+                FieldValue::Text("false".into()),
+            )
+            .encode()
+            .is_err()
         );
         let background = state
             .entity_fields(&EntityKind::Background, HOST_ID)

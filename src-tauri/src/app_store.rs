@@ -17,8 +17,9 @@ use crate::sync_merge::{
     EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection, entity_fields_are_syncable,
 };
 
-const STORE_SCHEMA_VERSION: i64 = 5;
+const STORE_SCHEMA_VERSION: i64 = 6;
 const TERMINAL_APPEARANCE_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000001";
+const APPLICATION_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000002";
 const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVENTS: i64 = 10_000;
@@ -327,6 +328,21 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
                  );",
             )
             .map_err(|error| format!("无法创建 AppState 设置同步 schema: {error}"))?;
+    }
+    if version < 6 {
+        transaction
+            .execute_batch(&format!(
+                "ALTER TABLE app_sync_setting_state RENAME TO app_sync_setting_state_v5;
+                 CREATE TABLE app_sync_setting_state (
+                    entity_id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL
+                 );
+                 INSERT INTO app_sync_setting_state(entity_id, content_hash)
+                    SELECT '{TERMINAL_APPEARANCE_ENTITY_ID}', content_hash
+                    FROM app_sync_setting_state_v5 WHERE singleton = 1;
+                 DROP TABLE app_sync_setting_state_v5;"
+            ))
+            .map_err(|error| format!("无法升级 AppState 设置同步状态: {error}"))?;
         let existing: Option<(i64, String, i64)> = transaction
             .query_row(
                 "SELECT revision, state_json, updated_at_ms
@@ -339,7 +355,7 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
         if let Some((revision, state_json, updated_at_ms)) = existing {
             let state: Value = serde_json::from_str(&state_json)
                 .map_err(|error| format!("待迁移 AppState JSON 损坏: {error}"))?;
-            queue_setting_sync_change(
+            queue_setting_sync_changes(
                 &transaction,
                 None,
                 &state,
@@ -1159,6 +1175,49 @@ fn default_terminal_appearance_sync_fields() -> BTreeMap<String, FieldValue> {
     ])
 }
 
+fn application_preference_sync_fields(
+    value: &Value,
+) -> Result<BTreeMap<String, FieldValue>, String> {
+    let root = ensure_object(value, "root")?;
+    let settings = ensure_object(
+        root.get("settings")
+            .ok_or_else(|| "本地状态缺少 settings".to_string())?,
+        "settings",
+    )?;
+    let flag = |field: &str, default: bool| match settings.get(field) {
+        Some(Value::Bool(value)) => Ok(*value),
+        None => Ok(default),
+        _ => Err(format!("本地状态 settings.{field} 无效")),
+    };
+    let fields = BTreeMap::from([
+        (
+            "autoUploadEditedFiles".to_string(),
+            FieldValue::Flag(flag("autoUploadEditedFiles", false)?),
+        ),
+        (
+            "packageTransfersEnabled".to_string(),
+            FieldValue::Flag(flag("packageTransfersEnabled", true)?),
+        ),
+    ]);
+    if !entity_fields_are_syncable(&EntityKind::Setting, &fields) {
+        return Err("本地状态应用行为偏好未通过同步字段验证".to_string());
+    }
+    Ok(fields)
+}
+
+fn default_application_preference_sync_fields() -> BTreeMap<String, FieldValue> {
+    BTreeMap::from([
+        (
+            "autoUploadEditedFiles".to_string(),
+            FieldValue::Flag(false),
+        ),
+        (
+            "packageTransfersEnabled".to_string(),
+            FieldValue::Flag(true),
+        ),
+    ])
+}
+
 fn sync_fields_hash(fields: &BTreeMap<String, FieldValue>) -> Result<String, String> {
     let encoded =
         serde_json::to_vec(fields).map_err(|error| format!("无法编码本地同步字段指纹: {error}"))?;
@@ -1171,19 +1230,20 @@ fn sync_fields_hash(fields: &BTreeMap<String, FieldValue>) -> Result<String, Str
     Ok(output)
 }
 
-fn queue_setting_sync_change(
+fn queue_fixed_setting_sync_change(
     transaction: &Transaction<'_>,
-    previous: Option<&Value>,
-    next: &Value,
+    initial_state: bool,
+    entity_id: &str,
+    next_fields: BTreeMap<String, FieldValue>,
+    default_fields: &BTreeMap<String, FieldValue>,
     revision: u64,
     now: i64,
 ) -> Result<(), String> {
-    let next_fields = terminal_appearance_sync_fields(next)?;
     let content_hash = sync_fields_hash(&next_fields)?;
     let queued_hash: Option<String> = transaction
         .query_row(
-            "SELECT content_hash FROM app_sync_setting_state WHERE singleton = 1",
-            [],
+            "SELECT content_hash FROM app_sync_setting_state WHERE entity_id = ?1",
+            params![entity_id],
             |row| row.get(0),
         )
         .optional()
@@ -1191,13 +1251,13 @@ fn queue_setting_sync_change(
     if queued_hash.as_deref() == Some(content_hash.as_str()) {
         return Ok(());
     }
-    if previous.is_none() && next_fields == default_terminal_appearance_sync_fields() {
+    if initial_state && &next_fields == default_fields {
         transaction
             .execute(
-                "INSERT INTO app_sync_setting_state(singleton, content_hash)
-                 VALUES (1, ?1)
-                 ON CONFLICT(singleton) DO UPDATE SET content_hash = excluded.content_hash",
-                params![content_hash],
+                "INSERT INTO app_sync_setting_state(entity_id, content_hash)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(entity_id) DO UPDATE SET content_hash = excluded.content_hash",
+                params![entity_id, content_hash],
             )
             .map_err(|error| format!("无法记录 AppState 默认设置同步状态: {error}"))?;
         return Ok(());
@@ -1208,7 +1268,7 @@ fn queue_setting_sync_change(
         })
         .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
     if pending >= MAX_PENDING_SYNC_CHANGES {
-        if previous.is_none() {
+        if initial_state {
             return Ok(());
         }
         return Err("AppState 同步 changefeed 已达到 10000 项上限；请先完成同步".to_string());
@@ -1225,7 +1285,7 @@ fn queue_setting_sync_change(
              ) VALUES (?1, ?2, 'patch', ?3, ?4, ?5, 'setting')",
             params![
                 Uuid::new_v4().to_string(),
-                TERMINAL_APPEARANCE_ENTITY_ID,
+                entity_id,
                 fields_json,
                 revision,
                 now
@@ -1234,13 +1294,41 @@ fn queue_setting_sync_change(
         .map_err(|error| format!("无法写入 AppState 设置同步 changefeed: {error}"))?;
     transaction
         .execute(
-            "INSERT INTO app_sync_setting_state(singleton, content_hash)
-             VALUES (1, ?1)
-             ON CONFLICT(singleton) DO UPDATE SET content_hash = excluded.content_hash",
-            params![content_hash],
+            "INSERT INTO app_sync_setting_state(entity_id, content_hash)
+             VALUES (?1, ?2)
+             ON CONFLICT(entity_id) DO UPDATE SET content_hash = excluded.content_hash",
+            params![entity_id, content_hash],
         )
         .map_err(|error| format!("无法记录 AppState 设置同步状态: {error}"))?;
     Ok(())
+}
+
+fn queue_setting_sync_changes(
+    transaction: &Transaction<'_>,
+    previous: Option<&Value>,
+    next: &Value,
+    revision: u64,
+    now: i64,
+) -> Result<(), String> {
+    let initial_state = previous.is_none();
+    queue_fixed_setting_sync_change(
+        transaction,
+        initial_state,
+        TERMINAL_APPEARANCE_ENTITY_ID,
+        terminal_appearance_sync_fields(next)?,
+        &default_terminal_appearance_sync_fields(),
+        revision,
+        now,
+    )?;
+    queue_fixed_setting_sync_change(
+        transaction,
+        initial_state,
+        APPLICATION_PREFERENCES_ENTITY_ID,
+        application_preference_sync_fields(next)?,
+        &default_application_preference_sync_fields(),
+        revision,
+        now,
+    )
 }
 
 fn entity_projection_hash(entities: &[MergedEntityProjection]) -> Result<String, String> {
@@ -1253,6 +1341,34 @@ fn entity_projection_hash(entities: &[MergedEntityProjection]) -> Result<String,
         let _ = write!(output, "{byte:02x}");
     }
     Ok(output)
+}
+
+fn validate_setting_projection_fields(
+    entity_id: &str,
+    fields: &BTreeMap<String, FieldValue>,
+) -> Result<(), String> {
+    let fields_match = match entity_id {
+        TERMINAL_APPEARANCE_ENTITY_ID => {
+            fields.len() == 3
+                && fields.keys().all(|field| {
+                    matches!(field.as_str(), "fontFamily" | "fontSize" | "lineHeight")
+                })
+        }
+        APPLICATION_PREFERENCES_ENTITY_ID => {
+            fields.len() == 2
+                && fields.keys().all(|field| {
+                    matches!(
+                        field.as_str(),
+                        "autoUploadEditedFiles" | "packageTransfersEnabled"
+                    )
+                })
+        }
+        _ => false,
+    };
+    if !fields_match || !entity_fields_are_syncable(&EntityKind::Setting, fields) {
+        return Err("远端设置同步投影字段未通过协议验证".to_string());
+    }
+    Ok(())
 }
 
 fn load_host_entity_mappings(
@@ -1592,7 +1708,7 @@ impl AppStore {
             .map_err(|error| format!("无法迁移旧 WebView 状态: {error}"))?;
         queue_host_sync_changes(&transaction, None, &state, 1, now)?;
         queue_script_sync_changes(&transaction, None, &state, 1, now)?;
-        queue_setting_sync_change(&transaction, None, &state, 1, now)?;
+        queue_setting_sync_changes(&transaction, None, &state, 1, now)?;
         insert_event(
             &transaction,
             "legacy-local-storage-imported",
@@ -1708,7 +1824,7 @@ impl AppStore {
             next_revision,
             now,
         )?;
-        queue_setting_sync_change(
+        queue_setting_sync_changes(
             &transaction,
             previous_value.as_ref(),
             &next_value,
@@ -2322,12 +2438,16 @@ impl AppStore {
             {
                 return Err("AppState 设置同步投影包含无效或重复实体".to_string());
             }
-            if setting.entity_id != TERMINAL_APPEARANCE_ENTITY_ID {
+            if setting.entity_id != TERMINAL_APPEARANCE_ENTITY_ID
+                && setting.entity_id != APPLICATION_PREFERENCES_ENTITY_ID
+            {
                 return Err("AppState 设置同步投影包含未接线实体".to_string());
             }
-            if setting.fields.is_none() {
-                return Err("AppState 终端外观设置不能被删除".to_string());
-            }
+            let fields = setting
+                .fields
+                .as_ref()
+                .ok_or_else(|| "AppState 设置实体不能被删除".to_string())?;
+            validate_setting_projection_fields(&setting.entity_id, fields)?;
         }
         let projection_hash = entity_projection_hash(&projection)?;
         let merge_revision_sql = i64::try_from(merge_revision)
@@ -2404,22 +2524,15 @@ impl AppStore {
         let root = next_value
             .as_object_mut()
             .ok_or_else(|| "AppState 根对象损坏".to_string())?;
-        let next_fields = projection
-            .first()
-            .and_then(|setting| setting.fields.as_ref())
-            .map(|fields| {
-                if fields.len() != 3
-                    || !fields.keys().all(|field| {
-                        matches!(field.as_str(), "fontFamily" | "fontSize" | "lineHeight")
-                    })
-                    || !entity_fields_are_syncable(&EntityKind::Setting, fields)
-                {
-                    return Err("远端设置同步投影字段未通过协议验证".to_string());
-                }
-                Ok(fields)
-            })
-            .transpose()?;
-        if let Some(fields) = next_fields {
+        let terminal_fields = projection
+            .iter()
+            .find(|setting| setting.entity_id == TERMINAL_APPEARANCE_ENTITY_ID)
+            .and_then(|setting| setting.fields.as_ref());
+        let preference_fields = projection
+            .iter()
+            .find(|setting| setting.entity_id == APPLICATION_PREFERENCES_ENTITY_ID)
+            .and_then(|setting| setting.fields.as_ref());
+        if let Some(fields) = terminal_fields {
             let font_family = match fields.get("fontFamily") {
                 Some(FieldValue::Text(value)) => value.clone(),
                 _ => return Err("远端设置同步投影缺少 fontFamily".to_string()),
@@ -2442,11 +2555,42 @@ impl AppStore {
             appearance.insert("fontSize".to_string(), Value::Number(font_size.into()));
             appearance.insert("lineHeight".to_string(), Value::Number(line_height));
         }
+        if let Some(fields) = preference_fields {
+            let auto_upload_edited_files = match fields.get("autoUploadEditedFiles") {
+                Some(FieldValue::Flag(value)) => *value,
+                _ => return Err("远端设置同步投影缺少 autoUploadEditedFiles".to_string()),
+            };
+            let package_transfers_enabled = match fields.get("packageTransfersEnabled") {
+                Some(FieldValue::Flag(value)) => *value,
+                _ => return Err("远端设置同步投影缺少 packageTransfersEnabled".to_string()),
+            };
+            let settings = root
+                .get_mut("settings")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "AppState settings 损坏".to_string())?;
+            settings.insert(
+                "autoUploadEditedFiles".to_string(),
+                Value::Bool(auto_upload_edited_files),
+            );
+            settings.insert(
+                "packageTransfersEnabled".to_string(),
+                Value::Bool(package_transfers_enabled),
+            );
+        }
         validate_state_json(
             &serde_json::to_string(&next_value)
                 .map_err(|error| format!("无法编码 AppState 设置同步投影结果: {error}"))?,
         )?;
-        let projected_content_hash = next_fields.map(sync_fields_hash).transpose()?;
+        let projected_content_hashes = projection
+            .iter()
+            .map(|setting| {
+                let fields = setting
+                    .fields
+                    .as_ref()
+                    .ok_or_else(|| "AppState 设置实体不能被删除".to_string())?;
+                Ok((setting.entity_id.as_str(), sync_fields_hash(fields)?))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let changed = next_value != current_value;
         if changed {
             let next_revision = (current_revision as u64)
@@ -2466,18 +2610,18 @@ impl AppStore {
             insert_event(
                 &transaction,
                 "sync-setting-applied",
-                &["terminalAppearance".to_string()],
+                &changed_domains(Some(&current_value), &next_value),
                 now,
             )?;
             prune_events(&transaction, now)?;
         }
-        if let Some(content_hash) = projected_content_hash {
+        for (entity_id, content_hash) in projected_content_hashes {
             transaction
                 .execute(
-                    "INSERT INTO app_sync_setting_state(singleton, content_hash)
-                     VALUES (1, ?1)
-                     ON CONFLICT(singleton) DO UPDATE SET content_hash = excluded.content_hash",
-                    params![content_hash],
+                    "INSERT INTO app_sync_setting_state(entity_id, content_hash)
+                     VALUES (?1, ?2)
+                     ON CONFLICT(entity_id) DO UPDATE SET content_hash = excluded.content_hash",
+                    params![entity_id, content_hash],
                 )
                 .map_err(|error| format!("无法记录 AppState 远端设置同步状态: {error}"))?;
         }
@@ -2581,7 +2725,7 @@ impl AppStore {
         Ok(count.max(0) as u64)
     }
 
-    pub(crate) fn ensure_setting_sync_change(&self, now: i64) -> Result<(), String> {
+    pub(crate) fn ensure_setting_sync_changes(&self, now: i64) -> Result<(), String> {
         if now < 0 {
             return Err("AppState 设置同步恢复时间不能为负数".to_string());
         }
@@ -2607,7 +2751,7 @@ impl AppStore {
                 return Err("AppState revision 损坏".to_string());
             }
             let state = validate_state_json(&state_json)?;
-            queue_setting_sync_change(&transaction, None, &state, revision.max(1) as u64, now)?;
+            queue_setting_sync_changes(&transaction, None, &state, revision.max(1) as u64, now)?;
         }
         transaction
             .commit()
@@ -2680,7 +2824,7 @@ mod tests {
             "sync": {"enabled": false, "provider": "webdav", "endpoint": "", "remotePath": "/vpshell", "username": "", "totpEnabled": false, "syncSecrets": false},
             "wallpaper": {"source": "none", "value": "", "opacity": 0.2},
             "terminalAppearance": {"fontFamily": "Cascadia Code", "fontSize": 13, "lineHeight": 1.25},
-            "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false},
+            "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false, "packageTransfersEnabled": true},
             "onboardingCompleted": true
         }).to_string()
     }
@@ -2902,6 +3046,83 @@ mod tests {
     }
 
     #[test]
+    fn application_preferences_changefeed_excludes_device_local_editor_path() {
+        let root = TempDir::new("preference-changefeed");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        acknowledge_initial_host(&store, &vault_id);
+
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["settings"] = serde_json::json!({
+            "externalEditorPath": "/device-only/editor",
+            "autoUploadEditedFiles": true,
+            "packageTransfersEnabled": false
+        });
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        let changes = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].entity_kind, EntityKind::Setting);
+        assert_eq!(changes[0].entity_id, APPLICATION_PREFERENCES_ENTITY_ID);
+        let LocalEntityMutation::Patch(fields) = &changes[0].mutation else {
+            panic!("application preferences must be a patch");
+        };
+        assert_eq!(
+            fields,
+            &BTreeMap::from([
+                (
+                    "autoUploadEditedFiles".to_string(),
+                    FieldValue::Flag(true),
+                ),
+                (
+                    "packageTransfersEnabled".to_string(),
+                    FieldValue::Flag(false),
+                ),
+            ])
+        );
+        assert!(!serde_json::to_string(fields).unwrap().contains("editor"));
+        store
+            .acknowledge_entity_sync_change(&vault_id, &changes[0].operation_id)
+            .unwrap();
+
+        state["settings"]["autoUploadEditedFiles"] = Value::Bool(false);
+        state["settings"]["packageTransfersEnabled"] = Value::Bool(true);
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 2,
+            })
+            .unwrap();
+        let restored = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(restored.len(), 1);
+        let LocalEntityMutation::Patch(fields) = &restored[0].mutation else {
+            panic!("restored application preferences must be a patch");
+        };
+        assert_eq!(fields, &default_application_preference_sync_fields());
+
+        state["settings"]["autoUploadEditedFiles"] = Value::String("yes".into());
+        assert!(
+            store
+                .save(SaveAppStateRequest {
+                    state_json: state.to_string(),
+                    expected_revision: 3,
+                })
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, 3);
+    }
+
+    #[test]
     fn setting_change_recovery_refills_a_deferred_migration_once() {
         let root = TempDir::new("setting-recovery");
         let store = AppStore::load(root.0.clone()).unwrap();
@@ -2934,12 +3155,12 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        store.ensure_setting_sync_change(3_000).unwrap();
+        store.ensure_setting_sync_changes(3_000).unwrap();
         let recovered = store.pending_entity_sync_changes(128).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].entity_kind, EntityKind::Setting);
         let operation_id = recovered[0].operation_id.clone();
-        store.ensure_setting_sync_change(3_001).unwrap();
+        store.ensure_setting_sync_changes(3_001).unwrap();
         let unchanged = store.pending_entity_sync_changes(128).unwrap();
         assert_eq!(unchanged.len(), 1);
         assert_eq!(unchanged[0].operation_id, operation_id);
@@ -3202,6 +3423,8 @@ mod tests {
         let mut state: Value = serde_json::from_str(&fixture()).unwrap();
         state["terminalAppearance"]["customFontName"] =
             Value::String("device-only-font.ttf".into());
+        state["settings"]["externalEditorPath"] =
+            Value::String("device-only-editor".into());
         store
             .save(SaveAppStateRequest {
                 state_json: state.to_string(),
@@ -3218,10 +3441,26 @@ mod tests {
             ("fontSize".to_string(), FieldValue::Integer(18)),
             ("lineHeight".to_string(), FieldValue::Integer(150)),
         ]);
-        let projection = vec![MergedEntityProjection {
-            entity_id: TERMINAL_APPEARANCE_ENTITY_ID.to_string(),
-            fields: Some(fields.clone()),
-        }];
+        let preference_fields = BTreeMap::from([
+            (
+                "autoUploadEditedFiles".to_string(),
+                FieldValue::Flag(true),
+            ),
+            (
+                "packageTransfersEnabled".to_string(),
+                FieldValue::Flag(false),
+            ),
+        ]);
+        let projection = vec![
+            MergedEntityProjection {
+                entity_id: TERMINAL_APPEARANCE_ENTITY_ID.to_string(),
+                fields: Some(fields.clone()),
+            },
+            MergedEntityProjection {
+                entity_id: APPLICATION_PREFERENCES_ENTITY_ID.to_string(),
+                fields: Some(preference_fields),
+            },
+        ];
         assert_eq!(
             store
                 .apply_remote_setting_projection(&vault_id, 5, &projection, 5_000)
@@ -3242,6 +3481,9 @@ mod tests {
             projected["terminalAppearance"]["customFontName"],
             "device-only-font.ttf"
         );
+        assert_eq!(projected["settings"]["externalEditorPath"], "device-only-editor");
+        assert_eq!(projected["settings"]["autoUploadEditedFiles"], true);
+        assert_eq!(projected["settings"]["packageTransfersEnabled"], false);
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
 
         store
@@ -3268,6 +3510,26 @@ mod tests {
         assert!(
             store
                 .apply_remote_setting_projection(&vault_id, 6, &invalid, 5_002)
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap().revision, revision);
+
+        let invalid_preference = vec![MergedEntityProjection {
+            entity_id: APPLICATION_PREFERENCES_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([
+                (
+                    "autoUploadEditedFiles".to_string(),
+                    FieldValue::Text("true".into()),
+                ),
+                (
+                    "packageTransfersEnabled".to_string(),
+                    FieldValue::Flag(false),
+                ),
+            ])),
+        }];
+        assert!(
+            store
+                .apply_remote_setting_projection(&vault_id, 6, &invalid_preference, 5_003)
                 .is_err()
         );
         assert_eq!(store.snapshot().unwrap().revision, revision);
@@ -3639,6 +3901,75 @@ mod tests {
             )
             .unwrap();
         assert_eq!(setting_tables, 2);
+    }
+
+    #[test]
+    fn version_five_snapshot_backfills_application_preferences_without_losing_changes() {
+        let root = TempDir::new("sync-v5-migration");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let host_operation_id = store.pending_entity_sync_changes(128).unwrap()[0]
+            .operation_id
+            .clone();
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["settings"]["autoUploadEditedFiles"] = Value::Bool(true);
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        drop(store);
+
+        let connection = open_connection(&database_path(&root.0)).unwrap();
+        connection
+            .execute(
+                "DELETE FROM app_sync_changes WHERE entity_id = ?1",
+                params![APPLICATION_PREFERENCES_ENTITY_ID],
+            )
+            .unwrap();
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE app_sync_setting_state RENAME TO app_sync_setting_state_v6;
+                 CREATE TABLE app_sync_setting_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    content_hash TEXT NOT NULL
+                 );
+                 INSERT INTO app_sync_setting_state(singleton, content_hash)
+                    SELECT 1, content_hash FROM app_sync_setting_state_v6
+                    WHERE entity_id = '{TERMINAL_APPEARANCE_ENTITY_ID}';
+                 DROP TABLE app_sync_setting_state_v6;
+                 PRAGMA user_version = 5;"
+            ))
+            .unwrap();
+        drop(connection);
+
+        let migrated = AppStore::load(root.0.clone()).unwrap();
+        let changes = migrated.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].operation_id, host_operation_id);
+        assert_eq!(changes[0].entity_kind, EntityKind::Host);
+        assert_eq!(changes[1].entity_kind, EntityKind::Setting);
+        assert_eq!(changes[1].entity_id, APPLICATION_PREFERENCES_ENTITY_ID);
+        let LocalEntityMutation::Patch(fields) = &changes[1].mutation else {
+            panic!("migrated application preferences must be a patch");
+        };
+        assert_eq!(fields["autoUploadEditedFiles"], FieldValue::Flag(true));
+        assert_eq!(fields["packageTransfersEnabled"], FieldValue::Flag(true));
+
+        let connection = open_connection(&database_path(&root.0)).unwrap();
+        assert_eq!(current_schema(&connection).unwrap(), STORE_SCHEMA_VERSION);
+        let setting_states: i64 = connection
+            .query_row("SELECT COUNT(*) FROM app_sync_setting_state", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(setting_states, 2);
     }
 
     #[test]

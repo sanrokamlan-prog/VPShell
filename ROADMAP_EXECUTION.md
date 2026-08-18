@@ -109,10 +109,11 @@
 | 完成 | AppState 主机公开字段保存事务 changefeed、稳定实体映射、observed merge operation、加密 outbox 与跨库幂等确认已接线；PR #1 run `32107931488` 全绿 |
 | 完成 | 远端主机 merge 按 vault/revision/hash 可重试投影到 AppState，保留本机秘密、无回声 changefeed，并把新 snapshot/revision 接回桌面状态；PR #1 run `32111238560` 全绿 |
 | 完成 | 安全自建脚本的事务 changefeed、具名加密 operation/outbox、远端可重试投影与本机不安全脚本保护；PR #1 run `32115066343` 全绿 |
-| 进行中 | 终端字体族/字号/行高的固定设置实体、事务 changefeed、加密 operation/outbox、独立可重试投影与防回声指纹已接线，等待 Actions；自定义字体资产/名称保持本机 |
-| 待实现 | 历史/背景/其余设置等业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
+| 完成 | 终端字体族/字号/行高的固定设置实体、事务 changefeed、加密 operation/outbox、独立可重试投影与防回声指纹已接线；自定义字体资产/名称保持本机；PR #1 run `32163627366` 全绿 |
+| 进行中 | 自动上传编辑文件与包传输两个应用行为偏好使用独立固定设置实体接入同一 Rust-owned 双向链路，等待 Actions；设备本地 `externalEditorPath` 不同步 |
+| 待实现 | 历史/背景/其他尚未建模设置等业务域 operation、自动调度、冲突解决 UI、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口、主机公开字段及安全自建脚本双向 operation/投影链路均已通过 Actions；终端外观窄设置链路正在验证，历史/背景/其余设置、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口、主机公开字段、安全自建脚本及终端外观窄设置双向 operation/投影链路均已通过 Actions；两个应用行为偏好正在验证，历史/背景/其他尚未建模设置、自动触发、真实外部 provider、多设备和完整冲突界面仍未完成。
 
 ## Phase C：Android Preview
 
@@ -224,7 +225,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 终端外观窄设置 operation 与 AppState 投影（待 Actions） | `vpshell-state.sqlite3` 升级 schema v5，将 `setting` 纳入 durable changefeed，并以固定 UUID 表示跨设备唯一终端外观实体。状态保存只入队完整 fontFamily/fontSize/lineHeight，行高按百分之一整数编码；产品默认值首次初始化不制造冗余 operation，改回默认值仍会入队。协调器通过通用 journal 生成带 observed stamp 的具名加密 operation/outbox，并读取独立 setting merge 投影；业务库以单独 vault/revision/hash 水位、固定实体、恰好三个字段、完整类型/范围和本地 changefeed 清空为前提事务回写，同时更新内容指纹阻止下一次普通保存形成回声。`customFontName` 与字体资产保持本机，非法实体、删除、缺字段或额外 setting 字段 fail closed。v4 升级若旧 changefeed 已满会保留本地状态并延期，协调器移交出空间后按指纹一次性补入，不隔离旧库或永久漏传。聚焦测试覆盖固定公开字段/恢复默认/非法步长、迁移延期恢复、远端幂等/防回声/额外字段回滚/v4 行保留、merge setting 投影及真实协调器周期的双本地密文、远端整数冲突和本机字体名称不出密文。 |
 | 2026-08-18 | B9 终端外观窄设置本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest 唯一项/handler/capability 并集完整对齐、Android 仅只读 `android_sync_status` 且运行 Sync capability 继续 disabled、schema v5/固定设置实体/独立水位与恢复补入链静态闭合、五项新增 AppStore/coordinator 聚焦测试及 merge projection 断言存在、无新增日志宏、无 `.codex-roadmap-complete`、无 `node_modules`/`target` 检查通过；根分区起止均为 50%。VPS 无 Cargo/rustfmt，未下载工具链、SDK 或依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | B9 终端外观窄设置首轮 Actions 与格式修复 | 提交 `8de2915` 的 PR #1 run `32162299996` 已全部进入终态：frontend 生产构建与 Android aarch64 debug APK/Gradle gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告 `app_store.rs` 九段和 `sync_coordinator.rs` 一段相同排版差异后失败，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按 Ubuntu job `95793769638` 及其他平台一致输出机械应用全部十段格式，不改行为；修复后本机 `git diff --check`、严格 JSON、91-command manifest/唯一项/handler/capability、Android Sync disabled/read-only gate、改动文件边界及无 `node_modules`/`target` 检查通过，根分区 51%。VPS 无 Cargo/rustfmt 且未下载依赖；等待格式修复提交后的四平台 locked fmt/check/test、frontend、Linux 真实 fixture 与 Android 完整矩阵。 |
+| 2026-08-18 | B9 终端外观窄设置 operation 与 AppState 投影（Actions 完成） | 格式修复提交 `8be88f4` 的 PR #1 run `32163627366` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture 及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 应用行为偏好 operation 与 AppState 投影（待 Actions） | `vpshell-state.sqlite3` 升级 schema v6，将单例 setting 内容指纹迁移为按固定实体键控的状态，并新增跨设备唯一的应用行为偏好实体。状态保存只入队完整布尔字段 autoUploadEditedFiles/packageTransfersEnabled，产品默认值首次初始化不制造冗余 operation，改回默认值仍会入队；`externalEditorPath` 保持设备本地且不进入 operation。协调器沿用具名加密 operation/outbox、observed stamp、setting merge 投影和独立 vault/revision/hash 水位；业务库只接受两个已接线固定设置实体及各自恰好完整的字段集合，按实体更新防回声指纹，错误类型、删除、未知实体、缺字段和额外字段 fail closed。v5 迁移保留终端指纹及已有 changefeed，并为非默认行为偏好补入 operation；恢复链可在 changefeed 腾出空间后补入。聚焦测试覆盖公开布尔字段/恢复默认/错误类型和本机路径排除、双实体远端事务投影/防回声/原子回滚、v5 迁移保留既有 change、merge 布尔类型白名单，以及真实协调器周期的双本地密文、远端并发布尔冲突和本机路径保留。 |
+| 2026-08-18 | B9 应用行为偏好本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、91-command manifest 唯一项/handler/capability 并集完整对齐、Android 仅只读 `android_sync_status` 且运行 Sync capability 继续 disabled、schema v6/两个固定设置实体/按实体指纹迁移与恢复链静态闭合、AppStore changefeed/投影/v5 迁移、merge 严格布尔类型及真实 coordinator 周期测试清单存在、无新增日志宏、无 `.codex-roadmap-complete`、无 `node_modules`/`target` 检查通过；根分区起止均为 51%。VPS 无 Cargo/rustfmt，未下载工具链、SDK 或依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送终端外观窄设置的纯格式修复；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后进入历史/背景/其余设置中的下一个可安全落地业务域，不以缺少删除语义的 append-only 历史合并冒充完整历史同步。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送应用行为偏好窄设置同步；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后进入历史/背景/其他尚未建模设置中的下一个可安全落地业务域，不以缺少删除语义的 append-only 历史合并冒充完整历史同步。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
