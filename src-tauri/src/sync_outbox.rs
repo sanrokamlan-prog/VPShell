@@ -1244,8 +1244,7 @@ impl SyncJournal {
                     Ok(())
                 },
             )?;
-            let (revision, state) =
-                load_persisted_state(transaction).map_err(map_merge_error)?;
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
             Ok(ConflictResolutionJournalResult {
                 revision,
                 open_conflicts: state.open_conflicts().len(),
@@ -2008,14 +2007,7 @@ mod tests {
         let conflict_id = snapshot.conflicts[0].conflict_id.clone();
         assert_eq!(
             journal
-                .enqueue_local_conflict_resolution(
-                    &key,
-                    VAULT_ID,
-                    1,
-                    &conflict_id,
-                    0,
-                    200,
-                )
+                .enqueue_local_conflict_resolution(&key, VAULT_ID, 1, &conflict_id, 0, 200,)
                 .unwrap_err()
                 .code,
             JournalErrorCode::Conflict
@@ -2041,7 +2033,10 @@ mod tests {
             projection.entities[0].fields.as_ref().unwrap()["address"],
             crate::sync_merge::FieldValue::Text("first.example".to_string())
         );
-        let claim = journal.claim_next_for_vault(VAULT_ID, 201).unwrap().unwrap();
+        let claim = journal
+            .claim_next_for_vault(VAULT_ID, 201)
+            .unwrap()
+            .unwrap();
         assert!(
             !claim
                 .encrypted_object

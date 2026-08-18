@@ -1024,12 +1024,8 @@ fn conflict_alternative_snapshot(
             truncated: false,
         });
     };
-    let encoded = serde_json::to_vec(value).map_err(|_| {
-        MergeError::new(
-            MergeErrorCode::CorruptState,
-            "无法编码同步冲突候选",
-        )
-    })?;
+    let encoded = serde_json::to_vec(value)
+        .map_err(|_| MergeError::new(MergeErrorCode::CorruptState, "无法编码同步冲突候选"))?;
     let (value_type, display) = match value {
         FieldValue::Text(value) => ("text", Some(value.clone())),
         FieldValue::Integer(value) => ("integer", Some(value.to_string())),
@@ -1037,10 +1033,7 @@ fn conflict_alternative_snapshot(
         FieldValue::TextList(value) => (
             "text-list",
             Some(serde_json::to_string(value).map_err(|_| {
-                MergeError::new(
-                    MergeErrorCode::CorruptState,
-                    "无法编码同步冲突列表候选",
-                )
+                MergeError::new(MergeErrorCode::CorruptState, "无法编码同步冲突列表候选")
             })?),
         ),
         FieldValue::BlobRef(value) => ("blob-ref", Some(value.clone())),
@@ -1074,12 +1067,10 @@ pub(crate) fn build_local_conflict_resolution_operation(
     validate_uuid(operation_id, "operation")?;
     validate_uuid(device_id, "device")?;
     validate_hash(conflict_id, "conflict")?;
-    let conflict = state.conflicts.get(conflict_id).ok_or_else(|| {
-        MergeError::new(
-            MergeErrorCode::ConflictMissing,
-            "要解决的同步冲突不存在",
-        )
-    })?;
+    let conflict = state
+        .conflicts
+        .get(conflict_id)
+        .ok_or_else(|| MergeError::new(MergeErrorCode::ConflictMissing, "要解决的同步冲突不存在"))?;
     if conflict.resolution_stamp.is_some() {
         return Err(MergeError::new(
             MergeErrorCode::StaleResolution,
@@ -1089,12 +1080,7 @@ pub(crate) fn build_local_conflict_resolution_operation(
     let alternative = conflict
         .alternatives
         .get(usize::from(alternative_index))
-        .ok_or_else(|| {
-            MergeError::new(
-                MergeErrorCode::InvalidInput,
-                "同步冲突候选索引无效",
-            )
-        })?;
+        .ok_or_else(|| MergeError::new(MergeErrorCode::InvalidInput, "同步冲突候选索引无效"))?;
     let operation = MergeOperation {
         format_version: FORMAT_VERSION,
         operation_id: operation_id.to_string(),
@@ -1844,7 +1830,15 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         assert!(conflicts[0].alternatives[0].truncated);
         assert!(conflicts[0].alternatives[0].preview.as_ref().unwrap().len() <= 2_048);
-        assert_eq!(conflicts[0].alternatives[0].content_hash.as_ref().unwrap().len(), 64);
+        assert_eq!(
+            conflicts[0]
+                .alternatives[0]
+                .content_hash
+                .as_ref()
+                .unwrap()
+                .len(),
+            64
+        );
         let encoded_snapshot = serde_json::to_string(&conflicts).unwrap();
         assert!(!encoded_snapshot.contains(DEVICE_A));
         assert!(!encoded_snapshot.contains(DEVICE_B));
