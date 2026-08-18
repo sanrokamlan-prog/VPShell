@@ -402,8 +402,7 @@ impl TryFrom<StartMoshRequest> for ValidatedStartMoshRequest {
 }
 
 fn is_safe_mosh_host_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(byte, b'-' | b'_' | b'.' | b':' | b'[' | b']' | b'%')
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'[' | b']' | b'%')
 }
 
 fn is_safe_mosh_username_byte(byte: u8) -> bool {
@@ -412,7 +411,10 @@ fn is_safe_mosh_username_byte(byte: u8) -> bool {
 
 fn is_safe_mosh_ssh_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
-        || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':' | b',' | b'=' | b'@' | b'+')
+        || matches!(
+            byte,
+            b'-' | b'_' | b'.' | b'/' | b':' | b',' | b'=' | b'@' | b'+'
+        )
 }
 
 fn openssh_policy_arguments(request: &ValidatedStartSshRequest, kex: &str) -> Vec<String> {
@@ -475,18 +477,16 @@ fn mosh_terminal_arguments(
     let ssh_arguments = std::iter::once("ssh".to_string())
         .chain(openssh_policy_arguments(&request.ssh, kex))
         .collect::<Vec<_>>();
-    if ssh_arguments.iter().any(|argument| {
-        argument.is_empty() || !argument.bytes().all(is_safe_mosh_ssh_byte)
-    }) {
+    if ssh_arguments
+        .iter()
+        .any(|argument| argument.is_empty() || !argument.bytes().all(is_safe_mosh_ssh_byte))
+    {
         return Err("Mosh SSH bootstrap 参数包含不安全字符".to_string());
     }
     let ssh_command = ssh_arguments.join(" ");
     Ok(vec![
         "--predict=adaptive".to_string(),
-        format!(
-            "--port={}:{}",
-            request.udp_port_start, request.udp_port_end
-        ),
+        format!("--port={}:{}", request.udp_port_start, request.udp_port_end),
         "--server=mosh-server".to_string(),
         format!("--ssh={ssh_command}"),
         "--".to_string(),
@@ -1748,9 +1748,7 @@ mod tests {
             username: "operator".to_string(),
             identity_file: Some("/tmp/vpshell-mosh-key".to_string()),
             credential_ref: Some("ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212".to_string()),
-            identity_passphrase_ref: Some(
-                "key-018f1f55-26f8-7a9f-9cd8-4d7558482213".to_string(),
-            ),
+            identity_passphrase_ref: Some("key-018f1f55-26f8-7a9f-9cd8-4d7558482213".to_string()),
             cols: Some(120),
             rows: Some(32),
             udp_port_start: 60_000,
@@ -2026,8 +2024,8 @@ mod tests {
         })
         .expect("validated Mosh fixture request");
         let kex = super::file_transfer::openssh_kex_algorithms().expect("Mosh SSH KEX policy");
-        let mut arguments = mosh_terminal_arguments(&request, &kex)
-            .expect("validated Mosh fixture arguments");
+        let mut arguments =
+            mosh_terminal_arguments(&request, &kex).expect("validated Mosh fixture arguments");
         arguments.extend([
             "sh".to_string(),
             "-lc".to_string(),

@@ -128,7 +128,7 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 完成 | 系统 OpenSSH 兼容回退及跨引擎行为/安全测试：单跳终端仅对 Rust 标记的密钥格式/RSA SHA-2 协商错误回退；host-key、认证、取消、超时、无效请求与多跳 route fail closed；严格系统请求/实际引擎响应、生产参数单测及 Linux 真实 OpenSSH fixture 已实现；PR #1 run `32092154480` 全绿 |
 | 完成 | 用户自建 Relay 参考实现、认证协议、限流、审计和安全测试：desktop-only 可运行 serve/loopback connect、challenge-bound HMAC-SHA256 双向 proof、精确目标 allowlist、token/audit 私有文件、全局/单 IP/认证/字节/空闲/总时长硬上限、盐哈希 JSONL 审计和真实回环 TCP 测试已实现；PR #1 run `32095165679` 全绿，真实部署与 TLS/VPN 为外部验收 |
 | 完成 | Rust-owned 持续 route readiness 测量与可解释选路建议：真实比较同一目标直连/已配置跳板的逐跳认证、host-key pin 和最终 SFTP readiness，滚动成功率/中位数/P95/失败惩罚、可靠性门槛、切换滞后、取消/代际及脱敏快照已接线；PR #1 run `32098321338` 全绿；不自动改写 route，不称“加速” |
-| 进行中 | 可选 Mosh 独立交互模式：桌面直连显式选择、Rust 固定 SSH bootstrap/server/UDP 参数、复用 PTY 生命周期且不替代 SSH/SFTP/转发；实现与测试已接线，等待 Actions |
+| 进行中 | 可选 Mosh 独立交互模式：桌面直连显式选择、Rust 固定 SSH bootstrap/server/UDP 参数、复用 PTY 生命周期且不替代 SSH/SFTP/转发；首轮 Actions 仅格式失败，已修复并等待完整矩阵 |
 | 待实现 | 自建部署文档、协议版本/升级/撤销和故障恢复演练 |
 | 外部验收 | 多区域真实部署、长时间网络测试和各桌面/移动平台兼容性 |
 
@@ -191,7 +191,8 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | D2 route readiness 持续评估（Actions 完成） | 格式修复提交 `79fd59b` 的 PR #1 run `32098321338` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 OpenSSH/SFTP/route fixture及 Android aarch64 debug APK/Gradle unit gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。真实双路径长时间测试保持外部验收。 |
 | 2026-08-18 | D2 可选 Mosh 独立交互模式（待 Actions） | 新增严格 `start_mosh_session` 与桌面第三种终端模式：只允许直连，复用 canonical session UUID、PTY 输入/缩放/停止和 generation 清理；Rust 仅拼接固定且经安全字符验证的 OpenSSH bootstrap 参数，保留 `StrictHostKeyChecking=yes`、安全 KEX、SSH port、identity 与受限 AskPass，credential/key reference 不进 argv；Mosh 私钥路径额外拒绝空格、引号、非 ASCII 和 shell 元字符。远端 helper 固定 `mosh-server`、预测固定 adaptive、UDP 固定 60000–61000，拒绝未知字段、任意 server/SSH 参数与跳板；返回实际 `engine: mosh` 后前端才登记。文件坞、传输、编辑、监控与转发继续独立。纯测试覆盖参数/注入/脱敏/响应，Linux Actions 安装发行版 Mosh 并以现有回环 sshd/一次性密钥/known_hosts 实际启动 UDP 终端读取 marker；Android capability 排除命令。Mosh GPL-3.0 仅为用户另行安装的外部程序，未复制、链接或打包其源码；真实 firewall、漫游、休眠、长时间断网和 Windows 原生可用性为外部验收。 |
 | 2026-08-18 | D2 Mosh 本机轻量门禁 | `git diff --check`、Tauri/package/capability 严格 JSON、86-command manifest/handler 与 desktop+Android capability 完整对齐、桌面 Mosh 单授权/Android 零暴露、3 个 Mosh 模块测试与安全回归静态契约、固定 server/predict/UDP、安全 target/identity/bootstrap 字符、无 `MOSH_KEY` 处理、Linux 真实 marker fixture 和 workflow 安装项检查通过；无 `node_modules`/`target`，根分区 48%。VPS 无 Cargo/rustfmt/本地 TypeScript 依赖，未下载工具链、SDK、Mosh 或项目依赖；frontend、四平台 locked fmt/check/test、Linux 真实 SSH bootstrap/Mosh UDP fixture 与 Android 构建交给 PR #1 Actions。 |
+| 2026-08-18 | D2 Mosh 首轮 Actions 与格式修复 | 提交 `c4f7f9b` 的 PR #1 run `32099974893` 已进入终态：frontend 生产构建和 Android aarch64 debug APK/Gradle unit gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel 与 macOS arm 均只在首个 `cargo fmt --check` 报告相同 6 处 `lib.rs` 排版差异后失败，locked check/test 与 Linux 真实 SSH bootstrap/Mosh UDP fixture 因而跳过。已严格按 Ubuntu job `95598476085` 的完整 runner 差异机械应用全部格式，不改行为；修复后本机 `git diff --check`、严格 JSON、86-command manifest/handler 唯一性与对齐、桌面 Mosh 单授权/Android 零暴露、3 个聚焦测试和真实 marker fixture、无 `MOSH_KEY` 生产处理及无 `node_modules`/`target` 检查通过，根分区保持 48%。VPS 继续不下载 Cargo/rustfmt、Mosh、SDK 或依赖；等待格式修复提交后的四平台 locked fmt/check/test、Linux 真实 fixture、frontend 与 Android 矩阵完整验证。 |
 
 ## 下一个动作
 
-等待 Mosh 提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入自建部署文档、协议版本/升级/撤销与故障恢复演练。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN 部署保持外部验收；Android Sync capability 继续 disabled。
+等待 Mosh 格式修复提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`；失败则继续定位并修复。全绿后进入自建部署文档、协议版本/升级/撤销与故障恢复演练。C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN 部署保持外部验收；Android Sync capability 继续 disabled。
