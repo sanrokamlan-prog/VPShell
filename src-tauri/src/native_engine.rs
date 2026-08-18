@@ -11,7 +11,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
-    sync::{Semaphore, mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
@@ -39,6 +39,8 @@ const MAX_ACTIVE_OPERATIONS: usize = 8;
 const MAX_TERMINAL_SESSIONS: usize = 16;
 const MAX_LOCAL_FORWARDS: usize = 8;
 const MAX_LOCAL_FORWARD_CONNECTIONS: usize = 32;
+const MAX_REMOTE_FORWARDS: usize = 8;
+const MAX_REMOTE_FORWARD_CONNECTIONS: usize = 32;
 const MAX_NATIVE_ROUTE_HOPS: usize = 4;
 const TERMINAL_COMMAND_QUEUE: usize = 64;
 const TERMINAL_EVENT_QUEUE: usize = 64;
@@ -111,6 +113,15 @@ pub(crate) struct NativeLocalForwardStartRequest {
     target_port: u16,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeRemoteForwardStartRequest {
+    forward_id: String,
+    route: NativeRouteRequest,
+    bind_port: u16,
+    target_port: u16,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NativeEngineProbeResult {
@@ -175,6 +186,24 @@ pub(crate) struct NativeLocalForwardSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct NativeRemoteForwardSnapshot {
+    schema_version: u16,
+    forward_id: String,
+    state: &'static str,
+    bind_host: &'static str,
+    bind_port: u16,
+    route_host: String,
+    route_hops: u8,
+    target_host: &'static str,
+    target_port: u16,
+    active_connections: u64,
+    accepted_connections: u64,
+    rejected_connections: u64,
+    failed_connections: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct NativeEngineError {
     code: &'static str,
     message: &'static str,
@@ -220,6 +249,7 @@ struct NativeEngineManagerInner {
     operations: Mutex<HashMap<Uuid, ActiveOperation>>,
     terminal_sessions: Mutex<HashMap<Uuid, ActiveTerminalSession>>,
     local_forwards: Mutex<HashMap<Uuid, ActiveLocalForward>>,
+    remote_forwards: Mutex<HashMap<Uuid, ActiveRemoteForward>>,
     next_generation: AtomicU64,
 }
 
@@ -246,6 +276,16 @@ struct ActiveLocalForward {
     stats: Arc<LocalForwardStats>,
 }
 
+struct ActiveRemoteForward {
+    generation: u64,
+    cancellation: CancellationToken,
+    bind_port: u16,
+    route_host: String,
+    route_hops: u8,
+    target_port: u16,
+    stats: Arc<RemoteForwardStats>,
+}
+
 #[derive(Default)]
 struct LocalForwardStats {
     ready: AtomicU8,
@@ -262,6 +302,42 @@ impl Drop for ActiveForwardConnectionGuard {
     fn drop(&mut self) {
         self.stats.active_connections.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+#[derive(Default)]
+struct RemoteForwardStats {
+    ready: AtomicU8,
+    active_connections: AtomicU64,
+    accepted_connections: AtomicU64,
+    rejected_connections: AtomicU64,
+    failed_connections: AtomicU64,
+}
+
+struct ActiveRemoteForwardConnectionGuard {
+    stats: Arc<RemoteForwardStats>,
+}
+
+impl Drop for ActiveRemoteForwardConnectionGuard {
+    fn drop(&mut self) {
+        self.stats
+            .active_connections
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct RemoteForwardConnection {
+    channel: Channel<client::Msg>,
+    _permit: OwnedSemaphorePermit,
+    _guard: ActiveRemoteForwardConnectionGuard,
+}
+
+#[derive(Clone)]
+struct RemoteForwardIngress {
+    bind_port: Arc<AtomicU16>,
+    cancellation: CancellationToken,
+    connections: mpsc::Sender<RemoteForwardConnection>,
+    capacity: Arc<Semaphore>,
+    stats: Arc<RemoteForwardStats>,
 }
 
 enum NativeSftpCommand {
@@ -350,6 +426,7 @@ impl Default for NativeEngineManager {
                 operations: Mutex::new(HashMap::new()),
                 terminal_sessions: Mutex::new(HashMap::new()),
                 local_forwards: Mutex::new(HashMap::new()),
+                remote_forwards: Mutex::new(HashMap::new()),
                 next_generation: AtomicU64::new(0),
             }),
         }
@@ -705,6 +782,203 @@ impl NativeEngineManager {
         Ok(())
     }
 
+    pub(crate) async fn start_remote_forward(
+        &self,
+        request: NativeRemoteForwardStartRequest,
+    ) -> Result<NativeRemoteForwardSnapshot, NativeEngineError> {
+        let ValidatedRemoteForwardStart {
+            forward_id,
+            route,
+            bind_port,
+            target_port,
+        } = ValidatedRemoteForwardStart::try_from(request)?;
+        let route_host = route
+            .hops
+            .last()
+            .map(|hop| hop.host.clone())
+            .ok_or_else(|| NativeEngineError::invalid("远端转发 SSH 路由为空"))?;
+        let route_hops = u8::try_from(route.hops.len())
+            .map_err(|_| NativeEngineError::invalid("远端转发 SSH 路由跳数无效"))?;
+        let generation = self.next_generation()?;
+        let cancellation = CancellationToken::new();
+        let stats = Arc::new(RemoteForwardStats::default());
+        self.reserve_remote_forward(
+            forward_id,
+            generation,
+            cancellation.clone(),
+            bind_port,
+            route_host.clone(),
+            route_hops,
+            target_port,
+            Arc::clone(&stats),
+        )?;
+
+        let registered_bind_port = Arc::new(AtomicU16::new(0));
+        let capacity = Arc::new(Semaphore::new(MAX_REMOTE_FORWARD_CONNECTIONS));
+        let (connections, connection_receiver) = mpsc::channel(MAX_REMOTE_FORWARD_CONNECTIONS);
+        let ingress = RemoteForwardIngress {
+            bind_port: Arc::clone(&registered_bind_port),
+            cancellation: cancellation.clone(),
+            connections,
+            capacity,
+            stats: Arc::clone(&stats),
+        };
+        let timeout = route.operation_timeout();
+        let request_timeout = route.final_timeout();
+        let hop_index = route.final_hop_index();
+        let connection = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(NativeEngineError::new(
+                "native-remote-forward-cancelled",
+                "远端转发连接已取消",
+                true,
+            )),
+            result = tokio::time::timeout(
+                timeout,
+                connect_route_with_remote_forward(route, ingress),
+            ) => match result {
+                Ok(outcome) => outcome,
+                Err(_) => Err(NativeEngineError::new(
+                    "native-remote-forward-timeout",
+                    "远端转发 SSH 路由连接超时",
+                    true,
+                ).at_hop(hop_index)),
+            },
+        };
+        let connection_chain = match connection {
+            Ok(connection_chain) => Arc::new(connection_chain),
+            Err(error) => {
+                self.finish_remote_forward(forward_id, generation);
+                return Err(error);
+            }
+        };
+        let final_session = match connection_chain.final_session() {
+            Ok(session) => session,
+            Err(error) => {
+                connection_chain
+                    .disconnect_all("native remote forward route empty")
+                    .await;
+                self.finish_remote_forward(forward_id, generation);
+                return Err(error);
+            }
+        };
+        let requested_port = bind_port;
+        let registered = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(NativeEngineError::new(
+                "native-remote-forward-cancelled",
+                "远端转发连接已取消",
+                true,
+            )),
+            result = tokio::time::timeout(
+                request_timeout,
+                final_session.tcpip_forward("127.0.0.1", u32::from(requested_port)),
+            ) => match result {
+                Ok(Ok(allocated_port)) => {
+                    validate_remote_forward_port(requested_port, allocated_port)
+                }
+                Ok(Err(_)) => Err(NativeEngineError::new(
+                    "native-remote-forward-request-rejected",
+                    "服务器拒绝远端回环端口转发请求",
+                    false,
+                )),
+                Err(_) => Err(NativeEngineError::new(
+                    "native-remote-forward-request-timeout",
+                    "服务器确认远端转发请求超时",
+                    true,
+                )),
+            },
+        };
+        let bound_port = match registered {
+            Ok(bound_port) => bound_port,
+            Err(error) => {
+                connection_chain
+                    .disconnect_all("native remote forward start failed")
+                    .await;
+                self.finish_remote_forward(forward_id, generation);
+                return Err(error);
+            }
+        };
+        registered_bind_port.store(bound_port, Ordering::SeqCst);
+        if let Err(error) = self.activate_remote_forward(forward_id, generation, bound_port) {
+            if let Ok(session) = connection_chain.final_session() {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    session.cancel_tcpip_forward("127.0.0.1", u32::from(bound_port)),
+                )
+                .await;
+            }
+            connection_chain
+                .disconnect_all("native remote forward state failed")
+                .await;
+            self.finish_remote_forward(forward_id, generation);
+            return Err(error);
+        }
+        stats.ready.store(1, Ordering::SeqCst);
+        let result = remote_forward_snapshot(
+            forward_id,
+            bound_port,
+            &route_host,
+            route_hops,
+            target_port,
+            &stats,
+        );
+        let manager = self.clone();
+        tokio::spawn(async move {
+            run_native_remote_forward(
+                manager,
+                forward_id,
+                generation,
+                bound_port,
+                connection_chain,
+                connection_receiver,
+                target_port,
+                cancellation,
+                stats,
+            )
+            .await;
+        });
+        Ok(result)
+    }
+
+    pub(crate) fn list_remote_forwards(
+        &self,
+    ) -> Result<Vec<NativeRemoteForwardSnapshot>, NativeEngineError> {
+        let forwards = self.lock_remote_forwards()?;
+        let mut snapshots = forwards
+            .iter()
+            .map(|(forward_id, forward)| {
+                remote_forward_snapshot(
+                    *forward_id,
+                    forward.bind_port,
+                    &forward.route_host,
+                    forward.route_hops,
+                    forward.target_port,
+                    &forward.stats,
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|left, right| left.forward_id.cmp(&right.forward_id));
+        Ok(snapshots)
+    }
+
+    pub(crate) fn stop_remote_forward(&self, forward_id: &str) -> Result<(), NativeEngineError> {
+        let forward_id = parse_forward_id(forward_id)?;
+        let cancellation = self
+            .lock_remote_forwards()?
+            .get(&forward_id)
+            .map(|forward| forward.cancellation.clone())
+            .ok_or_else(|| {
+                NativeEngineError::new(
+                    "native-remote-forward-not-found",
+                    "远端转发不存在或已经停止",
+                    false,
+                )
+            })?;
+        cancellation.cancel();
+        Ok(())
+    }
+
     pub(crate) fn cancel(&self, operation_id: &str) -> Result<(), NativeEngineError> {
         let operation_id = parse_operation_id(operation_id)?;
         let operation = self
@@ -810,6 +1084,16 @@ impl NativeEngineManager {
         }
     }
 
+    fn finish_remote_forward(&self, forward_id: Uuid, generation: u64) {
+        if let Ok(mut forwards) = self.inner.remote_forwards.lock()
+            && forwards
+                .get(&forward_id)
+                .is_some_and(|forward| forward.generation == generation)
+        {
+            forwards.remove(&forward_id);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn reserve_local_forward(
         &self,
@@ -861,6 +1145,99 @@ impl NativeEngineManager {
                 stats,
             },
         );
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_remote_forward(
+        &self,
+        forward_id: Uuid,
+        generation: u64,
+        cancellation: CancellationToken,
+        bind_port: u16,
+        route_host: String,
+        route_hops: u8,
+        target_port: u16,
+        stats: Arc<RemoteForwardStats>,
+    ) -> Result<(), NativeEngineError> {
+        let mut forwards = self.lock_remote_forwards()?;
+        if forwards.len() >= MAX_REMOTE_FORWARDS {
+            return Err(NativeEngineError::new(
+                "native-remote-forward-capacity",
+                "同时运行的远端转发已达到上限",
+                true,
+            ));
+        }
+        if forwards.contains_key(&forward_id) {
+            return Err(NativeEngineError::new(
+                "native-remote-forward-conflict",
+                "远端转发标识已经在使用",
+                false,
+            ));
+        }
+        if bind_port != 0
+            && forwards.values().any(|forward| {
+                forward.bind_port == bind_port
+                    && forward.route_host.eq_ignore_ascii_case(&route_host)
+            })
+        {
+            return Err(NativeEngineError::new(
+                "native-remote-forward-bind-conflict",
+                "该 SSH 目标的远端回环端口已经在使用",
+                false,
+            ));
+        }
+        forwards.insert(
+            forward_id,
+            ActiveRemoteForward {
+                generation,
+                cancellation,
+                bind_port,
+                route_host,
+                route_hops,
+                target_port,
+                stats,
+            },
+        );
+        Ok(())
+    }
+
+    fn activate_remote_forward(
+        &self,
+        forward_id: Uuid,
+        generation: u64,
+        bind_port: u16,
+    ) -> Result<(), NativeEngineError> {
+        let mut forwards = self.lock_remote_forwards()?;
+        let current = forwards.get(&forward_id).ok_or_else(|| {
+            NativeEngineError::new(
+                "native-remote-forward-generation-stale",
+                "远端转发代际已经失效",
+                true,
+            )
+        })?;
+        if current.generation != generation || current.cancellation.is_cancelled() {
+            return Err(NativeEngineError::new(
+                "native-remote-forward-generation-stale",
+                "远端转发代际已经失效",
+                true,
+            ));
+        }
+        let route_host = current.route_host.clone();
+        if forwards.iter().any(|(existing_id, forward)| {
+            *existing_id != forward_id
+                && forward.bind_port == bind_port
+                && forward.route_host.eq_ignore_ascii_case(&route_host)
+        }) {
+            return Err(NativeEngineError::new(
+                "native-remote-forward-bind-conflict",
+                "该 SSH 目标的远端回环端口已经在使用",
+                false,
+            ));
+        }
+        if let Some(current) = forwards.get_mut(&forward_id) {
+            current.bind_port = bind_port;
+        }
         Ok(())
     }
 
@@ -936,6 +1313,19 @@ impl NativeEngineManager {
             )
         })
     }
+
+    fn lock_remote_forwards(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<Uuid, ActiveRemoteForward>>, NativeEngineError>
+    {
+        self.inner.remote_forwards.lock().map_err(|_| {
+            NativeEngineError::new(
+                "native-remote-forward-state-corrupt",
+                "远端转发状态已损坏",
+                false,
+            )
+        })
+    }
 }
 
 impl Drop for OperationLease {
@@ -966,6 +1356,13 @@ struct ValidatedLocalForwardStart {
     route: ValidatedRoute,
     bind_port: u16,
     target_host: String,
+    target_port: u16,
+}
+
+struct ValidatedRemoteForwardStart {
+    forward_id: Uuid,
+    route: ValidatedRoute,
+    bind_port: u16,
     target_port: u16,
 }
 
@@ -1053,6 +1450,25 @@ impl TryFrom<NativeLocalForwardStartRequest> for ValidatedLocalForwardStart {
             route: validate_route(request.route)?,
             bind_port: request.bind_port,
             target_host: request.target_host,
+            target_port: request.target_port,
+        })
+    }
+}
+
+impl TryFrom<NativeRemoteForwardStartRequest> for ValidatedRemoteForwardStart {
+    type Error = NativeEngineError;
+
+    fn try_from(request: NativeRemoteForwardStartRequest) -> Result<Self, Self::Error> {
+        let forward_id = parse_forward_id(&request.forward_id)?;
+        if request.target_port == 0 {
+            return Err(NativeEngineError::invalid(
+                "远端转发本机目标端口无效",
+            ));
+        }
+        Ok(Self {
+            forward_id,
+            route: validate_route(request.route)?,
+            bind_port: request.bind_port,
             target_port: request.target_port,
         })
     }
@@ -1433,6 +1849,7 @@ fn reject_symlink_components(path: &Path) -> Result<(), NativeEngineError> {
 struct PinnedServerKey {
     expected_sha256: String,
     state: Arc<AtomicU8>,
+    remote_forward: Option<RemoteForwardIngress>,
 }
 
 impl Handler for PinnedServerKey {
@@ -1453,6 +1870,75 @@ impl Handler for PinnedServerKey {
             Ordering::SeqCst,
         );
         Ok(matched)
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(ingress) = self.remote_forward.as_ref() else {
+            return Ok(());
+        };
+        let bind_port = ingress.bind_port.load(Ordering::SeqCst);
+        if ingress.cancellation.is_cancelled()
+            || bind_port == 0
+            || connected_address != "127.0.0.1"
+            || connected_port != u32::from(bind_port)
+        {
+            ingress
+                .stats
+                .rejected_connections
+                .fetch_add(1, Ordering::SeqCst);
+            return Ok(());
+        }
+        let Ok(connection_permit) = Arc::clone(&ingress.capacity).try_acquire_owned() else {
+            ingress
+                .stats
+                .rejected_connections
+                .fetch_add(1, Ordering::SeqCst);
+            return Ok(());
+        };
+        let Ok(queue_permit) = ingress.connections.clone().try_reserve_owned() else {
+            ingress
+                .stats
+                .rejected_connections
+                .fetch_add(1, Ordering::SeqCst);
+            return Ok(());
+        };
+        let accepted = tokio::select! {
+            biased;
+            _ = ingress.cancellation.cancelled() => false,
+            _ = reply.accept() => true,
+        };
+        if !accepted {
+            ingress
+                .stats
+                .rejected_connections
+                .fetch_add(1, Ordering::SeqCst);
+            return Ok(());
+        }
+        ingress
+            .stats
+            .accepted_connections
+            .fetch_add(1, Ordering::SeqCst);
+        ingress
+            .stats
+            .active_connections
+            .fetch_add(1, Ordering::SeqCst);
+        queue_permit.send(RemoteForwardConnection {
+            channel,
+            _permit: connection_permit,
+            _guard: ActiveRemoteForwardConnectionGuard {
+                stats: Arc::clone(&ingress.stats),
+            },
+        });
+        Ok(())
     }
 }
 
@@ -1477,6 +1963,21 @@ impl NativeConnectionChain {
 }
 
 async fn connect_route(route: ValidatedRoute) -> Result<NativeConnectionChain, NativeEngineError> {
+    connect_route_with_handler(route, None).await
+}
+
+async fn connect_route_with_remote_forward(
+    route: ValidatedRoute,
+    ingress: RemoteForwardIngress,
+) -> Result<NativeConnectionChain, NativeEngineError> {
+    connect_route_with_handler(route, Some(ingress)).await
+}
+
+async fn connect_route_with_handler(
+    route: ValidatedRoute,
+    mut remote_forward: Option<RemoteForwardIngress>,
+) -> Result<NativeConnectionChain, NativeEngineError> {
+    let hop_count = route.hops.len();
     let mut hops = route.hops.into_iter();
     let first = hops.next().ok_or_else(|| {
         NativeEngineError::new(
@@ -1487,21 +1988,30 @@ async fn connect_route(route: ValidatedRoute) -> Result<NativeConnectionChain, N
     })?;
     let first_hop_index = first.hop_index;
     let first_timeout = Duration::from_secs(u64::from(first.timeout_seconds));
-    let first_session =
-        match tokio::time::timeout(first_timeout, connect_authenticated_direct_hop(first)).await {
-            Ok(result) => result.map_err(|error| error.at_hop(first_hop_index))?,
-            Err(_) => {
-                return Err(NativeEngineError::new(
-                    "native-engine-hop-timeout",
-                    "原生 SSH 路由连接超时",
-                    true,
-                )
-                .at_hop(first_hop_index));
-            }
-        };
+    let first_remote_forward = if hop_count == 1 {
+        remote_forward.take()
+    } else {
+        None
+    };
+    let first_session = match tokio::time::timeout(
+        first_timeout,
+        connect_authenticated_direct_hop(first, first_remote_forward),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|error| error.at_hop(first_hop_index))?,
+        Err(_) => {
+            return Err(NativeEngineError::new(
+                "native-engine-hop-timeout",
+                "原生 SSH 路由连接超时",
+                true,
+            )
+            .at_hop(first_hop_index));
+        }
+    };
     let mut sessions = vec![first_session];
 
-    for hop in hops {
+    for (index, hop) in hops.enumerate() {
         let hop_index = hop.hop_index;
         let timeout = Duration::from_secs(u64::from(hop.timeout_seconds));
         let previous = sessions.last().ok_or_else(|| {
@@ -1511,8 +2021,16 @@ async fn connect_route(route: ValidatedRoute) -> Result<NativeConnectionChain, N
                 false,
             )
         })?;
-        let outcome =
-            tokio::time::timeout(timeout, connect_authenticated_tunneled_hop(previous, hop)).await;
+        let hop_remote_forward = if index + 2 == hop_count {
+            remote_forward.take()
+        } else {
+            None
+        };
+        let outcome = tokio::time::timeout(
+            timeout,
+            connect_authenticated_tunneled_hop(previous, hop, hop_remote_forward),
+        )
+        .await;
         let session = match outcome {
             Ok(Ok(session)) => session,
             Ok(Err(error)) => {
@@ -1537,6 +2055,7 @@ async fn connect_route(route: ValidatedRoute) -> Result<NativeConnectionChain, N
 
 async fn connect_authenticated_direct_hop(
     request: ValidatedConnection,
+    remote_forward: Option<RemoteForwardIngress>,
 ) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
     let ValidatedConnection {
         host,
@@ -1552,6 +2071,7 @@ async fn connect_authenticated_direct_hop(
     let handler = PinnedServerKey {
         expected_sha256: host_key_sha256,
         state: Arc::clone(&host_key_state),
+        remote_forward,
     };
     let timeout = Duration::from_secs(u64::from(timeout_seconds));
     let config = native_client_config(timeout);
@@ -1564,6 +2084,7 @@ async fn connect_authenticated_direct_hop(
 async fn connect_authenticated_tunneled_hop(
     previous: &client::Handle<PinnedServerKey>,
     request: ValidatedConnection,
+    remote_forward: Option<RemoteForwardIngress>,
 ) -> Result<client::Handle<PinnedServerKey>, NativeEngineError> {
     let ValidatedConnection {
         host,
@@ -1589,6 +2110,7 @@ async fn connect_authenticated_tunneled_hop(
     let handler = PinnedServerKey {
         expected_sha256: host_key_sha256,
         state: Arc::clone(&host_key_state),
+        remote_forward,
     };
     let timeout = Duration::from_secs(u64::from(timeout_seconds));
     let config = native_client_config(timeout);
@@ -1839,6 +2361,141 @@ async fn forward_local_connection(
         biased;
         _ = cancellation.cancelled() => {}
         _ = copy_bidirectional(&mut local_stream, &mut remote_stream) => {}
+    }
+}
+
+fn validate_remote_forward_port(
+    requested_port: u16,
+    allocated_port: u32,
+) -> Result<u16, NativeEngineError> {
+    if requested_port == 0 {
+        return u16::try_from(allocated_port)
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| {
+                NativeEngineError::new(
+                    "native-remote-forward-invalid-allocation",
+                    "服务器返回了无效的远端转发端口",
+                    false,
+                )
+            });
+    }
+    if allocated_port == 0 || allocated_port == u32::from(requested_port) {
+        Ok(requested_port)
+    } else {
+        Err(NativeEngineError::new(
+            "native-remote-forward-invalid-allocation",
+            "服务器返回了不匹配的远端转发端口",
+            false,
+        ))
+    }
+}
+
+fn remote_forward_snapshot(
+    forward_id: Uuid,
+    bind_port: u16,
+    route_host: &str,
+    route_hops: u8,
+    target_port: u16,
+    stats: &RemoteForwardStats,
+) -> NativeRemoteForwardSnapshot {
+    NativeRemoteForwardSnapshot {
+        schema_version: SCHEMA_VERSION,
+        forward_id: forward_id.to_string(),
+        state: if stats.ready.load(Ordering::SeqCst) == 1 {
+            "active"
+        } else {
+            "starting"
+        },
+        bind_host: "127.0.0.1",
+        bind_port,
+        route_host: route_host.to_string(),
+        route_hops,
+        target_host: "127.0.0.1",
+        target_port,
+        active_connections: stats.active_connections.load(Ordering::SeqCst),
+        accepted_connections: stats.accepted_connections.load(Ordering::SeqCst),
+        rejected_connections: stats.rejected_connections.load(Ordering::SeqCst),
+        failed_connections: stats.failed_connections.load(Ordering::SeqCst),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_native_remote_forward(
+    manager: NativeEngineManager,
+    forward_id: Uuid,
+    generation: u64,
+    bind_port: u16,
+    connection_chain: Arc<NativeConnectionChain>,
+    mut connection_receiver: mpsc::Receiver<RemoteForwardConnection>,
+    target_port: u16,
+    cancellation: CancellationToken,
+    stats: Arc<RemoteForwardStats>,
+) {
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break,
+            completed = connections.join_next(), if !connections.is_empty() => {
+                let _ = completed;
+            }
+            connection = connection_receiver.recv() => {
+                let Some(connection) = connection else {
+                    break;
+                };
+                let cancellation = cancellation.clone();
+                let stats = Arc::clone(&stats);
+                connections.spawn(async move {
+                    forward_remote_connection(connection, target_port, cancellation, stats).await;
+                });
+            }
+        }
+    }
+    if let Ok(session) = connection_chain.final_session() {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.cancel_tcpip_forward("127.0.0.1", u32::from(bind_port)),
+        )
+        .await;
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    connection_chain
+        .disconnect_all("native remote forward stopped")
+        .await;
+    manager.finish_remote_forward(forward_id, generation);
+}
+
+async fn forward_remote_connection(
+    connection: RemoteForwardConnection,
+    target_port: u16,
+    cancellation: CancellationToken,
+    stats: Arc<RemoteForwardStats>,
+) {
+    let RemoteForwardConnection {
+        channel,
+        _permit,
+        _guard,
+    } = connection;
+    let mut local_stream = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return,
+        result = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, target_port)) => {
+            match result {
+                Ok(stream) => stream,
+                Err(_) => {
+                    stats.failed_connections.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
+    };
+    let mut remote_stream = channel.into_stream();
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {}
+        _ = copy_bidirectional(&mut remote_stream, &mut local_stream) => {}
     }
 }
 
@@ -2715,6 +3372,196 @@ mod tests {
     }
 
     #[test]
+    fn remote_forward_requests_and_lifecycle_are_bounded() {
+        let request = NativeRemoteForwardStartRequest {
+            forward_id: Uuid::new_v4().to_string(),
+            route: NativeRouteRequest { hops: vec![hop()] },
+            bind_port: 0,
+            target_port: 3000,
+        };
+        let validated = ValidatedRemoteForwardStart::try_from(request).unwrap();
+        assert_eq!(validated.bind_port, 0);
+        assert_eq!(validated.target_port, 3000);
+
+        for forbidden in ["bindHost", "targetHost", "credentialRef", "password"] {
+            let mut value = serde_json::json!({
+                "forwardId": Uuid::new_v4().to_string(),
+                "route": {"hops": [{
+                    "hopId": Uuid::new_v4().to_string(),
+                    "host": "host.example",
+                    "port": 22,
+                    "username": "operator",
+                    "hostKeySha256": format!("SHA256:{}", "A".repeat(43)),
+                    "timeoutSeconds": 15,
+                    "credentialRef": "ssh-018f1f55-26f8-7a9f-9cd8-4d7558482212"
+                }]},
+                "bindPort": 0,
+                "targetPort": 3000
+            });
+            value[forbidden] = serde_json::json!("forbidden");
+            assert!(serde_json::from_value::<NativeRemoteForwardStartRequest>(value).is_err());
+        }
+        let invalid = NativeRemoteForwardStartRequest {
+            forward_id: Uuid::new_v4().to_string(),
+            route: NativeRouteRequest { hops: vec![hop()] },
+            bind_port: 0,
+            target_port: 0,
+        };
+        assert!(ValidatedRemoteForwardStart::try_from(invalid).is_err());
+        assert_eq!(validate_remote_forward_port(0, 32123).unwrap(), 32123);
+        assert_eq!(validate_remote_forward_port(32000, 0).unwrap(), 32000);
+        assert_eq!(validate_remote_forward_port(32000, 32000).unwrap(), 32000);
+        assert!(validate_remote_forward_port(0, 0).is_err());
+        assert!(validate_remote_forward_port(0, 70_000).is_err());
+        assert!(validate_remote_forward_port(32000, 32001).is_err());
+        let capacity = Arc::new(Semaphore::new(MAX_REMOTE_FORWARD_CONNECTIONS));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_REMOTE_FORWARD_CONNECTIONS {
+            permits.push(Arc::clone(&capacity).try_acquire_owned().unwrap());
+        }
+        assert!(Arc::clone(&capacity).try_acquire_owned().is_err());
+        drop(permits);
+
+        let manager = NativeEngineManager::default();
+        let mut ids = Vec::new();
+        for index in 0..MAX_REMOTE_FORWARDS {
+            let forward_id = Uuid::from_u128(index as u128 + 2_000);
+            ids.push(forward_id);
+            manager
+                .reserve_remote_forward(
+                    forward_id,
+                    index as u64 + 1,
+                    CancellationToken::new(),
+                    20_000 + index as u16,
+                    "host.example".to_string(),
+                    1,
+                    3000,
+                    Arc::new(RemoteForwardStats::default()),
+                )
+                .unwrap();
+        }
+        let error = manager
+            .reserve_remote_forward(
+                Uuid::from_u128(2_999),
+                99,
+                CancellationToken::new(),
+                21_000,
+                "host.example".to_string(),
+                1,
+                3000,
+                Arc::new(RemoteForwardStats::default()),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "native-remote-forward-capacity");
+        let snapshots = manager.list_remote_forwards().unwrap();
+        assert_eq!(snapshots.len(), MAX_REMOTE_FORWARDS);
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.bind_host == "127.0.0.1")
+        );
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.target_host == "127.0.0.1")
+        );
+        manager.stop_remote_forward(&ids[0].to_string()).unwrap();
+        assert!(
+            manager
+                .lock_remote_forwards()
+                .unwrap()
+                .get(&ids[0])
+                .unwrap()
+                .cancellation
+                .is_cancelled()
+        );
+        for (index, forward_id) in ids.into_iter().enumerate() {
+            manager.finish_remote_forward(forward_id, index as u64 + 1);
+        }
+        assert!(manager.list_remote_forwards().unwrap().is_empty());
+
+        let conflict_id = Uuid::from_u128(2_500);
+        manager
+            .reserve_remote_forward(
+                conflict_id,
+                80,
+                CancellationToken::new(),
+                30_000,
+                "host.example".to_string(),
+                1,
+                3000,
+                Arc::new(RemoteForwardStats::default()),
+            )
+            .unwrap();
+        let conflict = manager
+            .reserve_remote_forward(
+                Uuid::from_u128(2_501),
+                81,
+                CancellationToken::new(),
+                30_000,
+                "HOST.EXAMPLE".to_string(),
+                1,
+                3001,
+                Arc::new(RemoteForwardStats::default()),
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, "native-remote-forward-bind-conflict");
+        manager.finish_remote_forward(conflict_id, 80);
+
+        let reused_id = Uuid::from_u128(3_000);
+        let stats = Arc::new(RemoteForwardStats::default());
+        manager
+            .reserve_remote_forward(
+                reused_id,
+                100,
+                CancellationToken::new(),
+                0,
+                "host.example".to_string(),
+                2,
+                3000,
+                Arc::clone(&stats),
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .activate_remote_forward(reused_id, 99, 31_000)
+                .unwrap_err()
+                .code,
+            "native-remote-forward-generation-stale"
+        );
+        manager
+            .activate_remote_forward(reused_id, 100, 31_000)
+            .unwrap();
+        stats.ready.store(1, Ordering::SeqCst);
+        stats.accepted_connections.store(3, Ordering::SeqCst);
+        stats.rejected_connections.store(2, Ordering::SeqCst);
+        stats.failed_connections.store(1, Ordering::SeqCst);
+        let mut snapshots = manager.list_remote_forwards().unwrap();
+        let snapshot = snapshots.remove(0);
+        assert_eq!(snapshot.state, "active");
+        assert_eq!(snapshot.bind_port, 31_000);
+        assert_eq!(snapshot.accepted_connections, 3);
+        assert_eq!(snapshot.rejected_connections, 2);
+        assert_eq!(snapshot.failed_connections, 1);
+        manager.finish_remote_forward(reused_id, 99);
+        assert!(
+            manager
+                .lock_remote_forwards()
+                .unwrap()
+                .contains_key(&reused_id)
+        );
+        manager.finish_remote_forward(reused_id, 100);
+
+        stats.active_connections.store(1, Ordering::SeqCst);
+        {
+            let _guard = ActiveRemoteForwardConnectionGuard {
+                stats: Arc::clone(&stats),
+            };
+        }
+        assert_eq!(stats.active_connections.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn manager_enforces_capacity_cancellation_and_generation_cleanup() {
         let manager = NativeEngineManager::default();
         let mut leases = Vec::new();
@@ -3018,6 +3865,11 @@ mod tests {
         assert!(production.contains("HOST_KEY_MISMATCHED"));
         assert!(production.contains("SftpSession::new"));
         assert!(production.contains("channel_open_direct_tcpip"));
+        assert!(production.contains("server_channel_open_forwarded_tcpip"));
+        assert!(production.contains("cancel_tcpip_forward"));
+        assert!(production.contains("let Some(ingress) = self.remote_forward.as_ref() else"));
+        assert!(production.contains("_ = ingress.cancellation.cancelled() => false"));
+        assert!(production.contains("remote_forward.take()"));
         assert!(production.contains("client::connect_stream"));
         assert!(!production.contains("native-engine-multi-hop-unavailable"));
         assert!(!production.contains("Command::new(\"ssh\")"));
@@ -3293,6 +4145,51 @@ mod tests {
         })
         .await
         .expect("local forward cancellation timeout");
+
+        let remote_forward_id = Uuid::new_v4();
+        let remote_forward = manager
+            .start_remote_forward(NativeRemoteForwardStartRequest {
+                forward_id: remote_forward_id.to_string(),
+                route: route(target_fingerprint.clone()),
+                bind_port: 0,
+                target_port,
+            })
+            .await
+            .expect("two-hop remote forward start");
+        assert_eq!(remote_forward.state, "active");
+        assert_eq!(remote_forward.bind_host, "127.0.0.1");
+        assert_eq!(remote_forward.target_host, "127.0.0.1");
+        assert_ne!(remote_forward.bind_port, 0);
+        let mut remote_forwarded =
+            TcpStream::connect((Ipv4Addr::LOCALHOST, remote_forward.bind_port))
+                .await
+                .expect("connect remote forward");
+        let mut remote_banner = [0_u8; 64];
+        let remote_bytes = tokio::time::timeout(
+            Duration::from_secs(5),
+            remote_forwarded.read(&mut remote_banner),
+        )
+        .await
+        .expect("remote forwarded banner timeout")
+        .expect("read remote forwarded banner");
+        assert!(remote_banner[..remote_bytes].starts_with(b"SSH-2.0-"));
+        drop(remote_forwarded);
+        let remote_snapshots = manager.list_remote_forwards().unwrap();
+        assert_eq!(remote_snapshots.len(), 1);
+        assert!(remote_snapshots[0].accepted_connections >= 1);
+        manager
+            .stop_remote_forward(&remote_forward_id.to_string())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if manager.list_remote_forwards().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("remote forward cancellation timeout");
 
         let session_id = Uuid::new_v4();
         let launch = manager

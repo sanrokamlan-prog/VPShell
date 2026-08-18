@@ -64,8 +64,10 @@ jobs:
             -o PubkeyAuthentication=yes \
             -o PermitRootLogin=no \
             -o AllowUsers=vpshell-ci \
-            -o AllowTcpForwarding=local \
+            -o AllowTcpForwarding=yes \
             -o PermitOpen=127.0.0.1:22223 \
+            -o PermitListen=127.0.0.1:* \
+            -o GatewayPorts=no \
             -o AllowAgentForwarding=no \
             -o X11Forwarding=no \
             -o UsePAM=no \

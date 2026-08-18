@@ -6,6 +6,9 @@ ack_native_terminal_output
 start_native_local_forward
 list_native_local_forwards
 stop_native_local_forward
+start_native_remote_forward
+list_native_remote_forwards
+stop_native_remote_forward
 start_ssh_session
 write_terminal
 enable_shell_integration

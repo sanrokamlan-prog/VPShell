@@ -562,6 +562,52 @@ fn stop_native_local_forward(_forward_id: String) -> Result<(), String> {
     Err("原生本地转发在移动端预览中不可用".to_string())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+async fn start_native_remote_forward(
+    native: State<'_, native_engine::NativeEngineManager>,
+    request: native_engine::NativeRemoteForwardStartRequest,
+) -> Result<native_engine::NativeRemoteForwardSnapshot, native_engine::NativeEngineError> {
+    native.start_remote_forward(request).await
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn start_native_remote_forward(
+    _request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    Err("原生远端转发在移动端预览中不可用".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+fn list_native_remote_forwards(
+    native: State<'_, native_engine::NativeEngineManager>,
+) -> Result<Vec<native_engine::NativeRemoteForwardSnapshot>, native_engine::NativeEngineError> {
+    native.list_remote_forwards()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn list_native_remote_forwards() -> Result<Vec<serde_json::Value>, String> {
+    Err("原生远端转发在移动端预览中不可用".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[tauri::command]
+fn stop_native_remote_forward(
+    native: State<'_, native_engine::NativeEngineManager>,
+    forward_id: String,
+) -> Result<(), native_engine::NativeEngineError> {
+    native.stop_remote_forward(&forward_id)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn stop_native_remote_forward(_forward_id: String) -> Result<(), String> {
+    Err("原生远端转发在移动端预览中不可用".to_string())
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 async fn native_list_remote_files(
@@ -1234,6 +1280,9 @@ pub fn run() {
             start_native_local_forward,
             list_native_local_forwards,
             stop_native_local_forward,
+            start_native_remote_forward,
+            list_native_remote_forwards,
+            stop_native_remote_forward,
             start_ssh_session,
             write_terminal,
             enable_shell_integration,

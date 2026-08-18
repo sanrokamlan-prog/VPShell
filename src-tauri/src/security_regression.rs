@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            76,
+            79,
             "command manifest contains duplicates or changed count"
         );
 
@@ -166,6 +166,9 @@ mod tests {
             "allow-start-native-local-forward",
             "allow-list-native-local-forwards",
             "allow-stop-native-local-forward",
+            "allow-start-native-remote-forward",
+            "allow-list-native-remote-forwards",
+            "allow-stop-native-remote-forward",
         ] {
             assert!(!android_permissions.contains(forbidden));
         }

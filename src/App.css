@@ -2307,6 +2307,14 @@ button.sync-status {
   box-shadow: inset 0 0 0 1px #9fc8af;
 }
 
+.forward-mode-switch {
+  margin-bottom: 12px;
+}
+
+.forward-mode-switch button {
+  min-width: 92px;
+}
+
 .local-forward-form {
   align-items: end;
   padding-bottom: 16px;

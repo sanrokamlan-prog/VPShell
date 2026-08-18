@@ -204,6 +204,22 @@ interface NativeLocalForwardSnapshot {
   rejectedConnections: number;
 }
 
+interface NativeRemoteForwardSnapshot {
+  schemaVersion: number;
+  forwardId: string;
+  state: "starting" | "active";
+  bindHost: "127.0.0.1";
+  bindPort: number;
+  routeHost: string;
+  routeHops: number;
+  targetHost: "127.0.0.1";
+  targetPort: number;
+  activeConnections: number;
+  acceptedConnections: number;
+  rejectedConnections: number;
+  failedConnections: number;
+}
+
 interface NativeEngineErrorPayload {
   code?: string;
   message?: string;
@@ -475,6 +491,8 @@ function App() {
   const [nativeProbeOperationId, setNativeProbeOperationId] = useState<string | null>(null);
   const [nativeTerminalStartingIds, setNativeTerminalStartingIds] = useState<string[]>([]);
   const [nativeLocalForwards, setNativeLocalForwards] = useState<NativeLocalForwardSnapshot[]>([]);
+  const [nativeRemoteForwards, setNativeRemoteForwards] = useState<NativeRemoteForwardSnapshot[]>([]);
+  const [nativeForwardMode, setNativeForwardMode] = useState<"local" | "remote">("local");
   const [nativeLocalForwardBusy, setNativeLocalForwardBusy] = useState(false);
   const [nativeLocalForwardError, setNativeLocalForwardError] = useState<string | null>(null);
 
@@ -553,10 +571,14 @@ function App() {
     if (!isDesktopRuntime()) return undefined;
     let active = true;
     const refresh = () => {
-      void invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards")
-        .then((forwards) => {
+      void Promise.all([
+        invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards"),
+        invoke<NativeRemoteForwardSnapshot[]>("list_native_remote_forwards"),
+      ])
+        .then(([localForwards, remoteForwards]) => {
           if (!active) return;
-          setNativeLocalForwards(forwards);
+          setNativeLocalForwards(localForwards);
+          setNativeRemoteForwards(remoteForwards);
           setNativeLocalForwardError(null);
         })
         .catch((error) => {
@@ -1127,11 +1149,15 @@ function App() {
     }
   }
 
-  async function refreshNativeLocalForwards() {
+  async function refreshNativeForwards() {
     if (!isDesktopRuntime()) return;
     try {
-      const forwards = await invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards");
-      setNativeLocalForwards(forwards);
+      const [localForwards, remoteForwards] = await Promise.all([
+        invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards"),
+        invoke<NativeRemoteForwardSnapshot[]>("list_native_remote_forwards"),
+      ]);
+      setNativeLocalForwards(localForwards);
+      setNativeRemoteForwards(remoteForwards);
       setNativeLocalForwardError(null);
     } catch (error) {
       setNativeLocalForwardError(invokeErrorMessage(error));
@@ -1184,7 +1210,59 @@ function App() {
     try {
       await invoke("stop_native_local_forward", { forwardId });
       showToast("正在停止本地转发");
-      await refreshNativeLocalForwards();
+      await refreshNativeForwards();
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function startNativeRemoteForward(form: HTMLFormElement) {
+    if (!hasActiveHost || nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    const data = new FormData(form);
+    const bindPort = Number(data.get("bindPort"));
+    const targetPort = Number(data.get("targetPort"));
+    if (!Number.isInteger(bindPort) || bindPort < 0 || bindPort > 65_535) {
+      setNativeLocalForwardError("远端端口必须在 0 到 65535 之间");
+      return;
+    }
+    if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65_535) {
+      setNativeLocalForwardError("本机目标端口必须在 1 到 65535 之间");
+      return;
+    }
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      const forward = await invoke<NativeRemoteForwardSnapshot>("start_native_remote_forward", {
+        request: {
+          forwardId: crypto.randomUUID(),
+          route: nativeRoute(activeHost, appState.hosts, appState.sshKeys),
+          bindPort,
+          targetPort,
+        },
+      });
+      setNativeRemoteForwards((current) => [
+        forward,
+        ...current.filter((item) => item.forwardId !== forward.forwardId),
+      ]);
+      form.reset();
+      showToast(`远端转发已监听 ${forward.bindHost}:${forward.bindPort}`);
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function stopNativeRemoteForward(forwardId: string) {
+    if (nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      await invoke("stop_native_remote_forward", { forwardId });
+      showToast("正在停止远端转发");
+      await refreshNativeForwards();
     } catch (error) {
       setNativeLocalForwardError(invokeErrorMessage(error));
     } finally {
@@ -1761,10 +1839,10 @@ function App() {
             <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
             {isDesktopRuntime() ? (
               <button
-                className={`icon-button ${nativeLocalForwards.length ? "forward-active" : ""}`}
+                className={`icon-button ${nativeLocalForwards.length + nativeRemoteForwards.length ? "forward-active" : ""}`}
                 type="button"
-                title={`本地端口转发（${nativeLocalForwards.length} 条运行中）`}
-                aria-label={`本地端口转发（${nativeLocalForwards.length} 条运行中）`}
+                title={`端口转发（本地 ${nativeLocalForwards.length} · 远端 ${nativeRemoteForwards.length}）`}
+                aria-label={`端口转发（本地 ${nativeLocalForwards.length} · 远端 ${nativeRemoteForwards.length}）`}
                 disabled={!hasActiveHost}
                 onClick={() => setDialog("local-forward")}
               >
@@ -2293,42 +2371,79 @@ function App() {
 
       {dialog === "local-forward" ? (
         <Dialog
-          title="本地端口转发"
+          title="端口转发"
           wide
           onClose={() => setDialog(null)}
           footer={(
             <>
-              <button className="secondary-button" type="button" disabled={nativeLocalForwardBusy} onClick={() => void refreshNativeLocalForwards()}><RefreshCw size={14} /> 刷新</button>
+              <button className="secondary-button" type="button" disabled={nativeLocalForwardBusy} onClick={() => void refreshNativeForwards()}><RefreshCw size={14} /> 刷新</button>
               <button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button>
             </>
           )}
         >
-          <form
-            id="local-forward-form"
-            className="form-grid local-forward-form"
-            onSubmit={(event) => { event.preventDefault(); void startNativeLocalForward(event.currentTarget); }}
-          >
-            <label className="field span-2"><span>本地端口</span><input name="bindPort" type="number" defaultValue="0" min="0" max="65535" required /></label>
-            <label className="field span-2"><span>监听地址</span><input value="127.0.0.1" readOnly /></label>
-            <label className="field span-2"><span>目标地址</span><input name="targetHost" defaultValue="127.0.0.1" maxLength={253} required /></label>
-            <label className="field"><span>目标端口</span><input name="targetPort" type="number" defaultValue="80" min="1" max="65535" required /></label>
-            <button className="primary-button local-forward-start" type="submit" disabled={nativeLocalForwardBusy}><Play size={14} /> 启动</button>
-          </form>
-          <div className="local-forward-heading"><strong>运行中的转发</strong><span>{nativeLocalForwards.length} / 8</span></div>
-          {nativeLocalForwards.length ? (
-            <div className="local-forward-list" aria-live="polite">
-              {nativeLocalForwards.map((forward) => (
-                <div className="local-forward-row" key={forward.forwardId}>
-                  <span className={`session-state ${forward.state === "active" ? "connected" : "connecting"}`} />
-                  <div>
-                    <strong><code>{forward.bindHost}:{forward.bindPort}</code> <ChevronRight size={13} /> <code>{forward.targetHost}:{forward.targetPort}</code></strong>
-                    <small>经 {forward.routeHost}（{forward.routeHops} 跳） · 当前 {forward.activeConnections} · 已接收 {forward.acceptedConnections} · 已拒绝 {forward.rejectedConnections}</small>
-                  </div>
-                  <button className="icon-button compact danger" type="button" title="停止本地转发" aria-label="停止本地转发" disabled={nativeLocalForwardBusy} onClick={() => void stopNativeLocalForward(forward.forwardId)}><Square size={13} /></button>
+          <div className="engine-selector forward-mode-switch" role="group" aria-label="转发模式">
+            <button type="button" className={nativeForwardMode === "local" ? "active" : ""} aria-pressed={nativeForwardMode === "local"} onClick={() => { setNativeForwardMode("local"); setNativeLocalForwardError(null); }}><Cable size={14} /> 本地</button>
+            <button type="button" className={nativeForwardMode === "remote" ? "active" : ""} aria-pressed={nativeForwardMode === "remote"} onClick={() => { setNativeForwardMode("remote"); setNativeLocalForwardError(null); }}><RadioTower size={14} /> 远端</button>
+          </div>
+          {nativeForwardMode === "local" ? (
+            <>
+              <form
+                id="local-forward-form"
+                className="form-grid local-forward-form"
+                onSubmit={(event) => { event.preventDefault(); void startNativeLocalForward(event.currentTarget); }}
+              >
+                <label className="field span-2"><span>本地端口</span><input name="bindPort" type="number" defaultValue="0" min="0" max="65535" required /></label>
+                <label className="field span-2"><span>监听地址</span><input value="127.0.0.1" readOnly /></label>
+                <label className="field span-2"><span>目标地址</span><input name="targetHost" defaultValue="127.0.0.1" maxLength={253} required /></label>
+                <label className="field"><span>目标端口</span><input name="targetPort" type="number" defaultValue="80" min="1" max="65535" required /></label>
+                <button className="primary-button local-forward-start" type="submit" disabled={nativeLocalForwardBusy}><Play size={14} /> 启动</button>
+              </form>
+              <div className="local-forward-heading"><strong>运行中的本地转发</strong><span>{nativeLocalForwards.length} / 8</span></div>
+              {nativeLocalForwards.length ? (
+                <div className="local-forward-list" aria-live="polite">
+                  {nativeLocalForwards.map((forward) => (
+                    <div className="local-forward-row" key={forward.forwardId}>
+                      <span className={`session-state ${forward.state === "active" ? "connected" : "connecting"}`} />
+                      <div>
+                        <strong><code>{forward.bindHost}:{forward.bindPort}</code> <ChevronRight size={13} /> <code>{forward.targetHost}:{forward.targetPort}</code></strong>
+                        <small>经 {forward.routeHost}（{forward.routeHops} 跳） · 当前 {forward.activeConnections} · 已接收 {forward.acceptedConnections} · 已拒绝 {forward.rejectedConnections}</small>
+                      </div>
+                      <button className="icon-button compact danger" type="button" title="停止本地转发" aria-label="停止本地转发" disabled={nativeLocalForwardBusy} onClick={() => void stopNativeLocalForward(forward.forwardId)}><Square size={13} /></button>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          ) : <div className="local-forward-empty"><Cable size={18} /><span>没有运行中的本地转发</span></div>}
+              ) : <div className="local-forward-empty"><Cable size={18} /><span>没有运行中的本地转发</span></div>}
+            </>
+          ) : (
+            <>
+              <form
+                id="remote-forward-form"
+                className="form-grid local-forward-form"
+                onSubmit={(event) => { event.preventDefault(); void startNativeRemoteForward(event.currentTarget); }}
+              >
+                <label className="field span-2"><span>远端端口</span><input name="bindPort" type="number" defaultValue="0" min="0" max="65535" required /></label>
+                <label className="field span-2"><span>远端监听</span><input value="127.0.0.1" readOnly /></label>
+                <label className="field span-2"><span>本机目标</span><input value="127.0.0.1" readOnly /></label>
+                <label className="field"><span>本机端口</span><input name="targetPort" type="number" defaultValue="3000" min="1" max="65535" required /></label>
+                <button className="primary-button local-forward-start" type="submit" disabled={nativeLocalForwardBusy}><Play size={14} /> 启动</button>
+              </form>
+              <div className="local-forward-heading"><strong>运行中的远端转发</strong><span>{nativeRemoteForwards.length} / 8</span></div>
+              {nativeRemoteForwards.length ? (
+                <div className="local-forward-list" aria-live="polite">
+                  {nativeRemoteForwards.map((forward) => (
+                    <div className="local-forward-row" key={forward.forwardId}>
+                      <span className={`session-state ${forward.state === "active" ? "connected" : "connecting"}`} />
+                      <div>
+                        <strong><code>{forward.bindHost}:{forward.bindPort}</code> <ChevronRight size={13} /> <code>{forward.targetHost}:{forward.targetPort}</code></strong>
+                        <small>位于 {forward.routeHost}（{forward.routeHops} 跳） · 当前 {forward.activeConnections} · 已接收 {forward.acceptedConnections} · 已拒绝 {forward.rejectedConnections} · 目标失败 {forward.failedConnections}</small>
+                      </div>
+                      <button className="icon-button compact danger" type="button" title="停止远端转发" aria-label="停止远端转发" disabled={nativeLocalForwardBusy} onClick={() => void stopNativeRemoteForward(forward.forwardId)}><Square size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="local-forward-empty"><RadioTower size={18} /><span>没有运行中的远端转发</span></div>}
+            </>
+          )}
           {nativeLocalForwardError ? <p className="local-forward-error" role="alert"><AlertTriangle size={14} /> {nativeLocalForwardError}</p> : null}
         </Dialog>
       ) : null}
