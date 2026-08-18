@@ -319,9 +319,7 @@ struct ActiveRemoteForwardConnectionGuard {
 
 impl Drop for ActiveRemoteForwardConnectionGuard {
     fn drop(&mut self) {
-        self.stats
-            .active_connections
-            .fetch_sub(1, Ordering::SeqCst);
+        self.stats.active_connections.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -1461,9 +1459,7 @@ impl TryFrom<NativeRemoteForwardStartRequest> for ValidatedRemoteForwardStart {
     fn try_from(request: NativeRemoteForwardStartRequest) -> Result<Self, Self::Error> {
         let forward_id = parse_forward_id(&request.forward_id)?;
         if request.target_port == 0 {
-            return Err(NativeEngineError::invalid(
-                "远端转发本机目标端口无效",
-            ));
+            return Err(NativeEngineError::invalid("远端转发本机目标端口无效"));
         }
         Ok(Self {
             forward_id,
