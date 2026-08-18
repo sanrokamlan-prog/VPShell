@@ -24,7 +24,11 @@ use crate::{
     sync_outbox::{AttemptFailure, JournalErrorCode, RemoteApplyOutcome, SyncJournal},
     sync_provider::{
         LocalFolderProvider, ProviderCancellation, ProviderError, ProviderErrorCode,
-        PutObjectOutcome, SyncObjectMetadata, SyncObjectProvider,
+        PutObjectOutcome, SyncObjectMetadata, SyncObjectProvider, WebDavCredentials,
+        WebDavProvider,
+    },
+    sync_provider_credentials::{
+        read_webdav_credential, validate_webdav_credential_reference,
     },
 };
 
@@ -49,6 +53,16 @@ pub(crate) enum LocalFolderSetupMode {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ConfigureLocalFolderSyncRequest {
     root_path: String,
+    password: String,
+    mode: LocalFolderSetupMode,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfigureWebDavSyncRequest {
+    endpoint: String,
+    username: String,
+    provider_credential_ref: Option<String>,
     password: String,
     mode: LocalFolderSetupMode,
 }
@@ -434,17 +448,67 @@ impl SyncCoordinatorManager {
         validate_local_folder_path(&request.root_path)?;
         let password = Zeroizing::new(request.password);
         validate_sync_password(password.as_bytes())?;
-        let provider = Arc::new(
+        let provider: Arc<dyn SyncObjectProvider> = Arc::new(
             LocalFolderProvider::open(PathBuf::from(&request.root_path))
-                .map_err(|error| provider_setup_error(&error))?,
+                .map_err(|error| provider_setup_error(&error, "Local Folder"))?,
         );
+        self.configure_provider_inner(provider, password, request.mode, kdf, "Local Folder")
+    }
+
+    pub(crate) fn configure_webdav(
+        &self,
+        request: ConfigureWebDavSyncRequest,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        let _guard = self.begin_configuration()?;
+        let password = Zeroizing::new(request.password);
+        validate_sync_password(password.as_bytes())?;
+        let credentials = match (
+            request.username.is_empty(),
+            request.provider_credential_ref.as_deref(),
+        ) {
+            (true, None) => None,
+            (false, Some(reference)) => {
+                validate_webdav_credential_reference(reference)?;
+                let secret = read_webdav_credential(reference)?;
+                Some(
+                    WebDavCredentials::from_secret(request.username, secret)
+                        .map_err(|error| provider_setup_error(&error, "WebDAV"))?,
+                )
+            }
+            _ => {
+                return Err(
+                    "WebDAV 用户名和系统凭据引用必须同时提供，或同时留空".to_string(),
+                );
+            }
+        };
+        let provider: Arc<dyn SyncObjectProvider> = Arc::new(
+            WebDavProvider::connect(&request.endpoint, credentials, None, 30)
+                .map_err(|error| provider_setup_error(&error, "WebDAV"))?,
+        );
+        self.configure_provider_inner(
+            provider,
+            password,
+            request.mode,
+            Argon2Parameters::default(),
+            "WebDAV",
+        )
+    }
+
+    fn configure_provider_inner(
+        &self,
+        provider: Arc<dyn SyncObjectProvider>,
+        password: Zeroizing<String>,
+        mode: LocalFolderSetupMode,
+        kdf: Argon2Parameters,
+        provider_label: &str,
+    ) -> Result<SyncCoordinatorStatus, String> {
         let cancellation = ProviderCancellation::default();
-        let (vault_id, vault_key) = match request.mode {
+        let (vault_id, vault_key) = match mode {
             LocalFolderSetupMode::Initialize => {
                 match provider.get(BOOTSTRAP_OBJECT_KEY, &cancellation) {
-                    Ok(_) => return Err("同步目录已经初始化；请改用解锁已有 vault".to_string()),
+                    Ok(_) => return Err("同步存储已经初始化；请改用解锁已有 vault".to_string()),
                     Err(error) if error.code == ProviderErrorCode::NotFound => {}
-                    Err(error) => return Err(provider_setup_error(&error)),
+                    Err(error) => return Err(provider_setup_error(&error, provider_label)),
                 }
                 let vault_id = uuid::Uuid::new_v4().to_string();
                 let vault_key = VaultKey::generate()?;
@@ -463,7 +527,7 @@ impl SyncCoordinatorManager {
                     Err(error) if error.code == ProviderErrorCode::Conflict => {
                         return Err("同步目录已被另一台设备初始化；请改用解锁".to_string());
                     }
-                    Err(error) => return Err(provider_setup_error(&error)),
+                    Err(error) => return Err(provider_setup_error(&error, provider_label)),
                 }
                 (vault_id, vault_key)
             }
@@ -473,9 +537,9 @@ impl SyncCoordinatorManager {
                         .get(BOOTSTRAP_OBJECT_KEY, &cancellation)
                         .map_err(|error| {
                             if error.code == ProviderErrorCode::NotFound {
-                                "同步目录尚未初始化；请明确选择初始化新 vault".to_string()
+                                "同步存储尚未初始化；请明确选择初始化新 vault".to_string()
                             } else {
-                                provider_setup_error(&error)
+                                provider_setup_error(&error, provider_label)
                             }
                         })?;
                 let bootstrap = decode_bootstrap(&encoded)?;
@@ -968,18 +1032,18 @@ fn decode_bootstrap(encoded: &[u8]) -> Result<SyncBootstrap, String> {
     Ok(bootstrap)
 }
 
-fn provider_setup_error(error: &ProviderError) -> String {
-    match error.code {
-        ProviderErrorCode::Cancelled => "同步配置已取消",
-        ProviderErrorCode::Unavailable => "Local Folder 当前不可用",
-        ProviderErrorCode::Conflict => "Local Folder 对象发生不可变冲突",
-        ProviderErrorCode::Protocol => "Local Folder provider 协议错误",
-        ProviderErrorCode::NotFound => "Local Folder 对象不存在",
-        ProviderErrorCode::InvalidInput => "Local Folder 配置无效",
-        ProviderErrorCode::LimitExceeded => "Local Folder 超过资源上限",
-        ProviderErrorCode::UnsafePath => "Local Folder 路径不安全",
-    }
-    .to_string()
+fn provider_setup_error(error: &ProviderError, provider_label: &str) -> String {
+    let detail = match error.code {
+        ProviderErrorCode::Cancelled => "配置已取消",
+        ProviderErrorCode::Unavailable => "当前不可用",
+        ProviderErrorCode::Conflict => "对象发生不可变冲突",
+        ProviderErrorCode::Protocol => "provider 协议错误",
+        ProviderErrorCode::NotFound => "对象不存在",
+        ProviderErrorCode::InvalidInput => "配置无效",
+        ProviderErrorCode::LimitExceeded => "超过资源上限",
+        ProviderErrorCode::UnsafePath => "路径不安全",
+    };
+    format!("{provider_label} {detail}")
 }
 
 fn provider_failure(error: &ProviderError) -> (AttemptFailure, &'static str) {
@@ -2157,6 +2221,41 @@ mod tests {
             )
             .unwrap_err();
         assert!(unsupported.contains("版本") || unsupported.contains("identity"));
+    }
+
+    #[test]
+    fn webdav_configuration_rejects_insecure_endpoints_and_incomplete_credentials() {
+        let root = TempDir::new("webdav-config-validation");
+        let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();
+        let request = |endpoint: &str, username: &str, provider_credential_ref: Option<&str>| {
+            ConfigureWebDavSyncRequest {
+                endpoint: endpoint.to_string(),
+                username: username.to_string(),
+                provider_credential_ref: provider_credential_ref.map(str::to_string),
+                password: "fixture-password".to_string(),
+                mode: LocalFolderSetupMode::Unlock,
+            }
+        };
+
+        let incomplete = coordinator
+            .configure_webdav(request("https://example.com/dav/", "user", None))
+            .unwrap_err();
+        assert!(incomplete.contains("同时提供"));
+
+        let invalid_reference = coordinator
+            .configure_webdav(request(
+                "https://example.com/dav/",
+                "user",
+                Some("sync-webdav-not-a-uuid"),
+            ))
+            .unwrap_err();
+        assert!(invalid_reference.contains("引用无效"));
+
+        let insecure = coordinator
+            .configure_webdav(request("http://example.com/dav/", "", None))
+            .unwrap_err();
+        assert!(insecure.contains("WebDAV 配置无效"));
+        assert!(!coordinator.status().unwrap().configured);
     }
 
     #[test]

@@ -472,6 +472,13 @@ pub(crate) struct WebDavCredentials {
 
 impl WebDavCredentials {
     pub(crate) fn new(username: String, password: String) -> ProviderResult<Self> {
+        Self::from_secret(username, Zeroizing::new(password))
+    }
+
+    pub(crate) fn from_secret(
+        username: String,
+        password: Zeroizing<String>,
+    ) -> ProviderResult<Self> {
         if username.is_empty()
             || username.len() > MAX_USERNAME_BYTES
             || username.contains(':')
@@ -486,7 +493,7 @@ impl WebDavCredentials {
         }
         Ok(Self {
             username,
-            password: Zeroizing::new(password),
+            password,
         })
     }
 }

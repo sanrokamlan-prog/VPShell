@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            93,
+            95,
             "command manifest contains duplicates or changed count"
         );
 
@@ -162,6 +162,8 @@ mod tests {
             "allow-desktop-sync-status",
             "allow-list-sync-conflicts",
             "allow-configure-local-folder-sync",
+            "allow-configure-webdav-sync",
+            "allow-store-webdav-credential",
             "allow-run-sync-once",
             "allow-resolve-sync-conflict",
             "allow-cancel-sync",
@@ -227,7 +229,9 @@ mod tests {
     #[test]
     fn desktop_sync_entry_keeps_secrets_in_rust_and_android_read_only() {
         let coordinator = include_str!("sync_coordinator.rs");
+        let provider_credentials = include_str!("sync_provider_credentials.rs");
         assert!(coordinator.contains("pub(crate) struct ConfigureLocalFolderSyncRequest"));
+        assert!(coordinator.contains("pub(crate) struct ConfigureWebDavSyncRequest"));
         assert!(coordinator.contains("let password = Zeroizing::new(request.password)"));
         assert!(
             coordinator
@@ -235,6 +239,7 @@ mod tests {
         );
         for forbidden in ["println!", "eprintln!", "log::", "tracing::"] {
             assert!(!coordinator.contains(forbidden));
+            assert!(!provider_credentials.contains(forbidden));
         }
 
         let frontend = include_str!("../../src/App.tsx");
@@ -242,6 +247,8 @@ mod tests {
             "desktop_sync_status",
             "list_sync_conflicts",
             "configure_local_folder_sync",
+            "configure_webdav_sync",
+            "store_webdav_credential",
             "run_sync_once",
             "resolve_sync_conflict",
             "cancel_sync",
@@ -249,8 +256,11 @@ mod tests {
         ] {
             assert!(frontend.contains(command));
         }
-        assert!(frontend.contains("disabled={provider !== \"local\"}"));
+        assert!(frontend.contains("disabled={provider !== \"local\" && provider !== \"webdav\"}"));
         assert!(frontend.contains("Android Preview 中禁用"));
+        let types = include_str!("../../src/types.ts");
+        assert!(types.contains("providerCredentialRef?: string"));
+        assert!(!types.contains("providerPassword"));
     }
 
     #[test]

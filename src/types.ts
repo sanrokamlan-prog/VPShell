@@ -114,6 +114,7 @@ export interface SyncSettings {
   endpoint: string;
   remotePath: string;
   username: string;
+  providerCredentialRef?: string;
   lastSyncedAt?: string;
   totpEnabled: boolean;
   syncSecrets: boolean;

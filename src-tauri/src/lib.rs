@@ -55,6 +55,7 @@ mod sync_outbox;
 mod sync_protocol_regression;
 #[allow(dead_code)] // The outbox/coordinator phases consume the provider boundary.
 mod sync_provider;
+mod sync_provider_credentials;
 #[allow(dead_code)] // Provider coordination selects these structured backend adapters.
 mod sync_provider_ext;
 #[allow(dead_code)] // The coordinator/UI phases consume recovery and encrypted export APIs.
@@ -1462,6 +1463,32 @@ async fn configure_local_folder_sync(
     Ok(status)
 }
 
+#[tauri::command]
+async fn configure_webdav_sync(
+    app: tauri::AppHandle,
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    scheduler: State<'_, sync_scheduler::AutomaticSyncScheduler>,
+    store: State<'_, app_store::AppStore>,
+    request: sync_coordinator::ConfigureWebDavSyncRequest,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    sync_scheduler::AutomaticSyncScheduler::ensure_supported()?;
+    let coordinator = coordinator.inner().clone();
+    let store = store.inner().clone();
+    let worker_coordinator = coordinator.clone();
+    let worker_store = store.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        worker_coordinator.configure_webdav(request)?;
+        worker_coordinator.status_with_app_store(&worker_store)
+    })
+    .await
+    .map_err(|error| format!("WebDAV 同步配置任务异常结束: {error}"))??;
+    if let Err(error) = scheduler.start(app, coordinator.clone(), store) {
+        let _ = coordinator.detach_session();
+        return Err(error);
+    }
+    Ok(status)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunSyncOnceResult {
@@ -1669,7 +1696,9 @@ fn stop_terminal(manager: State<'_, TerminalManager>, session_id: String) -> Res
 
 #[tauri::command]
 fn delete_credential(reference: String) -> Result<(), String> {
-    file_transfer::validate_optional_reference(Some(&reference), "ssh-")?;
+    if file_transfer::validate_optional_reference(Some(&reference), "ssh-").is_err() {
+        sync_provider_credentials::validate_webdav_credential_reference(&reference)?;
+    }
     let mut deleted = false;
     let mut last_error = None;
     for service in [CREDENTIAL_SERVICE, LEGACY_CREDENTIAL_SERVICE] {
@@ -1687,6 +1716,17 @@ fn delete_credential(reference: String) -> Result<(), String> {
             last_error.unwrap_or_else(|| "未知错误".to_string())
         ))
     }
+}
+
+#[tauri::command]
+async fn store_webdav_credential(
+    request: sync_provider_credentials::StoreWebDavCredentialRequest,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sync_provider_credentials::store_webdav_credential(request)
+    })
+    .await
+    .map_err(|error| format!("WebDAV 凭据保存任务异常结束: {error}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1771,12 +1811,14 @@ pub fn run() {
             resize_terminal,
             stop_terminal,
             delete_credential,
+            store_webdav_credential,
             import_finalshell,
             initialize_app_store,
             save_app_state,
             desktop_sync_status,
             list_sync_conflicts,
             configure_local_folder_sync,
+            configure_webdav_sync,
             run_sync_once,
             resolve_sync_conflict,
             cancel_sync,

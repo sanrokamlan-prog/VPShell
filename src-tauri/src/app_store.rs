@@ -615,6 +615,7 @@ fn sensitive_key_allowed(key: &str) -> bool {
             | "privateKeyPath"
             | "androidKeyRef"
             | "androidKeyPassphraseRef"
+            | "providerCredentialRef"
             | "syncSecrets"
     )
 }
@@ -672,6 +673,8 @@ fn inspect_json(
             }
             if key == Some("credentialRef") {
                 crate::file_transfer::validate_optional_reference(Some(value), "ssh-")?;
+            } else if key == Some("providerCredentialRef") {
+                crate::sync_provider_credentials::validate_webdav_credential_reference(value)?;
             } else if key == Some("passphraseRef") {
                 crate::file_transfer::validate_optional_reference(Some(value), "key-")?;
             } else if key == Some("androidKeyRef") {
@@ -3090,6 +3093,43 @@ mod tests {
     }
 
     #[test]
+    fn webdav_provider_reference_is_local_only_and_never_enters_changefeed() {
+        let root = TempDir::new("webdav-provider-reference");
+        let store = AppStore::load(root.0.clone()).expect("load store");
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .expect("save initial state");
+        let initial = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(initial.len(), 1);
+
+        let reference = format!("sync-webdav-{}", Uuid::new_v4());
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["sync"]["username"] = Value::String("webdav-user".to_string());
+        state["sync"]["providerCredentialRef"] = Value::String(reference.clone());
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 1,
+            })
+            .expect("save local provider reference");
+
+        assert_eq!(store.pending_entity_sync_changes(128).unwrap(), initial);
+        let connection = Connection::open(database_path(&root.0)).unwrap();
+        let metadata: String = connection
+            .query_row(
+                "SELECT domains_json FROM app_events ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(metadata, "[\"sync\"]");
+        assert!(!metadata.contains(&reference));
+    }
+
+    #[test]
     fn terminal_appearance_changefeed_uses_fixed_public_setting_fields() {
         let root = TempDir::new("setting-changefeed");
         let store = AppStore::load(root.0.clone()).unwrap();
@@ -4409,7 +4449,13 @@ mod tests {
             Value::String(format!("key-{}", Uuid::new_v4()));
         android_refs["hosts"][0]["hostKeySha256"] =
             Value::String("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string());
+        android_refs["sync"]["providerCredentialRef"] =
+            Value::String(format!("sync-webdav-{}", Uuid::new_v4()));
         assert!(validate_state_json(&android_refs.to_string()).is_ok());
+
+        android_refs["sync"]["providerCredentialRef"] =
+            Value::String("sync-webdav-not-a-uuid".to_string());
+        assert!(validate_state_json(&android_refs.to_string()).is_err());
 
         let mut jump_route: Value = serde_json::from_str(&fixture()).expect("fixture JSON");
         jump_route["hosts"]

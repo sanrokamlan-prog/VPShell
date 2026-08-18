@@ -600,6 +600,7 @@ function App() {
   const [broadcastResult, setBroadcastResult] = useState<BroadcastResultResponse | null>(null);
   const [broadcastExecuting, setBroadcastExecuting] = useState(false);
   const [syncPassword, setSyncPassword] = useState("");
+  const [webDavPassword, setWebDavPassword] = useState("");
   const [syncSetupMode, setSyncSetupMode] = useState<"unlock" | "initialize">("unlock");
   const [desktopSyncStatus, setDesktopSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
   const [desktopSyncError, setDesktopSyncError] = useState<string | null>(null);
@@ -2104,13 +2105,13 @@ function App() {
     }
   }
 
-  async function configureLocalFolderSync() {
-    if (appState.sync.provider !== "local") {
-      showToast("当前只开放 Local Folder 同步");
+  async function configureDesktopSync() {
+    if (appState.sync.provider !== "local" && appState.sync.provider !== "webdav") {
+      showToast("当前只开放 Local Folder 与 WebDAV 同步");
       return;
     }
     if (!appState.sync.endpoint.trim()) {
-      showToast("请输入已存在的同步目录");
+      showToast(appState.sync.provider === "local" ? "请输入已存在的同步目录" : "请输入 WebDAV HTTPS endpoint");
       return;
     }
     if (!syncPassword) {
@@ -2118,23 +2119,63 @@ function App() {
       return;
     }
     setDesktopSyncBusy(true);
+    let createdCredentialRef: string | undefined;
     try {
-      const status = await invoke<SyncCoordinatorStatus>("configure_local_folder_sync", {
-        request: {
-          rootPath: appState.sync.endpoint.trim(),
-          password: syncPassword,
-          mode: syncSetupMode,
-        },
-      });
+      const provider = appState.sync.provider;
+      const username = appState.sync.username.trim();
+      if (provider === "webdav" && webDavPassword && !username) {
+        throw new Error("保存 WebDAV 密码前必须填写用户名");
+      }
+      if (provider === "webdav" && webDavPassword) {
+        createdCredentialRef = await invoke<string>("store_webdav_credential", {
+          request: { password: webDavPassword },
+        });
+      }
+      const providerCredentialRef = provider === "webdav" && username
+        ? createdCredentialRef ?? appState.sync.providerCredentialRef
+        : undefined;
+      if (provider === "webdav" && Boolean(username) !== Boolean(providerCredentialRef)) {
+        throw new Error("WebDAV 用户名需要对应的已保存密码");
+      }
+      const status = provider === "local"
+        ? await invoke<SyncCoordinatorStatus>("configure_local_folder_sync", {
+          request: {
+            rootPath: appState.sync.endpoint.trim(),
+            password: syncPassword,
+            mode: syncSetupMode,
+          },
+        })
+        : await invoke<SyncCoordinatorStatus>("configure_webdav_sync", {
+          request: {
+            endpoint: appState.sync.endpoint.trim(),
+            username,
+            providerCredentialRef,
+            password: syncPassword,
+            mode: syncSetupMode,
+          },
+        });
       setDesktopSyncStatus(status);
       setDesktopSyncError(null);
       setAppState((current) => ({
         ...current,
-        sync: { ...current.sync, enabled: true, provider: "local" },
+        sync: {
+          ...current.sync,
+          enabled: true,
+          provider,
+          username,
+          providerCredentialRef: provider === "webdav"
+            ? providerCredentialRef ?? current.sync.providerCredentialRef
+            : current.sync.providerCredentialRef,
+        },
       }));
+      createdCredentialRef = undefined;
       setSyncPassword("");
+      setWebDavPassword("");
       showToast(syncSetupMode === "initialize" ? "同步 vault 已初始化并解锁" : "同步 vault 已解锁");
     } catch (error) {
+      if (createdCredentialRef) {
+        await invoke("delete_credential", { reference: createdCredentialRef }).catch(() => undefined);
+      }
       const message = invokeErrorMessage(error);
       setDesktopSyncError(message);
       showToast(`同步配置失败：${message}`);
@@ -2227,6 +2268,7 @@ function App() {
       setSyncConflictError(null);
       setSyncConflictOffset(0);
       setSyncPassword("");
+      setWebDavPassword("");
       setAppState((current) => ({
         ...current,
         sync: { ...current.sync, enabled: false },
@@ -3044,7 +3086,7 @@ function App() {
       ) : null}
 
       {dialog === "sync" ? (
-        <Dialog title={isAndroidRuntime() ? "同步状态" : "加密同步"} wide onClose={() => setDialog(null)} footer={isAndroidRuntime() ? <><button className="secondary-button" type="button" onClick={() => void refreshAndroidSyncStatus()}><RefreshCw size={14} /> 刷新</button><button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button></> : desktopSyncStatus?.configured ? <><button className="secondary-button" type="button" disabled={desktopSyncBusy} onClick={() => void lockDesktopSync()}><KeyRound size={14} /> 锁定</button>{desktopSyncStatus.running ? <button className="danger-button" type="button" onClick={() => void cancelDesktopSync()}><Square size={14} /> 取消同步</button> : <button className="primary-button" type="button" disabled={desktopSyncBusy || appStoreStatus.saving || desktopSyncStatus.recoveryRequired} onClick={() => void runDesktopSyncOnce()}><RefreshCw size={14} /> 立即同步</button>}</> : <><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" disabled={desktopSyncBusy} onClick={() => void configureLocalFolderSync()}><ShieldCheck size={14} /> {syncSetupMode === "initialize" ? "初始化并解锁" : "解锁"}</button></>}>
+        <Dialog title={isAndroidRuntime() ? "同步状态" : "加密同步"} wide onClose={() => setDialog(null)} footer={isAndroidRuntime() ? <><button className="secondary-button" type="button" onClick={() => void refreshAndroidSyncStatus()}><RefreshCw size={14} /> 刷新</button><button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button></> : desktopSyncStatus?.configured ? <><button className="secondary-button" type="button" disabled={desktopSyncBusy} onClick={() => void lockDesktopSync()}><KeyRound size={14} /> 锁定</button>{desktopSyncStatus.running ? <button className="danger-button" type="button" onClick={() => void cancelDesktopSync()}><Square size={14} /> 取消同步</button> : <button className="primary-button" type="button" disabled={desktopSyncBusy || appStoreStatus.saving || desktopSyncStatus.recoveryRequired} onClick={() => void runDesktopSyncOnce()}><RefreshCw size={14} /> 立即同步</button>}</> : <><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" disabled={desktopSyncBusy} onClick={() => void configureDesktopSync()}><ShieldCheck size={14} /> {syncSetupMode === "initialize" ? "初始化并解锁" : "解锁"}</button></>}>
           {isAndroidRuntime() ? (
             <div className="sync-readonly-status" aria-live="polite">
               <div><span>协调阶段</span><strong>{androidSyncError ? "状态读取失败" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取"}</strong></div>
@@ -3109,18 +3151,22 @@ function App() {
           {!desktopSyncStatus?.configured ? <>
           <div className="provider-grid">
             {(Object.keys(providerLabels) as SyncProviderKind[]).map((provider) => (
-              <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} disabled={provider !== "local"} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
+              <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} disabled={provider !== "local" && provider !== "webdav"} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
                 {provider === "local" ? <HardDrive size={18} /> : provider === "webdav" ? <Globe2 size={18} /> : provider === "sftp" ? <SquareTerminal size={18} /> : provider === "s3" ? <Database size={18} /> : <Cloud size={18} />}
                 <span>{providerLabels[provider]}</span>
               </button>
             ))}
           </div>
-          <div className="sync-mode-switch" role="group" aria-label="同步目录模式">
+          <div className="sync-mode-switch" role="group" aria-label="同步存储模式">
             <button type="button" className={syncSetupMode === "unlock" ? "active" : ""} onClick={() => setSyncSetupMode("unlock")}>解锁已有 vault</button>
             <button type="button" className={syncSetupMode === "initialize" ? "active" : ""} onClick={() => setSyncSetupMode("initialize")}>初始化新 vault</button>
           </div>
           <div className="form-grid sync-form">
-            <label className="field span-2"><span>同步目录</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder="D:\\VPShellSync" /></label>
+            <label className="field span-2"><span>{appState.sync.provider === "local" ? "同步目录" : "WebDAV endpoint"}</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder={appState.sync.provider === "local" ? "D:\\VPShellSync" : "https://dav.example.com/vpshell/"} /></label>
+            {appState.sync.provider === "webdav" ? <>
+              <label className="field"><span>WebDAV 用户名</span><input maxLength={256} value={appState.sync.username} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, username: event.target.value } }))} autoComplete="username" placeholder="可留空使用无认证存储" /></label>
+              <label className="field"><span>WebDAV 密码</span><input type="password" maxLength={1024} value={webDavPassword} onChange={(event) => setWebDavPassword(event.target.value)} autoComplete="current-password" placeholder={appState.sync.providerCredentialRef ? "留空使用系统已保存密码" : "仅保存到系统凭据管理器"} /></label>
+            </> : null}
             <label className="field span-2"><span>二级同步密码</span><input type="password" minLength={8} maxLength={1024} value={syncPassword} onChange={(event) => setSyncPassword(event.target.value)} autoComplete="new-password" placeholder="用于端到端加密" /></label>
           </div>
           </> : null}

@@ -24,12 +24,14 @@ execute_broadcast
 resize_terminal
 stop_terminal
 delete_credential
+store_webdav_credential
 import_finalshell
 initialize_app_store
 save_app_state
 desktop_sync_status
 list_sync_conflicts
 configure_local_folder_sync
+configure_webdav_sync
 run_sync_once
 resolve_sync_conflict
 cancel_sync

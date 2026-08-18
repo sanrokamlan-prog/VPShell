@@ -114,10 +114,11 @@
 | 完成 | 桌面 vault 解锁期 Rust-owned 自动调度：启动/业务变更防抖、周期/失败复查、单飞、锁定代际停止和具名 snapshot 事件；PR #1 run `32174731384` 全绿 |
 | 完成 | 桌面持久冲突中心：有界分页/预览、revision 防陈旧、Rust-owned 候选解决、加密 outbox 原子入队和 AppState 重投影已实现；PR #1 run `32179217707`（`c717a2e`）全平台 Actions 全绿 |
 | 完成 | onboarding 完成状态作为第三个固定布尔设置实体接入保存、恢复、加密 operation、远端投影与防回声；PR #1 run `32183041743`（`718f96e`）全平台 Actions 全绿 |
-| 进行中 | 默认监控采样频率作为第四个固定整数设置实体接入 AppState、会话控制、加密 operation、远端投影与防回声；历史/背景及其他尚未建模设置仍未冒充完成 |
-| 待实现 | 历史/背景/其他尚未建模设置等业务域 operation、WebDAV/扩展 provider 产品凭据与真实多设备矩阵 |
+| 完成 | 默认监控采样频率作为第四个固定整数设置实体接入 AppState、会话控制、加密 operation、远端投影与防回声；PR #1 run `32184979352`（`44c5f65`）全平台 Actions 全绿 |
+| 进行中 | 桌面标准 HTTPS WebDAV 产品入口、Rust 系统凭据引用、共享 bootstrap/协调器和自动调度接线；自签 CA 与真实服务矩阵不冒充完成 |
+| 待实现 | 历史/背景/其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口、主机公开字段、安全自建脚本、终端外观窄设置、两个应用行为偏好、onboarding 状态、桌面持久冲突中心及自动调度均已通过 Actions；默认监控采样频率正在验证，历史/背景/其他尚未建模设置、真实外部 provider 和多设备仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder 产品入口、主机公开字段、安全自建脚本、四个固定设置实体、桌面持久冲突中心及自动调度均已通过 Actions；标准 HTTPS WebDAV 产品入口正在验证，历史/背景/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -254,7 +255,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 onboarding 设置（Actions 完成） | 格式修复提交 `718f96e` 的 PR #1 run `32183041743` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture 及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
 | 2026-08-18 | B9 默认监控采样频率 operation 与 AppState 投影（待 Actions） | `vpshell-state.sqlite3` 升级 schema v7，为固定 UUID 的第四个 setting 实体回填内容指纹；旧状态缺失该字段时按默认 15 秒只写指纹，已有合法非默认值才在同一迁移事务入队。实体只含 `monitorInterval` 单个整数并复用协议 5–300 秒硬范围；AppState 使用 `settings.monitorIntervalSeconds`，非法旧值由前端迁移归一化且 Rust 保存继续 fail closed。设置对话框与主机概况复用现有频率控制，合法非预设值仍可显示；本地会话变更持久化为后续默认，远端 snapshot 变化会通过既有 effect 重新启动当前 Rust monitor。默认首次初始化不产生 operation，显式改回默认仍入队；协调器沿用 observed stamp、加密 outbox、完整 setting 投影与按实体防回声指纹。远端只接受固定实体内恰好一个整数字段，删除、未知/额外字段、错误类型及越界值原子拒绝。聚焦测试覆盖 v5/v6 迁移无默认冗余 operation、本地 30 秒 patch、恢复 15 秒、远端 60 秒投影/防回声、301 秒和字符串回滚、merge 范围白名单，以及真实协调器周期中的本地密文、远端并发冲突和 AppState 写回。 |
 | 2026-08-18 | B9 默认监控采样频率本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android capability 四份严格 JSON、schema v7 窄迁移及第四固定实体在提取/默认/入队/精确校验/投影/指纹链路的静态闭合、前端类型/初始值/旧状态归一化/设置入口/运行会话重配链路、AppStore/merge/coordinator 三层聚焦测试清单、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区起止均为 52%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、SDK 或依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
+| 2026-08-18 | B9 默认监控采样频率（Actions 完成） | 提交 `44c5f65` 的 PR #1 run `32184979352` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture 及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-18 | B9 桌面 WebDAV 产品入口（待 Actions） | 标准 HTTPS WebDAV 现已从设置页接入与 Local Folder 相同的显式初始化/解锁、不可变 schema-v1 bootstrap、手动单周期及解锁期自动调度。新增 `sync-webdav-<UUID>` 本机随机凭据引用；WebDAV 密码只由具名 Rust command 写入系统凭据管理器，AppState 只保存受严格 UUID/prefix 校验的引用，协调器在 blocking worker 内解析为清零 credentials，引用/username/密码均不进入状态事件、journal 或同步对象。用户名/引用必须成对或同时为空，endpoint 继续强制无 URL 凭据/query/fragment 的 HTTPS、无重定向与固定 30 秒上限；配置失败清理本次新引用，换密成功后切换 AppState 引用。为避免 AppState 异步保存失败导致旧凭据不可恢复，已被替换的旧 keyring 引用暂不自动删除，后续需增加可确认的本机凭据清理入口。两个新增 command 仅在 desktop capability，Android 继续只有 value-free 状态且 Sync disabled。聚焦测试覆盖凭据引用/密码边界、非 HTTPS、残缺/非法引用和未配置状态；既有 WebDAV HTTP fixture 覆盖条件 PUT、回读、碰撞、分页及 XML/href 边界。系统 CA 以外的显式自签 CA、代理、真实服务器/断网/多设备矩阵仍为后续或外部验收。 |
+| 2026-08-18 | B9 桌面 WebDAV 产品入口本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 四份严格 JSON、95-command manifest 唯一项/handler/capability 并集完整对齐、WebDAV 配置与凭据命令只在 desktop capability 且 Android 运行 Sync 继续 disabled、HTTPS/用户名-引用成对/随机 UUID 引用/1–1024 字节密码/AppState 引用本机-only changefeed 的聚焦测试与静态链路、失败新引用清理、共享 bootstrap/调度接线、无新增日志宏、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区起止均为 52%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、SDK 或依赖；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送默认监控采样频率双向同步；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后继续评估历史/背景/其他尚未建模设置中的下一个可安全落地业务域，不以缺少删除语义的 append-only 历史合并冒充完整历史同步，也不在缺少分块/安全安装时宣称背景同步完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实断网恢复矩阵均如实保留为后续/外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送桌面 WebDAV 产品入口；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后继续评估显式自签 CA 或历史/背景/其他尚未建模设置中的下一个可安全落地项，不以缺少删除语义的 append-only 历史合并冒充完整历史同步，也不在缺少分块/安全安装时宣称背景同步完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/断网/多设备矩阵均如实保留为后续/外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
