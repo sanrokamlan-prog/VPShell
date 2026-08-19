@@ -917,10 +917,7 @@ impl SyncObjectProvider for WebDavProvider {
             ));
         }
         let etag = head.headers().get(ETAG).cloned().ok_or_else(|| {
-            ProviderError::new(
-                ProviderErrorCode::Protocol,
-                "WebDAV 条件删除要求强 ETag",
-            )
+            ProviderError::new(ProviderErrorCode::Protocol, "WebDAV 条件删除要求强 ETag")
         })?;
         let etag_bytes = etag.as_bytes();
         if etag_bytes.starts_with(b"W/")
@@ -1667,16 +1664,20 @@ mod tests {
                     }
                     1 => {
                         assert!(request.starts_with("GET /dav/root/a.oseg "));
-                        assert!(request
-                            .to_ascii_lowercase()
-                            .contains("if-match: \"immutable\""));
+                        assert!(
+                            request
+                                .to_ascii_lowercase()
+                                .contains("if-match: \"immutable\"")
+                        );
                         respond(&mut stream, 200, b"payload");
                     }
                     2 => {
                         assert!(request.starts_with("DELETE /dav/root/a.oseg "));
-                        assert!(request
-                            .to_ascii_lowercase()
-                            .contains("if-match: \"immutable\""));
+                        assert!(
+                            request
+                                .to_ascii_lowercase()
+                                .contains("if-match: \"immutable\"")
+                        );
                         respond_status(&mut stream, "204 No Content", b"");
                     }
                     3 => {
@@ -1690,11 +1691,7 @@ mod tests {
         let provider =
             WebDavProvider::connect_http_for_test(&format!("http://{address}/dav/root/")).unwrap();
         assert_eq!(
-            provider.delete_exact(
-                "a.oseg",
-                b"payload",
-                &ProviderCancellation::default(),
-            ),
+            provider.delete_exact("a.oseg", b"payload", &ProviderCancellation::default(),),
             Ok(DeleteObjectOutcome::Deleted)
         );
         server.join().unwrap();

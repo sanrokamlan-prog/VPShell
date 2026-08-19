@@ -928,10 +928,7 @@ impl SyncJournal {
         })
     }
 
-    pub(crate) fn blob_gc_frontier(
-        &self,
-        vault_id: &str,
-    ) -> JournalResult<BlobGcFrontierSnapshot> {
+    pub(crate) fn blob_gc_frontier(&self, vault_id: &str) -> JournalResult<BlobGcFrontierSnapshot> {
         let vault_id = Uuid::parse_str(vault_id)
             .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
             .to_string();
@@ -955,7 +952,9 @@ impl SyncJournal {
                     JournalError::new(JournalErrorCode::Storage, "无法读取远端同步水位")
                 })?;
             let rows = statement
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
                 .map_err(|_| {
                     JournalError::new(JournalErrorCode::Storage, "无法列举远端同步水位")
                 })?;
@@ -1022,9 +1021,7 @@ impl SyncJournal {
         let vault_id = Uuid::parse_str(vault_id)
             .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
             .to_string();
-        if !is_lowercase_hash(blob_id)
-            || !is_lowercase_hash(confirmation_hash)
-            || retention_ms <= 0
+        if !is_lowercase_hash(blob_id) || !is_lowercase_hash(confirmation_hash) || retention_ms <= 0
         {
             return Err(JournalError::new(
                 JournalErrorCode::InvalidInput,

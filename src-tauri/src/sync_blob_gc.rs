@@ -145,7 +145,8 @@ fn decode_index<T: for<'de> Deserialize<'de>>(
     {
         return Err("integrity".to_string());
     }
-    let plaintext = decrypt_sync_object(vault_key, &envelope).map_err(|_| "integrity".to_string())?;
+    let plaintext =
+        decrypt_sync_object(vault_key, &envelope).map_err(|_| "integrity".to_string())?;
     serde_json::from_slice(&plaintext).map_err(|_| "protocol".to_string())
 }
 
@@ -160,8 +161,8 @@ fn put_index(
 ) -> Result<bool, String> {
     match provider.get(key, cancellation) {
         Ok(existing) => {
-            let envelope = EncryptedSyncObject::decode(&existing)
-                .map_err(|_| "integrity".to_string())?;
+            let envelope =
+                EncryptedSyncObject::decode(&existing).map_err(|_| "integrity".to_string())?;
             if envelope.vault_id() != vault_id
                 || envelope.object_kind() != &SyncObjectKind::Index
                 || envelope.object_id() != object_id
@@ -186,7 +187,10 @@ fn put_index(
             )
             .and_then(|object| object.encode())
             .map_err(|_| "integrity".to_string())?;
-            match provider.put(key, &encoded, cancellation).map_err(provider_error)? {
+            match provider
+                .put(key, &encoded, cancellation)
+                .map_err(provider_error)?
+            {
                 PutObjectOutcome::Created => Ok(true),
                 PutObjectOutcome::AlreadyPresent => {
                     let existing = provider.get(key, cancellation).map_err(provider_error)?;
@@ -255,7 +259,10 @@ fn validate_acknowledgement(
             .live_blob_ids
             .windows(2)
             .all(|pair| pair[0] < pair[1])
-        || acknowledgement.live_blob_ids.iter().any(|id| !valid_hash(id))
+        || acknowledgement
+            .live_blob_ids
+            .iter()
+            .any(|id| !valid_hash(id))
     {
         return Err("protocol".to_string());
     }
@@ -271,7 +278,10 @@ fn remote_segment_frontier(
     let prefix = format!("vpshell/v1/{vault_id}/segments/");
     let mut frontier = BTreeMap::new();
     for object in list_all(provider, &prefix, cancellation)? {
-        let relative = object.key.strip_prefix(&prefix).ok_or_else(|| "protocol".to_string())?;
+        let relative = object
+            .key
+            .strip_prefix(&prefix)
+            .ok_or_else(|| "protocol".to_string())?;
         let (device_id, filename) = relative
             .split_once('/')
             .ok_or_else(|| "protocol".to_string())?;
@@ -290,7 +300,9 @@ fn remote_segment_frontier(
         if filename != format!("{sequence}.oseg") {
             return Err("protocol".to_string());
         }
-        let encoded = provider.get(&object.key, cancellation).map_err(provider_error)?;
+        let encoded = provider
+            .get(&object.key, cancellation)
+            .map_err(provider_error)?;
         if encoded.len() as u64 != object.size {
             return Err("integrity".to_string());
         }
@@ -326,7 +338,9 @@ pub(crate) fn run_blob_gc(
     if blob_objects.is_empty() {
         return Ok(BlobGcCycleResult::default());
     }
-    let snapshot = journal.blob_gc_frontier(vault_id).map_err(|_| "storage".to_string())?;
+    let snapshot = journal
+        .blob_gc_frontier(vault_id)
+        .map_err(|_| "storage".to_string())?;
     if snapshot.has_pending_objects {
         return Ok(BlobGcCycleResult::default());
     }
@@ -348,7 +362,8 @@ pub(crate) fn run_blob_gc(
         vault_id: vault_id.to_string(),
         device_id: snapshot.local_device_id.clone(),
     };
-    let local_member_bytes = serde_json::to_vec(&local_member).map_err(|_| "protocol".to_string())?;
+    let local_member_bytes =
+        serde_json::to_vec(&local_member).map_err(|_| "protocol".to_string())?;
     let published_member = put_index(
         provider,
         cancellation,
@@ -366,16 +381,14 @@ pub(crate) fn run_blob_gc(
             .strip_prefix(&member_prefix)
             .and_then(|value| value.strip_suffix(".ogcm"))
             .ok_or_else(|| "protocol".to_string())?;
-        let encoded = provider.get(&metadata.key, cancellation).map_err(provider_error)?;
+        let encoded = provider
+            .get(&metadata.key, cancellation)
+            .map_err(provider_error)?;
         if encoded.len() as u64 != metadata.size {
             return Err("integrity".to_string());
         }
-        let member: BlobGcMember = decode_index(
-            &encoded,
-            vault_key,
-            vault_id,
-            &member_object_id(device_id),
-        )?;
+        let member: BlobGcMember =
+            decode_index(&encoded, vault_key, vault_id, &member_object_id(device_id))?;
         validate_membership(&member, vault_id)?;
         if member.device_id != device_id || !members.insert(device_id.to_string()) {
             return Err("protocol".to_string());
@@ -432,7 +445,9 @@ pub(crate) fn run_blob_gc(
             .strip_suffix(".ogca")
             .filter(|value| valid_hash(value))
             .ok_or_else(|| "protocol".to_string())?;
-        let encoded = provider.get(&metadata.key, cancellation).map_err(provider_error)?;
+        let encoded = provider
+            .get(&metadata.key, cancellation)
+            .map_err(provider_error)?;
         if encoded.len() as u64 != metadata.size {
             return Err("integrity".to_string());
         }
@@ -467,7 +482,10 @@ pub(crate) fn run_blob_gc(
         {
             return Err("protocol".to_string());
         }
-        grouped.entry(blob_id.to_string()).or_default().push(metadata);
+        grouped
+            .entry(blob_id.to_string())
+            .or_default()
+            .push(metadata);
     }
 
     let mut result = BlobGcCycleResult {
@@ -489,7 +507,10 @@ pub(crate) fn run_blob_gc(
                 .map_err(|_| "storage".to_string())?;
             continue;
         }
-        if !objects.iter().any(|object| object.key.ends_with("/manifest.oblob")) {
+        if !objects
+            .iter()
+            .any(|object| object.key.ends_with("/manifest.oblob"))
+        {
             return Err("integrity".to_string());
         }
         let mut selected = Vec::new();
@@ -500,7 +521,11 @@ pub(crate) fn run_blob_gc(
                     acknowledgement.device_id.as_str() == member.as_str()
                         && acknowledgement.members == member_list
                         && snapshot.frontier.iter().all(|(device_id, sequence)| {
-                            acknowledgement.frontier.get(device_id).copied().unwrap_or(0)
+                            acknowledgement
+                                .frontier
+                                .get(device_id)
+                                .copied()
+                                .unwrap_or(0)
                                 >= *sequence
                         })
                 })
@@ -549,14 +574,9 @@ pub(crate) fn run_blob_gc(
                 .map_err(|_| "storage".to_string())?;
             continue;
         }
-        let restored = restore_wallpaper_blob(
-            provider,
-            cancellation,
-            vault_key,
-            vault_id,
-            &blob_id,
-        )
-        .map_err(|_| "integrity".to_string())?;
+        let restored =
+            restore_wallpaper_blob(provider, cancellation, vault_key, vault_id, &blob_id)
+                .map_err(|_| "integrity".to_string())?;
         if restored.blob_id != blob_id
             || usize::try_from(restored.object_count).ok() != Some(objects.len())
         {
@@ -570,12 +590,14 @@ pub(crate) fn run_blob_gc(
         });
         let mut authenticated = Vec::with_capacity(objects.len());
         for metadata in &objects {
-            let encoded = provider.get(&metadata.key, cancellation).map_err(provider_error)?;
+            let encoded = provider
+                .get(&metadata.key, cancellation)
+                .map_err(provider_error)?;
             if encoded.len() as u64 != metadata.size {
                 return Err("integrity".to_string());
             }
-            let envelope = EncryptedSyncObject::decode(&encoded)
-                .map_err(|_| "integrity".to_string())?;
+            let envelope =
+                EncryptedSyncObject::decode(&encoded).map_err(|_| "integrity".to_string())?;
             if !object_key_matches_blob_envelope(&metadata.key, vault_id, &envelope)
                 || decrypt_sync_object(vault_key, &envelope).is_err()
             {
@@ -689,16 +711,18 @@ mod tests {
         )
         .expect("retained gc cycle");
         assert_eq!(second.deleted_objects, 2);
-        assert!(provider
-            .list(
-                &format!("vpshell/v1/{vault_id}/blobs/{blob_id}/"),
-                None,
-                LIST_PAGE_SIZE,
-                &cancellation,
-            )
-            .expect("list after gc")
-            .objects
-            .is_empty());
+        assert!(
+            provider
+                .list(
+                    &format!("vpshell/v1/{vault_id}/blobs/{blob_id}/"),
+                    None,
+                    LIST_PAGE_SIZE,
+                    &cancellation,
+                )
+                .expect("list after gc")
+                .objects
+                .is_empty()
+        );
     }
 
     #[test]
@@ -725,15 +749,17 @@ mod tests {
         )
         .expect("live blob gc cycle");
         assert_eq!(result.deleted_objects, 0);
-        assert!(!provider
-            .list(
-                &format!("vpshell/v1/{vault_id}/blobs/{blob_id}/"),
-                None,
-                LIST_PAGE_SIZE,
-                &cancellation,
-            )
-            .expect("list live blob")
-            .objects
-            .is_empty());
+        assert!(
+            !provider
+                .list(
+                    &format!("vpshell/v1/{vault_id}/blobs/{blob_id}/"),
+                    None,
+                    LIST_PAGE_SIZE,
+                    &cancellation,
+                )
+                .expect("list live blob")
+                .objects
+                .is_empty()
+        );
     }
 }

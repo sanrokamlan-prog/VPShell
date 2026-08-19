@@ -718,7 +718,9 @@ impl SyncCoordinatorManager {
             .and_then(|snapshot| {
                 let state: serde_json::Value = serde_json::from_str(&snapshot.state_json)
                     .map_err(|_| "app-state-handoff".to_string())?;
-                Ok(state["wallpaper"]["managedBlobId"].as_str().map(str::to_string))
+                Ok(state["wallpaper"]["managedBlobId"]
+                    .as_str()
+                    .map(str::to_string))
             })?;
         let gc = run_blob_gc(
             provider,

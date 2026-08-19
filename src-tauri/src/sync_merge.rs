@@ -2348,10 +2348,9 @@ mod tests {
         let MergePayload::Patch(payload) = &mut concurrent.payload else {
             unreachable!();
         };
-        payload.fields.insert(
-            "blobId".to_string(),
-            FieldValue::BlobRef("cd".repeat(32)),
-        );
+        payload
+            .fields
+            .insert("blobId".to_string(), FieldValue::BlobRef("cd".repeat(32)));
         state.apply(&concurrent).unwrap();
 
         assert_eq!(
