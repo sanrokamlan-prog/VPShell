@@ -1168,7 +1168,7 @@ mod tests {
                 "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             }],
             "deletedHosts": [], "scripts": [], "commands": [], "sshKeys": [],
-            "commandHistory": [], "connectionHistory": [], "pathHistory": {},
+            "commandHistory": [], "parameterHistory": [], "connectionHistory": [], "pathHistory": {},
             "sync": {"enabled": true, "provider": "local", "endpoint": "", "remotePath": "/vpshell", "username": "", "totpEnabled": false, "syncSecrets": false},
             "wallpaper": {"source": "none", "value": "", "opacity": 0.2},
             "terminalAppearance": {"fontFamily": "Cascadia Code", "fontSize": 13, "lineHeight": 1.25},
@@ -1956,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn cycle_syncs_public_command_history_with_stable_host_mapping() {
+    fn cycle_syncs_public_command_path_and_parameter_history() {
         let root = TempDir::new("app-state-command-history");
         let store = test_app_store(&root);
         let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
@@ -1974,6 +1974,18 @@ mod tests {
                 "createdAt": "2026-08-18T22:29:00.000Z"
             }]
         });
+        state["commands"] = serde_json::json!([{
+            "id": "command-service-logs",
+            "title": "logs",
+            "parameters": [{ "name": "SERVICE", "label": "service" }]
+        }]);
+        state["parameterHistory"] = serde_json::json!([{
+            "id": "local-parameter-entry",
+            "commandId": "command-service-logs",
+            "parameterName": "SERVICE",
+            "value": "nginx",
+            "createdAt": "2026-08-19T00:10:00.000Z"
+        }]);
         store
             .save(SaveAppStateRequest {
                 state_json: state.to_string(),
@@ -2020,7 +2032,7 @@ mod tests {
             .unwrap();
 
         let status = coordinator.run_once(&store, 1_000).unwrap();
-        assert_eq!(status.last_uploaded_objects, 3);
+        assert_eq!(status.last_uploaded_objects, 4);
         assert_eq!(status.last_downloaded_objects, 1);
         assert_eq!(status.open_conflicts, 1);
         let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
@@ -2033,6 +2045,11 @@ mod tests {
         );
         assert_eq!(state["commandHistory"][0]["hostId"], "host-local");
         assert_eq!(state["pathHistory"]["host-local"][0]["path"], "/srv/app");
+        assert_eq!(state["parameterHistory"][0]["value"], "nginx");
+        assert_eq!(
+            state["parameterHistory"][0]["parameterName"],
+            "SERVICE"
+        );
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
     }
 

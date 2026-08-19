@@ -57,6 +57,7 @@ export interface CommandParameter {
   placeholder?: string;
   defaultValue?: string;
   required?: boolean;
+  sensitive?: boolean;
 }
 
 export interface CommandRecipe {
@@ -88,6 +89,14 @@ export interface CommandHistoryItem {
   command: string;
   hostId: string;
   path: string;
+  createdAt: string;
+}
+
+export interface ParameterHistoryItem {
+  id: string;
+  commandId: string;
+  parameterName: string;
+  value: string;
   createdAt: string;
 }
 
@@ -154,6 +163,7 @@ export interface AppState {
   commands: CommandRecipe[];
   sshKeys: SshKeyProfile[];
   commandHistory: CommandHistoryItem[];
+  parameterHistory: ParameterHistoryItem[];
   connectionHistory: ConnectionHistoryItem[];
   pathHistory: Record<string, PathHistoryItem[]>;
   sync: SyncSettings;

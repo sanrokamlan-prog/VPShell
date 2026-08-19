@@ -35,6 +35,7 @@ const MAX_WALLPAPER_VALUE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_SYNC_CHANGES: i64 = 10_000;
 const MAX_SYNCED_HOSTS: usize = 2_000;
 const PATH_HISTORY_LOCAL_KEY_PREFIX: &str = "vpshell-path-history:";
+const PARAMETER_HISTORY_LOCAL_KEY_PREFIX: &str = "vpshell-parameter-history:";
 
 const TOP_LEVEL_FIELDS: &[&str] = &[
     "hosts",
@@ -43,6 +44,7 @@ const TOP_LEVEL_FIELDS: &[&str] = &[
     "commands",
     "sshKeys",
     "commandHistory",
+    "parameterHistory",
     "connectionHistory",
     "pathHistory",
     "sync",
@@ -486,6 +488,13 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
                 revision.max(1) as u64,
                 updated_at_ms.max(0),
             )?;
+            queue_parameter_history_sync_changes(
+                &transaction,
+                None,
+                &state,
+                revision.max(1) as u64,
+                updated_at_ms.max(0),
+            )?;
         }
     }
     transaction
@@ -815,26 +824,35 @@ fn validate_state_json(state_json: &str) -> Result<Value, String> {
     if state_json.is_empty() || state_json.len() > MAX_STATE_BYTES {
         return Err("本地状态必须为 1 字节至 16 MiB".to_string());
     }
-    let value: Value = serde_json::from_str(state_json)
+    let mut value: Value = serde_json::from_str(state_json)
         .map_err(|error| format!("本地状态不是有效 JSON: {error}"))?;
-    let root = ensure_object(&value, "root")?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "root 必须是对象".to_string())?;
     let allowed = TOP_LEVEL_FIELDS.iter().copied().collect::<HashSet<_>>();
     for field in root.keys() {
         if !allowed.contains(field.as_str()) {
             return Err(format!("本地状态包含未知顶层字段 {field}"));
         }
     }
-    for field in TOP_LEVEL_FIELDS {
-        if !root.contains_key(*field) {
+    for field in TOP_LEVEL_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| *field != "parameterHistory")
+    {
+        if !root.contains_key(field) {
             return Err(format!("本地状态缺少顶层字段 {field}"));
         }
     }
+    root.entry("parameterHistory".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
     validate_host_records(root)?;
     for (field, maximum) in [
         ("scripts", 2000),
         ("commands", 2000),
         ("sshKeys", 500),
         ("commandHistory", 10_000),
+        ("parameterHistory", 10_000),
         ("connectionHistory", 10_000),
     ] {
         ensure_array(root.get(field).expect("required field"), field, maximum)?;
@@ -1285,6 +1303,7 @@ fn command_history_objects(
         if local_id.is_empty()
             || local_id.len() > 128
             || local_id.starts_with(PATH_HISTORY_LOCAL_KEY_PREFIX)
+            || local_id.starts_with(PARAMETER_HISTORY_LOCAL_KEY_PREFIX)
             || local_id.chars().any(char::is_control)
         {
             continue;
@@ -1427,6 +1446,116 @@ fn path_history_sync_fields(
     validate_path_history_projection_fields(&fields)
         .is_ok()
         .then_some(fields)
+}
+
+fn command_parameter_definitions(
+    value: &Value,
+) -> Result<BTreeMap<(String, String), bool>, String> {
+    let root = ensure_object(value, "root")?;
+    let commands = ensure_array(
+        root.get("commands")
+            .ok_or_else(|| "本地状态缺少 commands".to_string())?,
+        "commands",
+        2_000,
+    )?;
+    let mut definitions = BTreeMap::new();
+    for command in commands.iter().filter_map(Value::as_object) {
+        let Some(command_id) = command.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if command_id.is_empty()
+            || command_id.len() > 128
+            || command_id.chars().any(char::is_control)
+        {
+            continue;
+        }
+        let Some(parameters) = command.get("parameters") else {
+            continue;
+        };
+        for parameter in ensure_array(parameters, "command parameters", 64)? {
+            let Some(parameter) = parameter.as_object() else {
+                continue;
+            };
+            let Some(name) = parameter.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+                continue;
+            }
+            let sensitive = match parameter.get("sensitive") {
+                None | Some(Value::Bool(false)) => false,
+                Some(Value::Bool(true)) | Some(_) => true,
+            };
+            let key = (command_id.to_string(), name.to_string());
+            if definitions.insert(key, sensitive).is_some() {
+                return Err("本地命令参数定义重复".to_string());
+            }
+        }
+    }
+    Ok(definitions)
+}
+
+fn parameter_history_objects(
+    value: Option<&Value>,
+) -> Result<BTreeMap<String, serde_json::Map<String, Value>>, String> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let root = ensure_object(value, "root")?;
+    let Some(history) = root.get("parameterHistory") else {
+        return Ok(BTreeMap::new());
+    };
+    let history = ensure_array(history, "parameterHistory", 10_000)?;
+    let mut result = BTreeMap::new();
+    for item in history.iter().filter_map(Value::as_object) {
+        let Some(local_id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if local_id.is_empty() || local_id.len() > 128 || local_id.chars().any(char::is_control)
+        {
+            continue;
+        }
+        let storage_key = format!("{PARAMETER_HISTORY_LOCAL_KEY_PREFIX}{local_id}");
+        if result.insert(storage_key, item.clone()).is_some() {
+            return Err("本地参数历史包含重复 ID".to_string());
+        }
+    }
+    Ok(result)
+}
+
+fn parameter_history_sync_fields(
+    item: &serde_json::Map<String, Value>,
+    definitions: &BTreeMap<(String, String), bool>,
+) -> Option<BTreeMap<String, FieldValue>> {
+    let text = |field: &str| item.get(field).and_then(Value::as_str);
+    let command_id = text("commandId")?;
+    let parameter_name = text("parameterName")?;
+    if definitions
+        .get(&(command_id.to_string(), parameter_name.to_string()))
+        .copied()?
+    {
+        return None;
+    }
+    let fields = BTreeMap::from([
+        (
+            "commandId".to_string(),
+            FieldValue::Text(command_id.to_string()),
+        ),
+        (
+            "createdAt".to_string(),
+            FieldValue::Text(text("createdAt")?.to_string()),
+        ),
+        ("kind".to_string(), FieldValue::Text("argument".to_string())),
+        (
+            "parameterName".to_string(),
+            FieldValue::Text(parameter_name.to_string()),
+        ),
+        (
+            "value".to_string(),
+            FieldValue::Text(text("value")?.to_string()),
+        ),
+    ]);
+    entity_fields_are_syncable(&EntityKind::History, &fields).then_some(fields)
 }
 
 fn queue_command_history_sync_changes(
@@ -1654,6 +1783,122 @@ fn queue_path_history_sync_changes(
                     params![entity_id],
                 )
                 .map_err(|error| format!("无法删除路径历史同步状态: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn queue_parameter_history_sync_changes(
+    transaction: &Transaction<'_>,
+    previous: Option<&Value>,
+    next: &Value,
+    revision: u64,
+    now: i64,
+) -> Result<(), String> {
+    let previous_history = parameter_history_objects(previous)?;
+    let next_history = parameter_history_objects(Some(next))?;
+    let previous_definitions = previous
+        .map(command_parameter_definitions)
+        .transpose()?
+        .unwrap_or_default();
+    let next_definitions = command_parameter_definitions(next)?;
+    let local_ids = previous_history
+        .keys()
+        .chain(next_history.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let entity_ids = ensure_history_entity_ids(transaction, local_ids)?;
+    let mut changes = Vec::new();
+    for (local_id, item) in &next_history {
+        let Some(fields) = parameter_history_sync_fields(item, &next_definitions) else {
+            continue;
+        };
+        let entity_id = &entity_ids[local_id];
+        let content_hash = sync_fields_hash(&fields)?;
+        let queued_hash: Option<String> = transaction
+            .query_row(
+                "SELECT content_hash FROM app_sync_history_state WHERE entity_id = ?1",
+                params![entity_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取参数历史同步状态: {error}"))?;
+        if queued_hash.as_deref() == Some(content_hash.as_str()) {
+            continue;
+        }
+        changes.push((
+            entity_id.clone(),
+            "patch",
+            Some(
+                serde_json::to_string(&fields)
+                    .map_err(|error| format!("无法编码脱敏参数历史变更: {error}"))?,
+            ),
+            Some(content_hash),
+        ));
+    }
+    for (local_id, item) in &previous_history {
+        let entity_id = &entity_ids[local_id];
+        let was_synced: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM app_sync_history_state WHERE entity_id = ?1)",
+                params![entity_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("无法读取参数历史删除状态: {error}"))?;
+        let remains_syncable = next_history
+            .get(local_id)
+            .and_then(|next| parameter_history_sync_fields(next, &next_definitions))
+            .is_some();
+        let was_syncable = parameter_history_sync_fields(item, &previous_definitions).is_some();
+        if was_synced && was_syncable && !remains_syncable {
+            changes.push((entity_id.clone(), "delete", None, None));
+        }
+    }
+    let pending: i64 = transaction
+        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+        .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
+    let available = MAX_PENDING_SYNC_CHANGES.saturating_sub(pending).max(0) as usize;
+    if changes.len() > available {
+        if previous.is_some() {
+            return Err("AppState 同步 changefeed 已达到 10000 项上限；请先完成同步".to_string());
+        }
+        changes.truncate(available);
+    }
+    let revision = i64::try_from(revision)
+        .map_err(|_| "AppState 同步 revision 超过 SQLite INTEGER".to_string())?;
+    for (entity_id, kind, fields_json, content_hash) in changes {
+        transaction
+            .execute(
+                "INSERT INTO app_sync_changes(
+                    operation_id, entity_id, mutation_kind, fields_json, state_revision,
+                    created_at_ms, entity_kind
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'history')",
+                params![
+                    Uuid::new_v4().to_string(),
+                    entity_id,
+                    kind,
+                    fields_json,
+                    revision,
+                    now
+                ],
+            )
+            .map_err(|error| format!("无法写入 AppState 参数历史同步 changefeed: {error}"))?;
+        if let Some(content_hash) = content_hash {
+            transaction
+                .execute(
+                    "INSERT INTO app_sync_history_state(entity_id, content_hash)
+                     VALUES (?1, ?2)
+                     ON CONFLICT(entity_id) DO UPDATE SET content_hash = excluded.content_hash",
+                    params![entity_id, content_hash],
+                )
+                .map_err(|error| format!("无法记录参数历史同步状态: {error}"))?;
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM app_sync_history_state WHERE entity_id = ?1",
+                    params![entity_id],
+                )
+                .map_err(|error| format!("无法删除参数历史同步状态: {error}"))?;
         }
     }
     Ok(())
@@ -2049,6 +2294,27 @@ fn validate_path_history_projection_fields(
     Ok(())
 }
 
+fn validate_parameter_history_projection_fields(
+    fields: &BTreeMap<String, FieldValue>,
+) -> Result<(), String> {
+    let matches_shape = fields.len() == 5
+        && fields.keys().all(|field| {
+            matches!(
+                field.as_str(),
+                "kind" | "value" | "commandId" | "parameterName" | "createdAt"
+            )
+        });
+    let kind_matches =
+        matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "argument");
+    if !matches_shape
+        || !kind_matches
+        || !entity_fields_are_syncable(&EntityKind::History, fields)
+    {
+        return Err("远端参数历史同步投影字段未通过协议验证".to_string());
+    }
+    Ok(())
+}
+
 fn validate_history_projection_fields(fields: &BTreeMap<String, FieldValue>) -> Result<(), String> {
     match fields.get("kind") {
         Some(FieldValue::Text(value)) if value == "command" => {
@@ -2056,6 +2322,9 @@ fn validate_history_projection_fields(fields: &BTreeMap<String, FieldValue>) -> 
         }
         Some(FieldValue::Text(value)) if value == "path" => {
             validate_path_history_projection_fields(fields)
+        }
+        Some(FieldValue::Text(value)) if value == "argument" => {
+            validate_parameter_history_projection_fields(fields)
         }
         _ => Err("远端历史同步投影 kind 无效".to_string()),
     }
@@ -2432,6 +2701,7 @@ impl AppStore {
         queue_setting_sync_changes(&transaction, None, &state, 1, now)?;
         queue_command_history_sync_changes(&transaction, None, &state, 1, now)?;
         queue_path_history_sync_changes(&transaction, None, &state, 1, now)?;
+        queue_parameter_history_sync_changes(&transaction, None, &state, 1, now)?;
         insert_event(
             &transaction,
             "legacy-local-storage-imported",
@@ -2562,6 +2832,13 @@ impl AppStore {
             now,
         )?;
         queue_path_history_sync_changes(
+            &transaction,
+            previous_value.as_ref(),
+            &next_value,
+            next_revision,
+            now,
+        )?;
+        queue_parameter_history_sync_changes(
             &transaction,
             previous_value.as_ref(),
             &next_value,
@@ -3498,10 +3775,7 @@ impl AppStore {
             if merge_revision < applied_revision {
                 return Err("AppState 历史同步投影 revision 回退".to_string());
             }
-            if merge_revision == applied_revision {
-                if projection_hash == applied_hash {
-                    return Ok(ProjectionOutcome::Unchanged);
-                }
+            if merge_revision == applied_revision && projection_hash != applied_hash {
                 return Err("相同 AppState 历史同步投影 revision 的内容不同".to_string());
             }
         }
@@ -3573,7 +3847,25 @@ impl AppStore {
                     .push(Value::Object(item.clone()));
             }
         }
+        let parameter_definitions = command_parameter_definitions(&current_value)?;
+        let local_parameters = parameter_history_objects(Some(&current_value))?;
+        let preserved_parameter_ids = local_parameters
+            .iter()
+            .filter(|(_, item)| {
+                parameter_history_sync_fields(item, &parameter_definitions).is_none()
+            })
+            .map(|(storage_key, _)| storage_key.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut preserved_parameters = local_parameters
+            .values()
+            .filter(|item| {
+                parameter_history_sync_fields(item, &parameter_definitions).is_none()
+            })
+            .cloned()
+            .map(Value::Object)
+            .collect::<Vec<_>>();
         let mut projected_commands = Vec::new();
+        let mut projected_parameters = Vec::new();
         let mut projected_hashes = Vec::new();
         for item in projection {
             let Some(fields) = &item.fields else {
@@ -3581,25 +3873,35 @@ impl AppStore {
             };
             let content_hash = sync_fields_hash(fields)?;
             projected_hashes.push((item.entity_id.as_str(), content_hash));
-            let host_entity_id = match fields.get("hostId") {
-                Some(FieldValue::Text(value)) => value,
-                _ => return Err("远端命令历史同步投影缺少 hostId".to_string()),
-            };
-            let Some(local_host_id) = host_local_by_entity.get(host_entity_id) else {
-                continue;
-            };
-            if !active_host_ids.contains(local_host_id.as_str()) {
-                continue;
-            }
             let history_kind = match fields.get("kind") {
                 Some(FieldValue::Text(value)) => value.as_str(),
                 _ => return Err("远端历史同步投影缺少 kind".to_string()),
+            };
+            let local_host_id = if history_kind == "command" || history_kind == "path" {
+                let host_entity_id = match fields.get("hostId") {
+                    Some(FieldValue::Text(value)) => value,
+                    _ => return Err("远端命令或路径历史同步投影缺少 hostId".to_string()),
+                };
+                let Some(local_host_id) = host_local_by_entity.get(host_entity_id) else {
+                    continue;
+                };
+                if !active_host_ids.contains(local_host_id.as_str()) {
+                    continue;
+                }
+                Some(local_host_id)
+            } else {
+                None
             };
             let local_id = if let Some(local_id) = history_local_by_entity.get(&item.entity_id) {
                 local_id.clone()
             } else {
                 let local_id = if history_kind == "path" {
-                    path_history_storage_key(local_host_id, &item.entity_id)
+                    path_history_storage_key(
+                        local_host_id.expect("path history resolved host"),
+                        &item.entity_id,
+                    )
+                } else if history_kind == "argument" {
+                    format!("{PARAMETER_HISTORY_LOCAL_KEY_PREFIX}{}", item.entity_id)
                 } else {
                     item.entity_id.clone()
                 };
@@ -3621,6 +3923,12 @@ impl AppStore {
                 _ => return Err("远端历史同步投影缺少 createdAt".to_string()),
             };
             if history_kind == "command" {
+                let local_host_id = local_host_id.expect("command history resolved host");
+                if local_id.starts_with(PATH_HISTORY_LOCAL_KEY_PREFIX)
+                    || local_id.starts_with(PARAMETER_HISTORY_LOCAL_KEY_PREFIX)
+                {
+                    return Err("远端命令历史身份映射 kind 不匹配".to_string());
+                }
                 if preserved_command_ids.contains(local_id.as_str()) {
                     continue;
                 }
@@ -3636,6 +3944,7 @@ impl AppStore {
                     "createdAt": created_at,
                 }));
             } else if history_kind == "path" {
+                let local_host_id = local_host_id.expect("path history resolved host");
                 if preserved_path_ids.contains(local_id.as_str()) {
                     continue;
                 }
@@ -3651,6 +3960,34 @@ impl AppStore {
                         "path": value,
                         "createdAt": created_at,
                     }));
+            } else if history_kind == "argument" {
+                if preserved_parameter_ids.contains(local_id.as_str()) {
+                    continue;
+                }
+                let parameter_local_id = local_id
+                    .strip_prefix(PARAMETER_HISTORY_LOCAL_KEY_PREFIX)
+                    .ok_or_else(|| "远端参数历史身份映射 kind 不匹配".to_string())?;
+                let command_id = match fields.get("commandId") {
+                    Some(FieldValue::Text(value)) => value,
+                    _ => return Err("远端参数历史同步投影缺少 commandId".to_string()),
+                };
+                let parameter_name = match fields.get("parameterName") {
+                    Some(FieldValue::Text(value)) => value,
+                    _ => return Err("远端参数历史同步投影缺少 parameterName".to_string()),
+                };
+                if parameter_definitions
+                    .get(&(command_id.clone(), parameter_name.clone()))
+                    .is_none_or(|sensitive| *sensitive)
+                {
+                    continue;
+                }
+                projected_parameters.push(serde_json::json!({
+                    "id": parameter_local_id,
+                    "commandId": command_id,
+                    "parameterName": parameter_name,
+                    "value": value,
+                    "createdAt": created_at,
+                }));
             } else {
                 return Err("远端历史同步投影 kind 无效".to_string());
             }
@@ -3660,6 +3997,12 @@ impl AppStore {
         projected_commands.append(&mut preserved_commands);
         if projected_commands.len() > 10_000 {
             return Err("远端命令历史同步投影超过 10000 项".to_string());
+        }
+        projected_parameters
+            .sort_by(|left, right| right["createdAt"].as_str().cmp(&left["createdAt"].as_str()));
+        projected_parameters.append(&mut preserved_parameters);
+        if projected_parameters.len() > 10_000 {
+            return Err("远端参数历史同步投影超过 10000 项".to_string());
         }
         let mut path_history = serde_json::Map::new();
         for (host_id, mut entries) in projected_paths {
@@ -3676,6 +4019,10 @@ impl AppStore {
         root.insert(
             "commandHistory".to_string(),
             Value::Array(projected_commands),
+        );
+        root.insert(
+            "parameterHistory".to_string(),
+            Value::Array(projected_parameters),
         );
         root.insert("pathHistory".to_string(), Value::Object(path_history));
         validate_state_json(
@@ -3891,6 +4238,13 @@ impl AppStore {
                 revision.max(1) as u64,
                 now,
             )?;
+            queue_parameter_history_sync_changes(
+                &transaction,
+                None,
+                &state,
+                revision.max(1) as u64,
+                now,
+            )?;
         }
         transaction
             .commit()
@@ -3959,7 +4313,7 @@ mod tests {
                 "credentialRef": "ssh-public-reference"
             }],
             "deletedHosts": [], "scripts": [], "commands": [], "sshKeys": [],
-            "commandHistory": [], "connectionHistory": [], "pathHistory": {},
+            "commandHistory": [], "parameterHistory": [], "connectionHistory": [], "pathHistory": {},
             "sync": {"enabled": false, "provider": "webdav", "endpoint": "", "remotePath": "/vpshell", "username": "", "totpEnabled": false, "syncSecrets": false},
             "wallpaper": {"source": "none", "value": "", "opacity": 0.2},
             "terminalAppearance": {"fontFamily": "Cascadia Code", "fontSize": 13, "lineHeight": 1.25},
@@ -4908,6 +5262,184 @@ mod tests {
                 )
                 .is_err()
         );
+        assert_eq!(store.snapshot().unwrap().revision, before_invalid.revision);
+    }
+
+    #[test]
+    fn parameter_history_requires_declared_public_parameters_and_projects_tombstones() {
+        let root = TempDir::new("parameter-history-sync");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["commands"] = serde_json::json!([{
+            "id": "command-service-logs",
+            "title": "logs",
+            "parameters": [
+                { "name": "SERVICE", "label": "service" },
+                { "name": "PASSWORD", "label": "password", "sensitive": true },
+                { "name": "REGION", "label": "region", "sensitive": true }
+            ]
+        }]);
+        state["parameterHistory"] = serde_json::json!([
+            {
+                "id": "parameter-safe",
+                "commandId": "command-service-logs",
+                "parameterName": "SERVICE",
+                "value": "nginx",
+                "createdAt": "2026-08-19T00:10:00.000Z"
+            },
+            {
+                "id": "parameter-sensitive-definition",
+                "commandId": "command-service-logs",
+                "parameterName": "PASSWORD",
+                "value": "not-synced",
+                "createdAt": "2026-08-19T00:09:00.000Z"
+            },
+            {
+                "id": "parameter-sensitive-value",
+                "commandId": "command-service-logs",
+                "parameterName": "SERVICE",
+                "value": "token=secret",
+                "createdAt": "2026-08-19T00:08:00.000Z"
+            },
+            {
+                "id": "parameter-unknown-command",
+                "commandId": "missing-command",
+                "parameterName": "SERVICE",
+                "value": "local-only",
+                "createdAt": "2026-08-19T00:07:00.000Z"
+            }
+        ]);
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        store.bind_sync_vault(&vault_id).unwrap();
+        let changes = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 2);
+        let history = changes
+            .iter()
+            .find(|change| change.entity_kind == EntityKind::History)
+            .expect("safe parameter history change");
+        let history_entity_id = history.entity_id.clone();
+        let LocalEntityMutation::Patch(fields) = &history.mutation else {
+            panic!("parameter history must be patch");
+        };
+        assert_eq!(fields["kind"], FieldValue::Text("argument".into()));
+        assert_eq!(fields["parameterName"], FieldValue::Text("SERVICE".into()));
+        let fields = fields.clone();
+        for change in changes {
+            store
+                .acknowledge_entity_sync_change(&vault_id, &change.operation_id)
+                .unwrap();
+        }
+        let mut remote_fields = fields.clone();
+        remote_fields.insert("value".to_string(), FieldValue::Text("sshd".into()));
+        let mut remote_region_fields = fields.clone();
+        remote_region_fields.insert(
+            "parameterName".to_string(),
+            FieldValue::Text("REGION".into()),
+        );
+        remote_region_fields.insert(
+            "value".to_string(),
+            FieldValue::Text("eu-west".into()),
+        );
+        let remote_region_id = Uuid::new_v4().to_string();
+        let projection = vec![
+            MergedEntityProjection {
+                entity_id: history_entity_id.clone(),
+                fields: Some(remote_fields),
+            },
+            MergedEntityProjection {
+                entity_id: remote_region_id,
+                fields: Some(remote_region_fields),
+            },
+        ];
+        assert_eq!(
+            store
+                .apply_remote_history_projection(
+                    &vault_id,
+                    1,
+                    &projection,
+                    10_000,
+                )
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let snapshot = store.snapshot().unwrap();
+        let projected: Value =
+            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+        assert_eq!(projected["parameterHistory"].as_array().unwrap().len(), 4);
+        assert!(projected["parameterHistory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["value"] == "sshd"));
+
+        let mut public_template = projected;
+        public_template["commands"][0]["parameters"][2]["sensitive"] = Value::Bool(false);
+        store
+            .save(SaveAppStateRequest {
+                state_json: public_template.to_string(),
+                expected_revision: snapshot.revision,
+            })
+            .unwrap();
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+        assert_eq!(
+            store
+                .apply_remote_history_projection(&vault_id, 1, &projection, 10_001)
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let snapshot = store.snapshot().unwrap();
+        let projected: Value =
+            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+        assert!(projected["parameterHistory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["parameterName"] == "REGION" && item["value"] == "eu-west"));
+
+        let mut cleared = projected;
+        cleared["parameterHistory"] = Value::Array(
+            cleared["parameterHistory"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["id"] != "parameter-safe")
+                .cloned()
+                .collect(),
+        );
+        store
+            .save(SaveAppStateRequest {
+                state_json: cleared.to_string(),
+                expected_revision: snapshot.revision,
+            })
+            .unwrap();
+        let deletion = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(deletion.len(), 1);
+        assert_eq!(deletion[0].entity_id, history_entity_id);
+        assert_eq!(deletion[0].mutation, LocalEntityMutation::Delete);
+
+        let mut invalid_fields = fields;
+        invalid_fields.insert(
+            "parameterName".to_string(),
+            FieldValue::Text("API_TOKEN".into()),
+        );
+        let before_invalid = store.snapshot().unwrap();
+        assert!(store
+            .apply_remote_history_projection(
+                &vault_id,
+                2,
+                &[MergedEntityProjection {
+                    entity_id: history_entity_id,
+                    fields: Some(invalid_fields),
+                }],
+                    10_002,
+            )
+            .is_err());
         assert_eq!(store.snapshot().unwrap().revision, before_invalid.revision);
     }
 
@@ -6075,6 +6607,16 @@ mod tests {
         let mut histories: Value = serde_json::from_str(&fixture()).expect("fixture JSON");
         histories["commandHistory"] = Value::Array(vec![Value::Null; 10_001]);
         assert!(validate_state_json(&histories.to_string()).is_err());
+        histories["commandHistory"] = Value::Array(Vec::new());
+        histories["parameterHistory"] = Value::Array(vec![Value::Null; 10_001]);
+        assert!(validate_state_json(&histories.to_string()).is_err());
+
+        let mut legacy: Value = serde_json::from_str(&fixture()).expect("fixture JSON");
+        legacy.as_object_mut().unwrap().remove("parameterHistory");
+        assert_eq!(
+            validate_state_json(&legacy.to_string()).unwrap()["parameterHistory"],
+            serde_json::json!([])
+        );
         assert!(validate_state_json(&"x".repeat(MAX_STATE_BYTES + 1)).is_err());
     }
 

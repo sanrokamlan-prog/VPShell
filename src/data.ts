@@ -3,6 +3,7 @@ import type {
   ApplicationSettings,
   CommandRecipe,
   HostProfile,
+  ParameterHistoryItem,
   PathHistoryItem,
   ScriptRecipe,
 } from "./types";
@@ -31,6 +32,36 @@ function normalizePathHistoryEntries(entries: unknown, scope: string): PathHisto
       || typeof candidate.createdAt !== "string") return [];
     return [{ id: candidate.id, path: candidate.path, createdAt: candidate.createdAt }];
   });
+}
+
+function normalizeParameterHistoryEntries(entries: unknown): ParameterHistoryItem[] {
+  return (Array.isArray(entries) ? entries : []).flatMap((entry): ParameterHistoryItem[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as Partial<ParameterHistoryItem>;
+    if (typeof candidate.id !== "string"
+      || candidate.id.length === 0
+      || candidate.id.length > 128
+      || typeof candidate.commandId !== "string"
+      || candidate.commandId.length === 0
+      || candidate.commandId.length > 128
+      || typeof candidate.parameterName !== "string"
+      || candidate.parameterName.length === 0
+      || candidate.parameterName.length > 128
+      || typeof candidate.value !== "string"
+      || candidate.value.length === 0
+      || candidate.value.length > 4096
+      || typeof candidate.createdAt !== "string"
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(candidate.createdAt)
+      || [candidate.id, candidate.commandId, candidate.parameterName, candidate.value]
+        .some((value) => /[\0-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(value))) return [];
+    return [{
+      id: candidate.id,
+      commandId: candidate.commandId,
+      parameterName: candidate.parameterName,
+      value: candidate.value,
+      createdAt: candidate.createdAt,
+    }];
+  }).slice(0, 10_000);
 }
 
 export const builtInScripts: ScriptRecipe[] = [
@@ -382,6 +413,7 @@ export const initialState: AppState = {
   commands: builtInCommands,
   sshKeys: [],
   commandHistory: [],
+  parameterHistory: [],
   connectionHistory: [],
   pathHistory: {},
   sync: {
@@ -463,6 +495,7 @@ export function migratePersistedAppState(value: AppState): AppState {
     hosts,
     deletedHosts,
     commandHistory: (value.commandHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
+    parameterHistory: normalizeParameterHistoryEntries(value.parameterHistory),
     connectionHistory: (value.connectionHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
     pathHistory,
     settings,

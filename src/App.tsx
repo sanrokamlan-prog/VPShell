@@ -71,6 +71,7 @@ import {
 } from "./androidSecurity";
 import type {
   AppState,
+  CommandParameter,
   CommandRecipe,
   EnvironmentKind,
   HostProfile,
@@ -85,6 +86,17 @@ type SidebarView = "hosts" | "commands" | "scripts" | "history";
 type DialogKind = "host" | "host-key" | "sync" | "wallpaper" | "settings" | "guide" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | "local-forward" | null;
 
 const RECYCLE_BIN_DAYS = 30;
+const MAX_PARAMETER_HISTORY = 10_000;
+
+function isSensitiveParameterName(value: string) {
+  const compact = value.toLowerCase().replace(/[-_ ]/g, "");
+  return ["password", "passphrase", "token", "secret", "privatekey", "credential", "authorization", "apikey"]
+    .some((needle) => compact.includes(needle));
+}
+
+function isSensitiveCommandParameter(parameter: CommandParameter) {
+  return parameter.sensitive === true || isSensitiveParameterName(parameter.name);
+}
 
 interface IntentSuggestion {
   kind: "command" | "script";
@@ -1768,7 +1780,14 @@ function App() {
       return;
     }
     setSelectedCommand(command);
-    setCommandParameters(Object.fromEntries((command.parameters ?? []).map((parameter) => [parameter.name, parameter.defaultValue ?? ""])));
+    setCommandParameters(Object.fromEntries((command.parameters ?? []).map((parameter) => {
+      const recent = isSensitiveCommandParameter(parameter)
+        ? undefined
+        : appState.parameterHistory.find((item) =>
+            item.commandId === command.id && item.parameterName === parameter.name
+          );
+      return [parameter.name, recent?.value ?? parameter.defaultValue ?? ""];
+    })));
     setDialog("command");
   }
 
@@ -1778,6 +1797,34 @@ function App() {
       value = value.split(`{{${parameter.name}}}`).join(shellQuote(commandParameters[parameter.name]?.trim() ?? ""));
     }
     return value;
+  }
+
+  function rememberCommandParameters(command: CommandRecipe) {
+    const createdAt = new Date().toISOString();
+    const additions = (command.parameters ?? []).flatMap((parameter) => {
+      const value = commandParameters[parameter.name]?.trim() ?? "";
+      if (!value || isSensitiveCommandParameter(parameter)) return [];
+      return [{
+        id: crypto.randomUUID(),
+        commandId: command.id,
+        parameterName: parameter.name,
+        value,
+        createdAt,
+      }];
+    });
+    if (additions.length === 0) return;
+    setAppState((current) => {
+      const replaced = new Set(additions.map((item) => `${item.commandId}\0${item.parameterName}\0${item.value}`));
+      return {
+        ...current,
+        parameterHistory: [
+          ...additions,
+          ...current.parameterHistory.filter((item) =>
+            !replaced.has(`${item.commandId}\0${item.parameterName}\0${item.value}`)
+          ),
+        ].slice(0, MAX_PARAMETER_HISTORY),
+      };
+    });
   }
 
   function chooseIntent(suggestion: IntentSuggestion) {
@@ -3142,7 +3189,11 @@ function App() {
                 className="primary-button"
                 type="button"
                 disabled={!selectedCommand.command || (selectedCommand.parameters ?? []).some((parameter) => parameter.required && !commandParameters[parameter.name]?.trim())}
-                onClick={() => { setCommandInput(materializeCommand(selectedCommand)); setDialog(null); }}
+                onClick={() => {
+                  setCommandInput(materializeCommand(selectedCommand));
+                  rememberCommandParameters(selectedCommand);
+                  setDialog(null);
+                }}
               >
                 <Command size={14} /> 加入命令栏
               </button>
@@ -3156,10 +3207,48 @@ function App() {
           <div className="command-usage"><BookOpenText size={15} /><span>{selectedCommand.usage}</span></div>
           {(selectedCommand.parameters ?? []).length > 0 ? (
             <div className="form-grid command-parameters">
-              {selectedCommand.parameters?.map((parameter) => (
+              {appState.parameterHistory.some((item) => item.commandId === selectedCommand.id) ? (
+                <div className="group-title command-parameter-history-title">
+                  <History size={13} />
+                  <span>参数历史</span>
+                  <button
+                    type="button"
+                    title="清空此命令的参数历史"
+                    aria-label="清空此命令的参数历史"
+                    onClick={() => {
+                      if (!window.confirm("清空此命令的参数历史？")) return;
+                      setAppState((current) => ({
+                        ...current,
+                        parameterHistory: current.parameterHistory.filter((item) => item.commandId !== selectedCommand.id),
+                      }));
+                      setCommandParameters(Object.fromEntries((selectedCommand.parameters ?? []).map((parameter) => [parameter.name, parameter.defaultValue ?? ""])));
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ) : null}
+              {selectedCommand.parameters?.map((parameter, parameterIndex) => (
                 <label className="field span-2" key={parameter.name}>
                   <span>{parameter.label}</span>
-                  <input value={commandParameters[parameter.name] ?? ""} placeholder={parameter.placeholder} required={parameter.required} onChange={(event) => setCommandParameters((current) => ({ ...current, [parameter.name]: event.target.value }))} />
+                  <input
+                    type={isSensitiveCommandParameter(parameter) ? "password" : "text"}
+                    autoComplete="off"
+                    list={isSensitiveCommandParameter(parameter) ? undefined : `command-parameter-history-${parameterIndex}`}
+                    value={commandParameters[parameter.name] ?? ""}
+                    placeholder={parameter.placeholder}
+                    required={parameter.required}
+                    onChange={(event) => setCommandParameters((current) => ({ ...current, [parameter.name]: event.target.value }))}
+                  />
+                  {!isSensitiveCommandParameter(parameter) ? (
+                    <datalist id={`command-parameter-history-${parameterIndex}`}>
+                      {[...new Set(appState.parameterHistory
+                        .filter((item) => item.commandId === selectedCommand.id && item.parameterName === parameter.name)
+                        .map((item) => item.value))]
+                        .slice(0, 20)
+                        .map((value) => <option key={value} value={value} />)}
+                    </datalist>
+                  ) : null}
                 </label>
               ))}
             </div>

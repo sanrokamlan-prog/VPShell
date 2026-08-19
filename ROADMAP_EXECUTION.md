@@ -1,6 +1,6 @@
 # VPShell 路线图执行账本
 
-更新时间：2026-08-18（UTC）
+更新时间：2026-08-19（UTC）
 
 本文件记录 `/root/projects/vpshell/VPShell` 未提交工作树中路线图实现的真实状态。它不是发布说明，也不能替代代码、测试、平台验收或安全审计。
 
@@ -119,10 +119,11 @@
 | 完成 | 桌面 WebDAV 显式 PEM CA：Rust-owned 私有导入/引用/重读、失败清理、真实临时 CA TLS fixture 和 Android 禁权；PR #1 run `32190493641`（`717bb41`）全平台 Actions 全绿 |
 | 完成 | 背景可见度作为第五个固定 setting 实体接入事务 operation、远端投影和防回声；背景图片来源/资产仍保持本机；PR #1 run `32192743308`（`2c80942`）全平台 Actions 全绿 |
 | 完成 | 通过秘密扫描的公开命令历史以稳定 history 实体、事务 operation、tombstone 和远端投影接入；PR #1 run `32196254742`（`531ffe2`）全平台 Actions 全绿 |
-| 进行中 | 通过秘密扫描的公开路径历史以稳定 history 实体、事务 operation、tombstone 和远端投影接入；旧字符串无伪造时间保持本机 |
-| 待实现 | 参数/连接历史、背景图片 blob/其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
+| 完成 | 通过秘密扫描的公开路径历史以稳定 history 实体、事务 operation、tombstone 和远端投影接入；旧字符串无伪造时间保持本机；PR #1 run `32199193127`（`f27ccea`）全平台 Actions 全绿 |
+| 进行中 | 命令模板具名非敏感参数历史使用稳定 history 实体、事务 operation、tombstone 和远端投影接入；敏感/未知字段保持本机 |
+| 待实现 | 连接历史、背景图片 blob/其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、五个既有固定设置实体、桌面持久冲突中心、自动调度及公开命令历史均已通过 Actions；公开路径历史正在实现，参数/连接历史、背景图片 blob/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、五个既有固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径历史均已通过 Actions；非敏感参数历史正在实现，连接历史、背景图片 blob/其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -286,7 +287,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-18 | B9 公开路径历史本机轻量门禁 | `git diff --check`、四份严格 JSON、前端 legacy/回收站迁移和结构化新增/去重/确认清空链路、命令与路径本机映射前缀隔离、path 四字段完整白名单/绝对路径/秘密扫描/时间验证、保存/迁移/恢复 changefeed 与 host→history 投影顺序、AppStore/merge/coordinator 三层聚焦测试静态清单、README/架构/同步/开发/Alpha 测试边界一致性、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区保持 53%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、前端依赖或 SDK；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-18 | B9 公开路径历史首轮 Actions 与格式修复 | 提交 `00cf198` 的 PR #1 run `32198333315` 已全部进入终态：frontend 生产构建及 Android aarch64 debug APK/Gradle unit gate 均 `COMPLETED/SUCCESS`；Ubuntu、Windows、macOS Intel/arm 均只在首个 `cargo fmt --check` 报告 `app_store.rs` 7 处和 `sync_merge.rs` 3 处相同排版差异后失败，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按 Ubuntu job `95906753601` 的完整 runner diff 机械应用全部 10 段格式，不改变行为；等待格式修复提交后的完整矩阵。 |
 | 2026-08-18 | B9 公开路径历史格式修复本机轻量门禁 | `git diff --check`、runner 报告的 10 段精确 rustfmt 形态、四份严格 JSON、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区保持 53%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、依赖或 SDK；四平台 locked fmt/check/test、Linux 真实 fixture、frontend 与 Android 构建交给格式修复提交的 PR #1 Actions。 |
+| 2026-08-19 | B9 公开路径历史双向同步（Actions 完成） | 格式修复提交 `f27ccea` 的 PR #1 run `32199193127` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 OpenSSH/SFTP 与临时 CA fixture及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。 |
+| 2026-08-19 | B9 具名非敏感参数历史双向同步（待 Actions） | AppState 新增最多 10,000 条 `{id,commandId,parameterName,value,createdAt}` 参数历史；命令对话框只在用户加入命令栏时以随机 UUID/真实 UTC 时间记录，按同一命令/字段/值去重，最近值只预填同一 `commandId + parameterName`，并提供确认清空。`CommandParameter.sensitive=true` 或敏感名称在前端不记录；Rust 不信任该过滤，而是再次要求当前命令模板确实声明同名、未标敏的参数，随后用秘密扫描、控制字符/长度和严格时间验证 `kind=argument` 五字段完整 patch。未知模板、敏感定义/名称/值保持本机且不被远端覆盖；额外/缺失/错误类型远端字段整批拒绝。参数历史复用按 kind 前缀隔离的稳定 UUID 映射、内容指纹、事务 changefeed、observed merge、加密 outbox、tombstone 和统一 history 投影水位；远端投影只展示本机仍存在的公开模板字段，按时间排序、防回声并保持最多 10,000 条。聚焦测试覆盖完整协议形状、敏感名称/值/缺字段拒绝、AppStore 模板交叉验证/本机敏感保留/远端更新/清空 tombstone/非法投影回滚，以及真实协调器周期同时上传命令、路径和参数加密 operation。连接历史仍必须改为 Rust-owned 已认证成功事实，不能复用前端连接尝试。 |
+| 2026-08-19 | B9 具名非敏感参数历史本机轻量门禁 | `git diff --check`、package/lock/Tauri/capability 四份严格 JSON、前端 AppState 迁移/有界规范化/敏感名称与显式敏感输入禁记录和禁预填/同命令字段候选/确认清空/全宽布局链路、Rust `argument` 五字段完整白名单/模板交叉验证/明显秘密与敏感名称 fail closed/kind 前缀隔离/稳定映射/事务 changefeed/tombstone/统一投影和同 revision 本机模板重评估、AppStore/merge/coordinator 三层聚焦测试静态清单、README/架构/同步/开发/Alpha 测试边界一致性、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区起止均为 53%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、前端依赖、SDK 或大型构建环境；frontend、四平台 locked fmt/check/test、Linux 真实 fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送公开路径历史格式修复；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后继续参数历史的具名安全模型；连接历史必须以 Rust-owned 已认证成功事实为来源，不把前端连接尝试当作成功记录同步。背景图片 blob 也不在缺少分块、配额、回收和安全安装时宣称完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送具名非敏感参数历史双向同步；下一轮等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复。全绿后继续连接历史，但必须以 Rust-owned 已认证成功事实为来源，不把前端连接尝试当作成功记录同步。背景图片 blob 也不在缺少分块、配额、回收和安全安装时宣称完成。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

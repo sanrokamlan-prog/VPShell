@@ -460,6 +460,10 @@ button.sync-status {
   background: var(--red-soft);
 }
 
+.command-parameter-history-title {
+  grid-column: 1 / -1;
+}
+
 .recent-connections {
   margin-bottom: 8px;
   padding-bottom: 7px;

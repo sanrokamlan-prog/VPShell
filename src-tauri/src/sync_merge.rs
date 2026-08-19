@@ -1306,6 +1306,15 @@ pub(crate) fn entity_fields_are_syncable(
                 && matches!(fields.get("value"), Some(FieldValue::Text(value))
                     if value == "~" || value.starts_with('/') || value.starts_with("~/"))
         }
+        Some(FieldValue::Text(kind)) if kind == "argument" => {
+            fields.len() == 5
+                && fields.keys().all(|field| {
+                    matches!(
+                        field.as_str(),
+                        "kind" | "value" | "commandId" | "parameterName" | "createdAt"
+                    )
+                })
+        }
         _ => false,
     }
 }
@@ -1432,7 +1441,7 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
             Ok(())
         }
         (EntityKind::History, "kind", FieldValue::Text(value))
-            if matches!(value.as_str(), "command" | "path") =>
+            if matches!(value.as_str(), "command" | "path" | "argument") =>
         {
             Ok(())
         }
@@ -1459,6 +1468,14 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
         }
         (EntityKind::History, "createdAt", FieldValue::Text(value))
             if valid_iso_timestamp(value) =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "commandId", FieldValue::Text(value)) if valid_text(value, 128) => {
+            Ok(())
+        }
+        (EntityKind::History, "parameterName", FieldValue::Text(value))
+            if valid_text(value, 128) && !is_secret_name(value) =>
         {
             Ok(())
         }
@@ -1530,7 +1547,13 @@ fn field_allowed(kind: &EntityKind, field: &str) -> bool {
         EntityKind::History => {
             matches!(
                 field,
-                "kind" | "value" | "hostId" | "remotePath" | "createdAt"
+                "kind"
+                    | "value"
+                    | "hostId"
+                    | "remotePath"
+                    | "commandId"
+                    | "parameterName"
+                    | "createdAt"
             )
         }
     }
@@ -2387,6 +2410,51 @@ mod tests {
         assert!(!entity_fields_are_syncable(&EntityKind::History, &secret,));
         let mut incomplete = fields;
         incomplete.remove("createdAt");
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &incomplete,
+        ));
+    }
+
+    #[test]
+    fn argument_history_entities_require_named_public_values() {
+        let fields = BTreeMap::from([
+            (
+                "commandId".to_string(),
+                FieldValue::Text("command-service-logs".into()),
+            ),
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-19T00:10:00.000Z".into()),
+            ),
+            ("kind".to_string(), FieldValue::Text("argument".into())),
+            (
+                "parameterName".to_string(),
+                FieldValue::Text("SERVICE".into()),
+            ),
+            ("value".to_string(), FieldValue::Text("nginx".into())),
+        ]);
+        assert!(entity_fields_are_syncable(&EntityKind::History, &fields));
+        let mut sensitive_name = fields.clone();
+        sensitive_name.insert(
+            "parameterName".to_string(),
+            FieldValue::Text("API_TOKEN".into()),
+        );
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &sensitive_name,
+        ));
+        let mut sensitive_value = fields.clone();
+        sensitive_value.insert(
+            "value".to_string(),
+            FieldValue::Text("token=secret".into()),
+        );
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &sensitive_value,
+        ));
+        let mut incomplete = fields;
+        incomplete.remove("commandId");
         assert!(!entity_fields_are_syncable(
             &EntityKind::History,
             &incomplete,
