@@ -96,8 +96,7 @@ pub(crate) fn store_s3_credential(request: StoreS3CredentialRequest) -> Result<S
         session_token: credentials.session_token().map(str::to_string),
     };
     let encoded = Zeroizing::new(
-        serde_json::to_string(&stored)
-            .map_err(|_| "无法编码 S3 系统凭据".to_string())?,
+        serde_json::to_string(&stored).map_err(|_| "无法编码 S3 系统凭据".to_string())?,
     );
     stored.access_key_id.zeroize();
     stored.secret_access_key.zeroize();
@@ -198,10 +197,14 @@ fn validate_s3_credentials(
 ) -> Result<(), String> {
     if access_key_id.is_empty()
         || access_key_id.len() > 128
-        || !access_key_id.bytes().all(|value| value.is_ascii_alphanumeric())
+        || !access_key_id
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric())
         || secret_access_key.is_empty()
         || secret_access_key.len() > 1_024
-        || !secret_access_key.bytes().all(|value| value.is_ascii_graphic())
+        || !secret_access_key
+            .bytes()
+            .all(|value| value.is_ascii_graphic())
         || session_token.is_some_and(|token| {
             token.is_empty()
                 || token.len() > 4_096
@@ -246,10 +249,13 @@ mod tests {
         let reference = format!("{S3_CREDENTIAL_PREFIX}{}", uuid::Uuid::new_v4());
         assert!(validate_s3_credential_reference(&reference).is_ok());
         assert!(validate_sync_provider_credential_reference(&reference).is_ok());
-        assert!(validate_sync_provider_credential_reference(
-            &format!("{WEBDAV_CREDENTIAL_PREFIX}{}", uuid::Uuid::new_v4())
-        )
-        .is_ok());
+        assert!(
+            validate_sync_provider_credential_reference(&format!(
+                "{WEBDAV_CREDENTIAL_PREFIX}{}",
+                uuid::Uuid::new_v4()
+            ))
+            .is_ok()
+        );
         for invalid in [
             "sync-s3-not-a-uuid",
             "sync-s3-00000000-0000-0000-0000-000000000000/escape",

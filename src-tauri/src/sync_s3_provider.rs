@@ -49,9 +49,8 @@ impl ReqwestS3ObjectTransport {
         trusted_ca_pem: Option<&[u8]>,
     ) -> ProviderResult<Self> {
         config.validate()?;
-        let endpoint = Url::parse(&config.endpoint).map_err(|_| {
-            provider_error(ProviderErrorCode::InvalidInput, "S3 endpoint URL 无效")
-        })?;
+        let endpoint = Url::parse(&config.endpoint)
+            .map_err(|_| provider_error(ProviderErrorCode::InvalidInput, "S3 endpoint URL 无效"))?;
         if endpoint.path() != "/" {
             return Err(provider_error(
                 ProviderErrorCode::InvalidInput,
@@ -340,10 +339,9 @@ impl ObjectTransport for ReqwestS3ObjectTransport {
         let response = self.execute(request, cancellation)?;
         match response.status() {
             StatusCode::OK => self.read_response(response, MAX_OBJECT_BYTES, cancellation),
-            StatusCode::NOT_FOUND => Err(provider_error(
-                ProviderErrorCode::NotFound,
-                "S3 对象不存在",
-            )),
+            StatusCode::NOT_FOUND => {
+                Err(provider_error(ProviderErrorCode::NotFound, "S3 对象不存在"))
+            }
             status => Err(status_error(status, "S3 get")),
         }
     }
@@ -375,9 +373,7 @@ impl ObjectTransport for ReqwestS3ObjectTransport {
             StatusCode::OK | StatusCode::CREATED | StatusCode::NO_CONTENT => {
                 Ok(ConditionalCreateResult::Created)
             }
-            StatusCode::PRECONDITION_FAILED => {
-                Ok(ConditionalCreateResult::AlreadyExists)
-            }
+            StatusCode::PRECONDITION_FAILED => Ok(ConditionalCreateResult::AlreadyExists),
             StatusCode::CONFLICT => Err(provider_error(
                 ProviderErrorCode::Unavailable,
                 "S3 条件写入发生可重试竞态",
@@ -405,9 +401,8 @@ fn sign_v4(
 ) -> ProviderResult<V4Signature> {
     let (date, amz_date) = aws_timestamp(now)?;
     let host = canonical_host(url)?;
-    let mut canonical_headers = format!(
-        "host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
-    );
+    let mut canonical_headers =
+        format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
     let mut signed_headers = "host;x-amz-content-sha256;x-amz-date".to_string();
     if let Some(token) = credentials.session_token() {
         canonical_headers.push_str(&format!("x-amz-security-token:{}\n", trim_header(token)?));
@@ -441,9 +436,9 @@ fn sign_v4(
 }
 
 fn canonical_host(url: &Url) -> ProviderResult<String> {
-    let host = url.host_str().ok_or_else(|| {
-        provider_error(ProviderErrorCode::InvalidInput, "S3 请求 URL 缺少 host")
-    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| provider_error(ProviderErrorCode::InvalidInput, "S3 请求 URL 缺少 host"))?;
     let host = if host.contains(':') {
         format!("[{host}]")
     } else {
@@ -511,9 +506,9 @@ fn aws_uri_encode(bytes: &[u8]) -> String {
 }
 
 fn aws_timestamp(now: SystemTime) -> ProviderResult<(String, String)> {
-    let seconds = now.duration_since(UNIX_EPOCH).map_err(|_| {
-        provider_error(ProviderErrorCode::Unavailable, "系统时间早于 Unix epoch")
-    })?;
+    let seconds = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| provider_error(ProviderErrorCode::Unavailable, "系统时间早于 Unix epoch"))?;
     let total = seconds.as_secs();
     let days = (total / 86_400) as i64;
     let seconds_of_day = total % 86_400;
@@ -539,8 +534,7 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let day_of_era = z - era * 146_097;
     let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096)
-            / 365;
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let mut year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
@@ -551,9 +545,8 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 }
 
 fn hmac_sha256(key: &[u8], bytes: &[u8]) -> ProviderResult<Vec<u8>> {
-    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| {
-        provider_error(ProviderErrorCode::InvalidInput, "S3 签名密钥无效")
-    })?;
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| provider_error(ProviderErrorCode::InvalidInput, "S3 签名密钥无效"))?;
     mac.update(bytes);
     Ok(mac.finalize().into_bytes().to_vec())
 }
@@ -581,9 +574,9 @@ fn read_bounded(
     let mut chunk = [0u8; MAX_RESPONSE_CHUNK];
     loop {
         cancellation.check()?;
-        let read = reader.read(&mut chunk).map_err(|_| {
-            provider_error(ProviderErrorCode::Unavailable, "无法读取 S3 响应")
-        })?;
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|_| provider_error(ProviderErrorCode::Unavailable, "无法读取 S3 响应"))?;
         if read == 0 {
             break;
         }
@@ -672,9 +665,10 @@ fn parse_list_objects_v2(xml: &[u8]) -> ProviderResult<S3ListPage> {
     let mut closed_root = false;
     let mut saw_is_truncated = false;
     loop {
-        match reader.read_event_into(&mut buffer).map_err(|_| {
-            provider_error(ProviderErrorCode::Protocol, "S3 list XML 无效")
-        })? {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| provider_error(ProviderErrorCode::Protocol, "S3 list XML 无效"))?
+        {
             Event::Start(event) => {
                 depth += 1;
                 if depth > 16 {
@@ -721,10 +715,7 @@ fn parse_list_objects_v2(xml: &[u8]) -> ProviderResult<S3ListPage> {
                     ListField::Size => {
                         if let Some(object) = &mut current {
                             object.size = value.parse().map_err(|_| {
-                                provider_error(
-                                    ProviderErrorCode::Protocol,
-                                    "S3 对象长度无效",
-                                )
+                                provider_error(ProviderErrorCode::Protocol, "S3 对象长度无效")
                             })?;
                         }
                     }
@@ -778,8 +769,9 @@ fn parse_list_objects_v2(xml: &[u8]) -> ProviderResult<S3ListPage> {
                             ));
                         }
                     }
-                    b"Key" | b"Size" | b"ETag" | b"IsTruncated"
-                    | b"NextContinuationToken" => field = ListField::None,
+                    b"Key" | b"Size" | b"ETag" | b"IsTruncated" | b"NextContinuationToken" => {
+                        field = ListField::None
+                    }
                     _ => {}
                 }
                 if depth == 1 {
@@ -804,7 +796,12 @@ fn parse_list_objects_v2(xml: &[u8]) -> ProviderResult<S3ListPage> {
             "S3 list XML 不完整",
         ));
     }
-    if page.truncated && page.next_continuation_token.as_deref().is_none_or(str::is_empty) {
+    if page.truncated
+        && page
+            .next_continuation_token
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
         return Err(provider_error(
             ProviderErrorCode::Protocol,
             "S3 截断列表缺少 continuation token",
@@ -950,10 +947,8 @@ mod tests {
     #[test]
     fn upload_reader_stops_after_cancellation() {
         let cancellation = ProviderCancellation::default();
-        let mut upload = CancellableUpload::new(
-            b"secret-free-fixture".to_vec(),
-            cancellation.clone(),
-        );
+        let mut upload =
+            CancellableUpload::new(b"secret-free-fixture".to_vec(), cancellation.clone());
         cancellation.cancel();
         let mut buffer = [0u8; 8];
         assert_eq!(
