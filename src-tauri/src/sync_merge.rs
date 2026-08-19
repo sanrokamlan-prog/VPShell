@@ -1454,8 +1454,7 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
             "terminalTheme" | "fontFamily" | "locale",
             FieldValue::Text(value),
         ) if valid_text(value, 256) => Ok(()),
-        (EntityKind::Background, "kind", FieldValue::Text(value)) if value == "managed-blob" =>
-        {
+        (EntityKind::Background, "kind", FieldValue::Text(value)) if value == "managed-blob" => {
             Ok(())
         }
         (EntityKind::Background, "blobId", FieldValue::BlobRef(value))
