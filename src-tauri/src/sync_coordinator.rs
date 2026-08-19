@@ -2046,10 +2046,7 @@ mod tests {
         assert_eq!(state["commandHistory"][0]["hostId"], "host-local");
         assert_eq!(state["pathHistory"]["host-local"][0]["path"], "/srv/app");
         assert_eq!(state["parameterHistory"][0]["value"], "nginx");
-        assert_eq!(
-            state["parameterHistory"][0]["parameterName"],
-            "SERVICE"
-        );
+        assert_eq!(state["parameterHistory"][0]["parameterName"], "SERVICE");
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
     }
 

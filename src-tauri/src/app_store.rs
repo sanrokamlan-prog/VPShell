@@ -1511,8 +1511,7 @@ fn parameter_history_objects(
         let Some(local_id) = item.get("id").and_then(Value::as_str) else {
             continue;
         };
-        if local_id.is_empty() || local_id.len() > 128 || local_id.chars().any(char::is_control)
-        {
+        if local_id.is_empty() || local_id.len() > 128 || local_id.chars().any(char::is_control) {
             continue;
         }
         let storage_key = format!("{PARAMETER_HISTORY_LOCAL_KEY_PREFIX}{local_id}");
@@ -1855,7 +1854,9 @@ fn queue_parameter_history_sync_changes(
         }
     }
     let pending: i64 = transaction
-        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+            row.get(0)
+        })
         .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
     let available = MAX_PENDING_SYNC_CHANGES.saturating_sub(pending).max(0) as usize;
     if changes.len() > available {
@@ -2306,9 +2307,7 @@ fn validate_parameter_history_projection_fields(
         });
     let kind_matches =
         matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "argument");
-    if !matches_shape
-        || !kind_matches
-        || !entity_fields_are_syncable(&EntityKind::History, fields)
+    if !matches_shape || !kind_matches || !entity_fields_are_syncable(&EntityKind::History, fields)
     {
         return Err("远端参数历史同步投影字段未通过协议验证".to_string());
     }
@@ -3858,9 +3857,7 @@ impl AppStore {
             .collect::<BTreeSet<_>>();
         let mut preserved_parameters = local_parameters
             .values()
-            .filter(|item| {
-                parameter_history_sync_fields(item, &parameter_definitions).is_none()
-            })
+            .filter(|item| parameter_history_sync_fields(item, &parameter_definitions).is_none())
             .cloned()
             .map(Value::Object)
             .collect::<Vec<_>>();
@@ -5342,10 +5339,7 @@ mod tests {
             "parameterName".to_string(),
             FieldValue::Text("REGION".into()),
         );
-        remote_region_fields.insert(
-            "value".to_string(),
-            FieldValue::Text("eu-west".into()),
-        );
+        remote_region_fields.insert("value".to_string(), FieldValue::Text("eu-west".into()));
         let remote_region_id = Uuid::new_v4().to_string();
         let projection = vec![
             MergedEntityProjection {
@@ -5359,12 +5353,7 @@ mod tests {
         ];
         assert_eq!(
             store
-                .apply_remote_history_projection(
-                    &vault_id,
-                    1,
-                    &projection,
-                    10_000,
-                )
+                .apply_remote_history_projection(&vault_id, 1, &projection, 10_000,)
                 .unwrap(),
             ProjectionOutcome::Applied
         );
@@ -5372,11 +5361,13 @@ mod tests {
         let projected: Value =
             serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
         assert_eq!(projected["parameterHistory"].as_array().unwrap().len(), 4);
-        assert!(projected["parameterHistory"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["value"] == "sshd"));
+        assert!(
+            projected["parameterHistory"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["value"] == "sshd")
+        );
 
         let mut public_template = projected;
         public_template["commands"][0]["parameters"][2]["sensitive"] = Value::Bool(false);
@@ -5396,11 +5387,13 @@ mod tests {
         let snapshot = store.snapshot().unwrap();
         let projected: Value =
             serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
-        assert!(projected["parameterHistory"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["parameterName"] == "REGION" && item["value"] == "eu-west"));
+        assert!(
+            projected["parameterHistory"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["parameterName"] == "REGION" && item["value"] == "eu-west")
+        );
 
         let mut cleared = projected;
         cleared["parameterHistory"] = Value::Array(
@@ -5429,17 +5422,19 @@ mod tests {
             FieldValue::Text("API_TOKEN".into()),
         );
         let before_invalid = store.snapshot().unwrap();
-        assert!(store
-            .apply_remote_history_projection(
-                &vault_id,
-                2,
-                &[MergedEntityProjection {
-                    entity_id: history_entity_id,
-                    fields: Some(invalid_fields),
-                }],
+        assert!(
+            store
+                .apply_remote_history_projection(
+                    &vault_id,
+                    2,
+                    &[MergedEntityProjection {
+                        entity_id: history_entity_id,
+                        fields: Some(invalid_fields),
+                    }],
                     10_002,
-            )
-            .is_err());
+                )
+                .is_err()
+        );
         assert_eq!(store.snapshot().unwrap().revision, before_invalid.revision);
     }
 

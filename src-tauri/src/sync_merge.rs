@@ -2445,10 +2445,7 @@ mod tests {
             &sensitive_name,
         ));
         let mut sensitive_value = fields.clone();
-        sensitive_value.insert(
-            "value".to_string(),
-            FieldValue::Text("token=secret".into()),
-        );
+        sensitive_value.insert("value".to_string(), FieldValue::Text("token=secret".into()));
         assert!(!entity_fields_are_syncable(
             &EntityKind::History,
             &sensitive_value,
