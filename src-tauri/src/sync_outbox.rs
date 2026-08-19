@@ -1365,9 +1365,8 @@ impl SyncJournal {
                 mutation,
             )
             .map_err(map_merge_error)?;
-            let signer = DeviceSigningKey::load_or_create(&device_id).map_err(|message| {
-                JournalError::new(JournalErrorCode::Authentication, message)
-            })?;
+            let signer = DeviceSigningKey::load_or_create(&device_id)
+                .map_err(|message| JournalError::new(JournalErrorCode::Authentication, message))?;
             let encoded_operation = signer
                 .sign(&operation)
                 .and_then(|signed| signed.encode())
@@ -1505,9 +1504,8 @@ impl SyncJournal {
                 alternative_index,
             )
             .map_err(map_merge_error)?;
-            let signer = DeviceSigningKey::load_or_create(&device_id).map_err(|message| {
-                JournalError::new(JournalErrorCode::Authentication, message)
-            })?;
+            let signer = DeviceSigningKey::load_or_create(&device_id)
+                .map_err(|message| JournalError::new(JournalErrorCode::Authentication, message))?;
             let encoded_operation = signer
                 .sign(&operation)
                 .and_then(|signed| signed.encode())
@@ -2358,7 +2356,10 @@ mod tests {
         let encrypted = EncryptedSyncObject::decode(&claim.encrypted_object).unwrap();
         let plaintext = decrypt_sync_object(&key, &encrypted).unwrap();
         let signed = SignedOperationEnvelope::decode(&plaintext).unwrap();
-        assert_eq!(signed.verify_self().unwrap().device_id(), journal.local_device_id().unwrap());
+        assert_eq!(
+            signed.verify_self().unwrap().device_id(),
+            journal.local_device_id().unwrap()
+        );
     }
 
     #[test]

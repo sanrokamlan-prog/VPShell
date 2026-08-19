@@ -334,9 +334,10 @@ impl DeviceRegistry {
     }
 
     pub(crate) fn public_signing_key(&self, device_id: &str) -> RecoveryResult<[u8; 32]> {
-        let device = self.devices.get(device_id).ok_or_else(|| {
-            RecoveryError::new(RecoveryErrorCode::NotFound, "同步设备不存在")
-        })?;
+        let device = self
+            .devices
+            .get(device_id)
+            .ok_or_else(|| RecoveryError::new(RecoveryErrorCode::NotFound, "同步设备不存在"))?;
         if !matches!(device.status, DeviceStatus::Active) {
             return Err(RecoveryError::new(
                 RecoveryErrorCode::Conflict,

@@ -544,9 +544,8 @@ pub(crate) fn apply_persisted_operation(
             "持久同步 merge 时间不能为负数",
         ));
     }
-    let operation = decode_signed_or_legacy_operation(encoded_operation).map_err(|message| {
-        MergeError::new(MergeErrorCode::InvalidInput, message)
-    })?;
+    let operation = decode_signed_or_legacy_operation(encoded_operation)
+        .map_err(|message| MergeError::new(MergeErrorCode::InvalidInput, message))?;
     let (revision, mut state) = load_persisted_state(transaction)?;
     if revision != expected_revision {
         return Err(MergeError::new(

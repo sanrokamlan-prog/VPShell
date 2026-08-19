@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -112,8 +112,8 @@ impl SignedOperationEnvelope {
                 .try_into()
                 .map_err(|_| "设备 operation 签名长度无效".to_string())?,
         );
-        let verifying_key = VerifyingKey::from_bytes(&public_key)
-            .map_err(|_| "设备签名公钥无效".to_string())?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&public_key).map_err(|_| "设备签名公钥无效".to_string())?;
         let message = signature_message(operation.device_id(), operation_bytes);
         verifying_key
             .verify_strict(&message, &signature)
@@ -189,8 +189,9 @@ impl DeviceSigningKey {
 pub(crate) fn decode_signed_or_legacy_operation(encoded: &[u8]) -> Result<MergeOperation, String> {
     match SignedOperationEnvelope::decode(encoded) {
         Ok(envelope) => envelope.verify_self(),
-        Err(_) => MergeOperation::decode(encoded)
-            .map_err(|_| "同步 operation 无法验证或解析".to_string()),
+        Err(_) => {
+            MergeOperation::decode(encoded).map_err(|_| "同步 operation 无法验证或解析".to_string())
+        }
     }
 }
 
@@ -227,9 +228,7 @@ fn decode_exact<const N: usize>(encoded: &str, label: &str) -> Result<[u8; N], S
     if decoded.len() != N || URL_SAFE_NO_PAD.encode(&decoded) != encoded {
         return Err(format!("{label} 长度或编码不规范"));
     }
-    decoded
-        .try_into()
-        .map_err(|_| format!("{label} 长度无效"))
+    decoded.try_into().map_err(|_| format!("{label} 长度无效"))
 }
 
 fn decode_bounded(
@@ -245,8 +244,7 @@ fn decode_bounded(
     let decoded = URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|_| format!("{label} 不是规范 base64url"))?;
-    if !(minimum..=maximum).contains(&decoded.len())
-        || URL_SAFE_NO_PAD.encode(&decoded) != encoded
+    if !(minimum..=maximum).contains(&decoded.len()) || URL_SAFE_NO_PAD.encode(&decoded) != encoded
     {
         return Err(format!("{label} 长度或编码不规范"));
     }
@@ -289,7 +287,10 @@ mod tests {
         let operation = operation(DEVICE_A);
         let envelope = signer.sign(&operation).unwrap();
         let encoded = envelope.encode().unwrap();
-        assert_eq!(decode_signed_or_legacy_operation(&encoded).unwrap(), operation);
+        assert_eq!(
+            decode_signed_or_legacy_operation(&encoded).unwrap(),
+            operation
+        );
         let registry =
             DeviceRegistry::new(VAULT_ID, DEVICE_A, "Laptop", &signer.public_key(), 1).unwrap();
         assert_eq!(envelope.verify(&registry).unwrap(), operation);
@@ -336,7 +337,10 @@ mod tests {
     fn legacy_operation_decoding_remains_explicit_and_unknown_fields_are_rejected() {
         let operation = operation(DEVICE_A);
         let encoded = operation.encode().unwrap();
-        assert_eq!(decode_signed_or_legacy_operation(&encoded).unwrap(), operation);
+        assert_eq!(
+            decode_signed_or_legacy_operation(&encoded).unwrap(),
+            operation
+        );
         let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         value["unknown"] = serde_json::json!(true);
         assert!(decode_signed_or_legacy_operation(&serde_json::to_vec(&value).unwrap()).is_err());
@@ -352,7 +356,10 @@ mod tests {
             SignedOperationEnvelope::decode(&serde_json::to_vec(&signed_value).unwrap()).is_err()
         );
         let mut signed_value: serde_json::Value = serde_json::from_slice(&signed).unwrap();
-        let key = signed_value["signerPublicKey"].as_str().unwrap().to_string();
+        let key = signed_value["signerPublicKey"]
+            .as_str()
+            .unwrap()
+            .to_string();
         signed_value["signerPublicKey"] = serde_json::json!(format!("{key}="));
         assert!(
             SignedOperationEnvelope::decode(&serde_json::to_vec(&signed_value).unwrap()).is_err()
