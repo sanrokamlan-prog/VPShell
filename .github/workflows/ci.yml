@@ -43,12 +43,24 @@ jobs:
             openssh-server
             patchelf
           )
+          apt_sources="$RUNNER_TEMP/vpshell-ubuntu.sources.list"
+          printf '%s\n' \
+            'deb https://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse' \
+            'deb https://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse' \
+            'deb https://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse' \
+            'deb https://archive.ubuntu.com/ubuntu jammy-security main restricted universe multiverse' \
+            > "$apt_sources"
+          apt_options=(
+            -o "Dir::Etc::sourcelist=$apt_sources"
+            -o Dir::Etc::sourceparts=-
+            -o APT::Get::List-Cleanup=0
+            -o Acquire::Languages=none
+            -o Acquire::Retries=3
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+          )
           for attempt in 1 2 3; do
-            if sudo timeout 2m apt-get \
-              -o Acquire::Retries=2 \
-              -o Acquire::http::Timeout=20 \
-              -o Acquire::https::Timeout=20 \
-              update; then
+            if sudo timeout 5m apt-get "${apt_options[@]}" update; then
               break
             fi
             if [[ "$attempt" == 3 ]]; then
@@ -58,9 +70,7 @@ jobs:
           done
           for attempt in 1 2; do
             if sudo timeout 15m env DEBIAN_FRONTEND=noninteractive apt-get \
-              -o Acquire::Retries=2 \
-              -o Acquire::http::Timeout=20 \
-              -o Acquire::https::Timeout=20 \
+              "${apt_options[@]}" \
               -o DPkg::Lock::Timeout=60 \
               -o Dpkg::Use-Pty=0 \
               install -y --no-install-recommends --download-only "${packages[@]}"; then
@@ -72,6 +82,7 @@ jobs:
             sleep 5
           done
           sudo timeout 5m env DEBIAN_FRONTEND=noninteractive apt-get \
+            "${apt_options[@]}" \
             -o DPkg::Lock::Timeout=60 \
             -o Dpkg::Use-Pty=0 \
             install -y --no-install-recommends --no-download "${packages[@]}"
