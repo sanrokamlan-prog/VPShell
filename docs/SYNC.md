@@ -2,7 +2,7 @@
 
 当前实现补充：`onboardingCompleted`、默认监控采样频率与背景可见度已分别作为第三、第四、第五个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；它们分别只含一个布尔字段、一个 5–300 秒整数和一个 5%–65% 整数。通过秘密扫描的命令、远端路径与具名非敏感参数历史，以及 Rust 证明的已认证连接历史，使用独立 `history` 实体、稳定 UUID 和 tombstone 接入同一链路；含明显秘密、敏感/未知参数的记录、没有真实时间的旧路径和没有认证事实的旧/伪造连接条目保持本机。背景使用独立 `background` 实体和加密分块；PNG 由 Rust 解码并规范化，JPEG/WebP 通过结构、RIFF/chunk 或 JPEG 结束标记校验后保留原始编码；原始 URL、引导内容、运行中监控状态及设备本地数据仍不入同步包。
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 与 HTTPS WebDAV 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；WebDAV basic-auth 密码只保存到系统凭据管理器，前端持久状态/AppState 只保留随机引用。显式 PEM CA 由 Rust 限量导入应用私有目录，AppState 同样只保存本机随机引用，源路径和证书内容不持久化或同步。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG 规范化/JPEG-WebP 结构校验背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影。连接记录必须来自 Rust 原生/Android 已完成认证，或系统 OpenSSH/Mosh 同策略有界认证检查；旧版/前端尝试没有事实证明并保持本机。桌面冲突中心以分页有界预览展示持久冲突。确认式远端 blob 回收、其他尚未建模设置、扩展 provider 产品入口、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现，不能把该入口描述成完整同步产品。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 SFTP/S3/Gateway 结构化 adapter。桌面 Local Folder 与 HTTPS WebDAV 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；WebDAV basic-auth 密码只保存到系统凭据管理器，前端持久状态/AppState 只保留随机引用。显式 PEM CA 由 Rust 限量导入应用私有目录，AppState 同样只保存本机随机引用，源路径和证书内容不持久化或同步。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG 规范化/JPEG-WebP 结构校验背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和按 merge revision 可重试的事务投影；GC 还以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。连接记录必须来自 Rust 原生/Android 已完成认证，或系统 OpenSSH/Mosh 同策略有界认证检查；旧版/前端尝试没有事实证明并保持本机。桌面冲突中心以分页有界预览展示持久冲突。其他尚未建模设置、扩展 provider 产品入口、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现；不支持条件删除的 provider 保守保留，不能把该入口描述成完整同步产品。
 
 ### 当前 v1 密码学边界
 
@@ -304,11 +304,11 @@ LWW 只保证收敛，不保证业务选择正确。以下变化即使能自动�
 - 加密 manifest 记录 MIME、总大小、块数和完整性值，background operation 只引用随机 blob ID；
 - PNG 限制总大小和像素并解码后 canonical 重编码；JPEG 要求完整 SOI/EOI，WebP 要求 RIFF 大小、受支持 VP8/VP8L/VP8X chunk 与有界 chunk 长度；三者均以随机 blob ID 和认证原始/规范化 bytes 纳入同步，未引入本地图像 shell 或不受控转换进程；
 - 下载在 8 MiB 硬上限内聚合，完整验证后通过暂存、`fsync` 和原子替换提交；
-- 未引用 blob 的回收必须等待保留期和活动设备确认规则，当前 provider 删除与该确认链尚未实现。
+- 未引用 blob 的回收必须等待保留期和活动设备确认规则。当前协调器发布加密成员/确认索引，live-set 同时包含 background 当前投影和所有开放冲突的 blob 候选，要求每个已登记设备对同一 frontier 和 live-set 达成确认，候选摘要在 journal 中连续保留 30 天；随后 Rust 重新认证 manifest/每个 chunk，并只通过 `delete_exact` 条件删除。无条件删除能力的 provider 返回保守保留，不会伪称对象已回收。
 
 当前 PNG 实现使用 OS CSPRNG 生成随机 256-bit lowercase-hex `blob_id`；输入与 URL 下载缓存先经 PNG 解码，限制 16777216 像素和 64 MiB 解码缓冲，再重新编码为不超过 8 MiB 的 canonical PNG。每个 256 KiB 块和 manifest 都是独立 `blob` 域对象，使用随机 nonce，AAD 绑定 vault、blob/chunk identity；manifest 严格记录 MIME、总大小、块大小/数量、整图和逐块 SHA-256。worker 在背景 operation 前把全部块加入有界 journal；同一 vault 只要存在未发布 blob，持久领取查询就不会放行任何 event，即使某块进入退避也不会产生悬空引用。下载时逐块认证、核对精确长度和哈希，完整聚合后再次 canonical PNG 解码/编码校验，并通过暂存文件 `fsync`/原子替换安装；任何缺块、身份错配、额外字段、超限或不可解码内容都会停止投影。随机 nonce 导致同一明文密文不同，因此同名不可变对象冲突只有在两份信封身份一致且认证明文逐字节相等时才作为幂等成功。
 
-JPEG/WebP 作为受管本机资产保存并获得 `managedBlobId`；当前不同步原始 URL，避免把来源和查询上下文带到其他设备；URL 下载后的 PNG/JPEG/WebP bytes 由 Rust 按相同边界处理。provider 基础接口没有删除，远端旧 blob 采取保守保留；需要活动设备水位确认与保留期的远端 GC 仍未实现，不能宣称大对象路线整体完成。本机每次启动会清理名称严格匹配随机暂存 ID 的未提交普通文件，journal 已发布对象继续遵循 30 天本地保留。
+JPEG/WebP 作为受管本机资产保存并获得 `managedBlobId`；当前不同步原始 URL，避免把来源和查询上下文带到其他设备；URL 下载后的 PNG/JPEG/WebP bytes 由 Rust 按相同边界处理。活动设备确认式 GC 只在 frontier 不落后、确认摘要稳定 30 天、对象完整认证且 provider 支持条件删除时执行；Local Folder/WebDAV 已提供比较后删除，SFTP/S3/Gateway 等未接通删除能力时远端旧 blob 保守保留。本机每次启动会清理名称严格匹配随机暂存 ID 的未提交普通文件，journal 已发布对象继续遵循 30 天本地保留。
 
 URL 背景只同步安全缓存后的 PNG 位图，不让每台设备启动时直接请求图床，从而减少 Referer、Cookie、IP 和使用时间泄露；原始 URL 元数据当前不上传。
 
@@ -396,10 +396,10 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 
 1. **本地数据层**：SQLite schema、operation log、transactional outbox、设备 seq/HLC、localStorage 迁移。
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
-3. **MVP provider**：桌面 Local Folder 和 HTTPS WebDAV 已接通初始化/解锁、主机公开字段、安全自建脚本、五个固定设置实体、规范化 PNG/结构校验 JPEG-WebP 背景、公开命令/路径/非敏感参数/已认证连接历史的双向事务交接、持久冲突解决，以及手动与解锁期自动单周期；WebDAV 密码通过随机引用存入系统凭据管理器，显式 PEM CA 通过独立本机引用交给 Rust TLS 客户端。仍需确认式远端 blob 回收、其他尚未建模设置业务域、真实外部服务器兼容矩阵及断网退避测试。
+3. **MVP provider**：桌面 Local Folder 和 HTTPS WebDAV 已接通初始化/解锁、主机公开字段、安全自建脚本、五个固定设置实体、规范化 PNG/结构校验 JPEG-WebP 背景、公开命令/路径/非敏感参数/已认证连接历史的双向事务交接、活动设备确认式 blob 回收、持久冲突解决，以及手动与解锁期自动单周期；WebDAV 密码通过随机引用存入系统凭据管理器，显式 PEM CA 通过独立本机引用交给 Rust TLS 客户端。仍需其他尚未建模设置业务域、真实外部服务器兼容矩阵及断网退避测试。
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心、分页详情和 Rust-owned 候选解决 operation 已接入协调器事务；仍需多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
-6. **大对象**：PNG 背景的规范化分块、JPEG/WebP 的结构校验分块、限额和安全图片处理已接线；仍需自建脚本附件和确认式垃圾回收。
+6. **大对象**：PNG 背景的规范化分块、JPEG/WebP 的结构校验分块、限额和安全图片处理已接线；活动设备确认式垃圾回收已接线，仍需自建脚本附件和真实多设备/外部 provider 删除验收。
 7. **Provider 扩展**：SFTP、S3-compatible、Gateway 的结构化不可变适配层已完成；仍需真实 transport、协调器、协议兼容与故障矩阵，再评估 rclone 适配。
 8. **凭据 vault**：默认关闭、独立 CVK/keyslot/对象域和逐设备授权原语已完成；仍需系统钥匙串接线、轮换、恢复演练、协调器/UI 与真实设备验证。
 9. **Gateway TOTP**：只在 Gateway 的账户/设备认证完成后增加，不与 E2EE 解锁混在一起。

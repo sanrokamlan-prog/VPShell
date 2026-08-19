@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -22,7 +23,7 @@ use crate::{
     sync_provider::validate_key,
 };
 
-const JOURNAL_SCHEMA_VERSION: i64 = 2;
+const JOURNAL_SCHEMA_VERSION: i64 = 3;
 const MAX_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PENDING_OBJECTS: i64 = 10_000;
 const MAX_STORED_OBJECTS: i64 = 50_000;
@@ -223,6 +224,14 @@ pub(crate) struct EntityMergeProjectionSnapshot {
     pub(crate) entities: Vec<MergedEntityProjection>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BlobGcFrontierSnapshot {
+    pub(crate) local_device_id: String,
+    pub(crate) frontier: BTreeMap<String, u64>,
+    pub(crate) live_blob_ids: Vec<String>,
+    pub(crate) has_pending_objects: bool,
+}
+
 fn map_merge_error(error: MergeError) -> JournalError {
     let code = match error.code {
         MergeErrorCode::Replay => JournalErrorCode::Replay,
@@ -397,6 +406,24 @@ fn migrate_schema(connection: &mut Connection) -> JournalResult<()> {
                 })?;
         }
     }
+    if version < 3 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_blob_gc_candidates (
+                    vault_id TEXT NOT NULL,
+                    blob_id TEXT NOT NULL,
+                    confirmation_hash TEXT NOT NULL,
+                    first_confirmed_at_ms INTEGER NOT NULL CHECK (first_confirmed_at_ms >= 0),
+                    PRIMARY KEY(vault_id, blob_id)
+                );",
+            )
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::Storage,
+                    "无法创建同步 blob GC 候选 schema",
+                )
+            })?;
+    }
     transaction
         .pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)
         .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入同步 journal schema"))?;
@@ -513,6 +540,13 @@ fn object_hash(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+fn is_lowercase_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_now(now_ms: i64) -> JournalResult<()> {
@@ -891,6 +925,174 @@ impl SyncJournal {
             let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
             let entities = state.background_projection().map_err(map_merge_error)?;
             Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
+    pub(crate) fn blob_gc_frontier(
+        &self,
+        vault_id: &str,
+    ) -> JournalResult<BlobGcFrontierSnapshot> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            let local_device_id: String = transaction
+                .query_row(
+                    "SELECT device_id FROM sync_local_identity WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份")
+                })?;
+            let mut frontier = BTreeMap::new();
+            let mut statement = transaction
+                .prepare(
+                    "SELECT device_id, highest_sequence FROM sync_heads
+                     WHERE direction = 'remote' ORDER BY device_id",
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取远端同步水位")
+                })?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法列举远端同步水位")
+                })?;
+            for row in rows {
+                let (device_id, sequence) = row.map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "远端同步水位损坏")
+                })?;
+                let sequence = u64::try_from(sequence).map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "远端同步水位越界")
+                })?;
+                frontier.insert(device_id, sequence);
+            }
+            let published_local: Option<i64> = transaction
+                .query_row(
+                    "SELECT MAX(o.sequence)
+                     FROM sync_operations o JOIN sync_outbox q USING(object_key)
+                     WHERE o.vault_id = ?1 AND o.device_id = ?2
+                       AND o.object_kind = 'event' AND q.state = 'published'",
+                    params![vault_id, local_device_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取本机已发布水位")
+                })?;
+            frontier.insert(
+                local_device_id.clone(),
+                published_local
+                    .and_then(|value| u64::try_from(value).ok())
+                    .unwrap_or(0),
+            );
+            let pending: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_outbox q
+                     JOIN sync_operations o USING(object_key)
+                     WHERE o.vault_id = ?1 AND q.state != 'published'",
+                    params![vault_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取 vault 待发布对象")
+                })?;
+            let (_, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let live_blob_ids = state
+                .background_blob_references()
+                .map_err(map_merge_error)?;
+            Ok(BlobGcFrontierSnapshot {
+                local_device_id,
+                frontier,
+                live_blob_ids,
+                has_pending_objects: pending > 0,
+            })
+        })
+    }
+
+    pub(crate) fn observe_blob_gc_candidate(
+        &self,
+        vault_id: &str,
+        blob_id: &str,
+        confirmation_hash: &str,
+        now_ms: i64,
+        retention_ms: i64,
+    ) -> JournalResult<bool> {
+        validate_now(now_ms)?;
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        if !is_lowercase_hash(blob_id)
+            || !is_lowercase_hash(confirmation_hash)
+            || retention_ms <= 0
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步 blob GC 候选字段无效",
+            ));
+        }
+        self.transaction(|transaction| {
+            let existing: Option<(String, i64)> = transaction
+                .query_row(
+                    "SELECT confirmation_hash, first_confirmed_at_ms
+                     FROM sync_blob_gc_candidates WHERE vault_id = ?1 AND blob_id = ?2",
+                    params![vault_id, blob_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步 blob GC 候选")
+                })?;
+            let first_confirmed_at_ms = match existing {
+                Some((stored_hash, first)) if stored_hash == confirmation_hash => first,
+                _ => {
+                    transaction
+                        .execute(
+                            "INSERT INTO sync_blob_gc_candidates(
+                                vault_id, blob_id, confirmation_hash, first_confirmed_at_ms
+                             ) VALUES (?1, ?2, ?3, ?4)
+                             ON CONFLICT(vault_id, blob_id) DO UPDATE SET
+                                confirmation_hash = excluded.confirmation_hash,
+                                first_confirmed_at_ms = excluded.first_confirmed_at_ms",
+                            params![vault_id, blob_id, confirmation_hash, now_ms],
+                        )
+                        .map_err(|_| {
+                            JournalError::new(
+                                JournalErrorCode::Storage,
+                                "无法记录同步 blob GC 候选",
+                            )
+                        })?;
+                    now_ms
+                }
+            };
+            Ok(now_ms.saturating_sub(first_confirmed_at_ms) >= retention_ms)
+        })
+    }
+
+    pub(crate) fn reset_blob_gc_candidate(
+        &self,
+        vault_id: &str,
+        blob_id: &str,
+    ) -> JournalResult<()> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        if !is_lowercase_hash(blob_id) {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步 blob ID 无效",
+            ));
+        }
+        self.transaction(|transaction| {
+            transaction
+                .execute(
+                    "DELETE FROM sync_blob_gc_candidates WHERE vault_id = ?1 AND blob_id = ?2",
+                    params![vault_id, blob_id],
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法清理同步 blob GC 候选")
+                })?;
+            Ok(())
         })
     }
 

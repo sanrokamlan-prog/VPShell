@@ -122,10 +122,11 @@
 | 完成 | 通过秘密扫描的公开路径历史以稳定 history 实体、事务 operation、tombstone 和远端投影接入；旧字符串无伪造时间保持本机；PR #1 run `32199193127`（`f27ccea`）全平台 Actions 全绿 |
 | 完成 | 命令模板具名非敏感参数历史使用稳定 history 实体、事务 operation、tombstone 和远端投影接入；敏感/未知字段保持本机；PR #1 run `32201986897`（`5310070`）全平台 Actions 全绿 |
 | 完成 | Rust-owned 已认证连接历史：原生/Android 认证事实、系统 OpenSSH/Mosh 有界认证检查、稳定 history operation/tombstone 与远端投影；PR #1 run `32219104481`（`6c0a32c`）全平台 Actions 全绿 |
-| 完成 | 背景图片 blob：PNG Rust 解码/重编码，JPEG/WebP 有界结构校验，分块 AEAD/manifest、operation/outbox、完整恢复安装和 AppState 投影；PNG PR #1 run `32225659322` 全绿；JPEG/WebP 本项待 Actions |
-| 待实现 | 活动设备确认式远端 blob 回收、其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
+| 完成 | 背景图片 blob：PNG Rust 解码/重编码，JPEG/WebP 有界结构校验，分块 AEAD/manifest、operation/outbox、完整恢复安装和 AppState 投影；PNG PR #1 run `32225659322`、JPEG/WebP 修复 PR #1 run `32256446076` 全绿 |
+| 待 Actions | 活动设备确认式远端 blob 回收：schema-v3 候选 frontier、加密 member/ack 索引、30 天确认保留、manifest/chunk 重认证和 Local Folder/WebDAV 条件删除；本机门禁已通过，等待本项 PR #1 Actions |
+| 待实现 | 其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、五个既有固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322` 通过 Actions，JPEG/WebP 已实现并等待本项 Actions，确认式远端 blob 回收、其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322`、JPEG/WebP 已在 `32256446076` 通过 Actions，活动设备确认式 blob GC 已接线并对无条件删除 provider 保守保留，其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -308,7 +309,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-19 | B9 JPEG/WebP 背景 blob 本机轻量门禁 | `git diff --check`、严格 JSON/capability/command 清单、JPEG SOI/EOI 与 WebP RIFF/chunk 静态边界、sync manifest 三格式白名单、PNG 规范化不变、秘密/URL 不进入 blob、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、依赖或 SDK；根分区 55%，完整 frontend、四平台 locked fmt/check/test、Linux fixture 与 Android 构建交给 PR #1 Actions。 |
 | 2026-08-19 | B9 JPEG/WebP 背景 blob 首轮 Actions 与格式修复 | 提交 `ac7d4bc` 的 PR #1 run `32255768115` 中 frontend 与 Android aarch64 debug APK/Gradle gate 成功；Ubuntu、Windows、macOS Intel/arm 四个 Rust job 均只在 `cargo fmt --check` 报告 `local_assets.rs` 3 处与 `sync_blob.rs` 1 处相同排版差异，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按 runner 输出机械应用 4 段格式，不改变 JPEG/WebP 边界或 blob 行为；等待修复提交后的完整矩阵。 |
 | 2026-08-19 | B9 JPEG/WebP 背景 blob 格式修复本机轻量门禁 | `git diff --check`、PR #1 run `32255768115` 四个平台报告的 4 段精确 rustfmt 形态、严格 JSON/capability/command 清单、JPEG/WebP 边界与三格式 manifest 白名单、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、依赖或 SDK；根分区保持 55%，完整 frontend、四平台 locked fmt/check/test、Linux fixture 与 Android 构建交给本修复提交 Actions。 |
+| 2026-08-19 | B9 JPEG/WebP 背景 blob Actions 完成 | 格式修复提交 `17196e1` 的 PR #1 run `32256446076` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture 及 Android aarch64 debug APK/Gradle gate 全部 `COMPLETED/SUCCESS`；PNG/JPEG/WebP 三格式共享分块 AEAD、manifest、恢复安装和 AppState 投影获得完整矩阵证据；活动设备确认式 GC 进入下一独立项。 |
+| 2026-08-19 | B9 活动设备确认式远端 blob GC | `sync_provider` 增加 `delete_exact` 条件删除：Local Folder 比较后删除，WebDAV 使用强 ETag 对同一表示执行 `If-Match` 条件读取/删除并复查；`sync_outbox` schema-v3 持久化 GC 候选摘要/首次确认时间和本机/远端 frontier。Rust coordinator 每周期发布加密成员索引与 acknowledgement，live-set 同时保护 background 当前投影、开放冲突候选及 AppState 当前引用；只有所有登记设备以不落后的 frontier 确认、候选稳定 30 天、远端 segment frontier 未变化且 manifest/全部 chunk 完整重建认证后才尝试逐对象条件删除；不支持删除能力的 adapter 返回保守保留。测试覆盖保留期、当前 live blob/开放冲突保护、对象身份/大小/完整块认证和 provider 边界；本机 `git diff --check`、严格 JSON、静态 schema/capability/秘密边界及无完成标记/依赖产物检查通过，根分区 56%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、依赖或 SDK；完整 frontend、四平台 locked fmt/check/test、Linux fixture 与 Android 构建交给本项提交后的 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送 JPEG/WebP 背景 blob 格式修复；下一轮必须先等待该修复提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复，未全绿前不进入活动设备确认式远端 blob 回收或其他业务域。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交并推送活动设备确认式远端 blob GC；下一轮必须先等待本项 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复，未全绿前不进入其他尚未建模设置或扩展 provider。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

@@ -15,7 +15,7 @@ use quick_xml::{Reader, events::Event};
 use reqwest::{
     Certificate, Method, StatusCode, Url,
     blocking::{Client, RequestBuilder, Response},
-    header::{CONTENT_LENGTH, HeaderValue, IF_NONE_MATCH},
+    header::{CONTENT_LENGTH, ETAG, HeaderValue, IF_MATCH, IF_NONE_MATCH},
     redirect::Policy,
 };
 use zeroize::Zeroizing;
@@ -104,6 +104,12 @@ pub(crate) enum PutObjectOutcome {
     AlreadyPresent,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeleteObjectOutcome {
+    Deleted,
+    AlreadyAbsent,
+}
+
 pub(crate) trait SyncObjectProvider: Send + Sync {
     fn list(
         &self,
@@ -121,6 +127,18 @@ pub(crate) trait SyncObjectProvider: Send + Sync {
         bytes: &[u8],
         cancellation: &ProviderCancellation,
     ) -> ProviderResult<PutObjectOutcome>;
+
+    fn delete_exact(
+        &self,
+        _key: &str,
+        _expected: &[u8],
+        _cancellation: &ProviderCancellation,
+    ) -> ProviderResult<DeleteObjectOutcome> {
+        Err(ProviderError::new(
+            ProviderErrorCode::Protocol,
+            "同步 provider 未实现条件删除",
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -462,6 +480,45 @@ impl SyncObjectProvider for LocalFolderProvider {
         })();
         let _ = fs::remove_file(&stage);
         result
+    }
+
+    fn delete_exact(
+        &self,
+        key: &str,
+        expected: &[u8],
+        cancellation: &ProviderCancellation,
+    ) -> ProviderResult<DeleteObjectOutcome> {
+        validate_object_bytes(expected)?;
+        cancellation.check()?;
+        let path = match self.existing_object_path(key) {
+            Ok(path) => path,
+            Err(error) if error.code == ProviderErrorCode::NotFound => {
+                return Ok(DeleteObjectOutcome::AlreadyAbsent);
+            }
+            Err(error) => return Err(error),
+        };
+        if self.read_existing(key, cancellation)? != expected {
+            return Err(ProviderError::new(
+                ProviderErrorCode::Conflict,
+                "Local Folder 条件删除内容不匹配",
+            ));
+        }
+        cancellation.check()?;
+        fs::remove_file(&path).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorCode::Unavailable,
+                "无法删除 Local Folder 同步对象",
+            )
+        })?;
+        match self.read_existing(key, &ProviderCancellation::default()) {
+            Err(error) if error.code == ProviderErrorCode::NotFound => {
+                Ok(DeleteObjectOutcome::Deleted)
+            }
+            _ => Err(ProviderError::new(
+                ProviderErrorCode::Conflict,
+                "Local Folder 同步对象删除后仍然存在",
+            )),
+        }
     }
 }
 
@@ -828,6 +885,133 @@ impl SyncObjectProvider for WebDavProvider {
             ));
         }
         Ok(outcome)
+    }
+
+    fn delete_exact(
+        &self,
+        key: &str,
+        expected: &[u8],
+        cancellation: &ProviderCancellation,
+    ) -> ProviderResult<DeleteObjectOutcome> {
+        validate_key(key)?;
+        validate_object_bytes(expected)?;
+        cancellation.check()?;
+        let head = self
+            .request(Method::HEAD, self.object_url(key)?)
+            .send()
+            .map_err(|_| {
+                ProviderError::new(ProviderErrorCode::Unavailable, "WebDAV HEAD 请求失败")
+            })?;
+        cancellation.check()?;
+        if head.status() == StatusCode::NOT_FOUND {
+            return Ok(DeleteObjectOutcome::AlreadyAbsent);
+        }
+        if head.status() != StatusCode::OK {
+            return Err(ProviderError::new(
+                if head.status().is_redirection() {
+                    ProviderErrorCode::Protocol
+                } else {
+                    ProviderErrorCode::Unavailable
+                },
+                "WebDAV HEAD 返回非成功状态",
+            ));
+        }
+        let etag = head.headers().get(ETAG).cloned().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorCode::Protocol,
+                "WebDAV 条件删除要求强 ETag",
+            )
+        })?;
+        let etag_bytes = etag.as_bytes();
+        if etag_bytes.starts_with(b"W/")
+            || etag_bytes.len() < 2
+            || etag_bytes.first() != Some(&b'"')
+            || etag_bytes.last() != Some(&b'"')
+        {
+            return Err(ProviderError::new(
+                ProviderErrorCode::Protocol,
+                "WebDAV 条件删除拒绝弱 ETag",
+            ));
+        }
+        let response = self
+            .request(Method::GET, self.object_url(key)?)
+            .header(IF_MATCH, etag.clone())
+            .send()
+            .map_err(|_| {
+                cancellation.check().err().unwrap_or_else(|| {
+                    ProviderError::new(ProviderErrorCode::Unavailable, "WebDAV GET 请求失败")
+                })
+            })?;
+        cancellation.check()?;
+        let existing = match response.status() {
+            StatusCode::OK => self.read_response(response, MAX_OBJECT_BYTES, cancellation)?,
+            StatusCode::NOT_FOUND => return Ok(DeleteObjectOutcome::AlreadyAbsent),
+            StatusCode::PRECONDITION_FAILED => {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Conflict,
+                    "WebDAV 条件读取 ETag 已变化",
+                ));
+            }
+            status if status.is_redirection() => {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Protocol,
+                    "WebDAV 不允许重定向",
+                ));
+            }
+            _ => {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Unavailable,
+                    "WebDAV 条件读取返回非成功状态",
+                ));
+            }
+        };
+        if existing != expected {
+            return Err(ProviderError::new(
+                ProviderErrorCode::Conflict,
+                "WebDAV 条件删除内容不匹配",
+            ));
+        }
+        cancellation.check()?;
+        let response = self
+            .request(Method::DELETE, self.object_url(key)?)
+            .header(IF_MATCH, etag)
+            .send()
+            .map_err(|_| {
+                cancellation.check().err().unwrap_or_else(|| {
+                    ProviderError::new(ProviderErrorCode::Unavailable, "WebDAV DELETE 请求失败")
+                })
+            })?;
+        match response.status() {
+            StatusCode::OK | StatusCode::NO_CONTENT => {}
+            StatusCode::NOT_FOUND => return Ok(DeleteObjectOutcome::AlreadyAbsent),
+            StatusCode::PRECONDITION_FAILED => {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Conflict,
+                    "WebDAV 条件删除 ETag 已变化",
+                ));
+            }
+            status if status.is_redirection() => {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Protocol,
+                    "WebDAV 不允许重定向",
+                ));
+            }
+            _ => {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Unavailable,
+                    "WebDAV DELETE 返回非成功状态",
+                ));
+            }
+        }
+        match self.get_internal(key, &ProviderCancellation::default()) {
+            Err(error) if error.code == ProviderErrorCode::NotFound => {
+                Ok(DeleteObjectOutcome::Deleted)
+            }
+            _ => Err(ProviderError::new(
+                ProviderErrorCode::Conflict,
+                "WebDAV 同步对象删除后仍然存在",
+            )),
+        }
     }
 }
 
@@ -1460,6 +1644,58 @@ mod tests {
                 .unwrap_err()
                 .code,
             ProviderErrorCode::Conflict
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn webdav_delete_requires_strong_etag_and_verifies_absence() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for (index, stream) in listener.incoming().take(4).enumerate() {
+                let mut stream = stream.unwrap();
+                let request = read_request(&mut stream);
+                match index {
+                    0 => {
+                        assert!(request.starts_with("HEAD /dav/root/a.oseg "));
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nETag: \"immutable\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .unwrap();
+                    }
+                    1 => {
+                        assert!(request.starts_with("GET /dav/root/a.oseg "));
+                        assert!(request
+                            .to_ascii_lowercase()
+                            .contains("if-match: \"immutable\""));
+                        respond(&mut stream, 200, b"payload");
+                    }
+                    2 => {
+                        assert!(request.starts_with("DELETE /dav/root/a.oseg "));
+                        assert!(request
+                            .to_ascii_lowercase()
+                            .contains("if-match: \"immutable\""));
+                        respond_status(&mut stream, "204 No Content", b"");
+                    }
+                    3 => {
+                        assert!(request.starts_with("GET /dav/root/a.oseg "));
+                        respond(&mut stream, 404, b"");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+        let provider =
+            WebDavProvider::connect_http_for_test(&format!("http://{address}/dav/root/")).unwrap();
+        assert_eq!(
+            provider.delete_exact(
+                "a.oseg",
+                b"payload",
+                &ProviderCancellation::default(),
+            ),
+            Ok(DeleteObjectOutcome::Deleted)
         );
         server.join().unwrap();
     }

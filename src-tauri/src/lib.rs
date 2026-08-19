@@ -42,6 +42,7 @@ mod safe_broadcast;
 mod security_regression;
 mod shell_integration;
 mod sync_blob;
+mod sync_blob_gc;
 mod sync_coordinator;
 #[allow(dead_code)] // The coordinator/UI phases consume this opt-in credential vault API.
 mod sync_credential_vault;

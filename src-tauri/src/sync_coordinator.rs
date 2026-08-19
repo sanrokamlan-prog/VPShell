@@ -21,6 +21,7 @@ use crate::{
         equivalent_blob_objects, object_key_matches_blob_envelope, prepare_wallpaper_blob,
         restore_wallpaper_blob,
     },
+    sync_blob_gc::run_blob_gc,
     sync_crypto::{
         Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
         create_password_keyslot, open_password_keyslot,
@@ -711,8 +712,25 @@ impl SyncCoordinatorManager {
         )?);
         self.apply_app_state_projections(app_store, vault_id, now_ms)?;
         self.journal.prune(now_ms).map_err(journal_code)?;
+        let live_blob_id = app_store
+            .snapshot()
+            .map_err(|_| "app-state-handoff".to_string())
+            .and_then(|snapshot| {
+                let state: serde_json::Value = serde_json::from_str(&snapshot.state_json)
+                    .map_err(|_| "app-state-handoff".to_string())?;
+                Ok(state["wallpaper"]["managedBlobId"].as_str().map(str::to_string))
+            })?;
+        let gc = run_blob_gc(
+            provider,
+            &self.journal,
+            cancellation,
+            vault_key,
+            vault_id,
+            live_blob_id.as_deref(),
+            now_ms,
+        )?;
         Ok(CycleCounts {
-            uploaded,
+            uploaded: uploaded.saturating_add(gc.published_objects),
             downloaded,
         })
     }

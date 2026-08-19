@@ -1,4 +1,7 @@
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -649,6 +652,31 @@ impl MergeState {
             .filter(|conflict| conflict.resolution_stamp.is_none())
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn background_blob_references(&self) -> MergeResult<Vec<String>> {
+        let mut references = BTreeSet::new();
+        for entity in self.background_projection()? {
+            if let Some(FieldValue::BlobRef(blob_id)) = entity
+                .fields
+                .as_ref()
+                .and_then(|fields| fields.get("blobId"))
+            {
+                references.insert(blob_id.clone());
+            }
+        }
+        for conflict in self.conflicts.values().filter(|conflict| {
+            conflict.resolution_stamp.is_none()
+                && conflict.entity_kind == EntityKind::Background
+                && conflict.field == "blobId"
+        }) {
+            for alternative in &conflict.alternatives {
+                if let Some(FieldValue::BlobRef(blob_id)) = &alternative.value {
+                    references.insert(blob_id.clone());
+                }
+            }
+        }
+        Ok(references.into_iter().collect())
     }
 
     pub(crate) fn conflict_snapshot(
@@ -2309,6 +2337,27 @@ mod tests {
             .is_err()
         );
         assert_eq!(MergeState::decode(&state.encode().unwrap()).unwrap(), state);
+    }
+
+    #[test]
+    fn background_blob_references_include_open_conflict_alternatives() {
+        let mut state = MergeState::default();
+        state.apply(&background_patch(90, 100)).unwrap();
+        let mut concurrent = background_patch(91, 101);
+        concurrent.device_id = DEVICE_B.to_string();
+        let MergePayload::Patch(payload) = &mut concurrent.payload else {
+            unreachable!();
+        };
+        payload.fields.insert(
+            "blobId".to_string(),
+            FieldValue::BlobRef("cd".repeat(32)),
+        );
+        state.apply(&concurrent).unwrap();
+
+        assert_eq!(
+            state.background_blob_references().unwrap(),
+            vec!["ab".repeat(32), "cd".repeat(32)]
+        );
     }
 
     #[test]
