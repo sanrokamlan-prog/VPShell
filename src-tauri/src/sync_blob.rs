@@ -126,8 +126,7 @@ pub(crate) fn prepare_wallpaper_blob(
     if !matches!(
         wallpaper.media_type.as_str(),
         "image/png" | "image/jpeg" | "image/webp"
-    )
-        || wallpaper.bytes.is_empty()
+    ) || wallpaper.bytes.is_empty()
         || wallpaper.bytes.len() > MAX_WALLPAPER_BYTES
         || wallpaper.content_hash != hash(&wallpaper.bytes)
     {

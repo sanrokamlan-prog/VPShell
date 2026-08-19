@@ -154,11 +154,8 @@ fn validate_encoded_wallpaper(bytes: &[u8], media_type: &str) -> Result<(), Stri
             if chunk != b"VP8 " && chunk != b"VP8L" && chunk != b"VP8X" {
                 return Err("WebP 壁纸编码类型不受支持".to_string());
             }
-            let chunk_size = u32::from_le_bytes(
-                bytes[16..20]
-                    .try_into()
-                    .expect("WebP chunk size bytes"),
-            );
+            let chunk_size =
+                u32::from_le_bytes(bytes[16..20].try_into().expect("WebP chunk size bytes"));
             let chunk_end = u64::from(chunk_size).saturating_add(20);
             if chunk_end > bytes.len() as u64
                 || (chunk_size % 2 == 1 && chunk_end == bytes.len() as u64)
@@ -358,7 +355,10 @@ fn encode_wallpaper_metadata(metadata: &WallpaperAssetMetadata) -> Result<Vec<u8
     }
     if let Some(blob_id) = metadata.blob_id.as_deref() {
         validate_blob_id(blob_id)?;
-        if !matches!(metadata.media_type.as_str(), "image/png" | "image/jpeg" | "image/webp") {
+        if !matches!(
+            metadata.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/webp"
+        ) {
             return Err("只有受支持的图片格式可以生成同步 blob".to_string());
         }
     }
@@ -573,7 +573,10 @@ impl LocalAssetManager {
                 .map_err(|_| "同步壁纸缺少受管元数据".to_string())?,
         )?;
         if metadata.blob_id.as_deref() != Some(expected_blob_id)
-            || !matches!(metadata.media_type.as_str(), "image/png" | "image/jpeg" | "image/webp")
+            || !matches!(
+                metadata.media_type.as_str(),
+                "image/png" | "image/jpeg" | "image/webp"
+            )
             || metadata.size != bytes.len()
             || metadata.content_hash != content_hash(&bytes)
         {
