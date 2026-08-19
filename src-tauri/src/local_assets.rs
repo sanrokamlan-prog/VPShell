@@ -126,6 +126,51 @@ fn wallpaper_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+fn validate_encoded_wallpaper(bytes: &[u8], media_type: &str) -> Result<(), String> {
+    if bytes.is_empty() || bytes.len() > MAX_WALLPAPER_BYTES {
+        return Err("壁纸大小必须为 1 字节至 8 MiB".to_string());
+    }
+    match media_type {
+        "image/png" => {
+            normalize_png(bytes)?;
+        }
+        "image/jpeg" => {
+            if bytes.len() < 4
+                || !bytes.starts_with(&[0xff, 0xd8, 0xff])
+                || !bytes.ends_with(&[0xff, 0xd9])
+            {
+                return Err("JPEG 壁纸结构或校验无效".to_string());
+            }
+        }
+        "image/webp" => {
+            if bytes.len() < 20 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+                return Err("WebP 壁纸结构或校验无效".to_string());
+            }
+            let riff_size = u32::from_le_bytes(bytes[4..8].try_into().expect("RIFF size bytes"));
+            if u64::from(riff_size).saturating_add(8) != bytes.len() as u64 {
+                return Err("WebP 壁纸 RIFF 大小无效".to_string());
+            }
+            let chunk = &bytes[12..16];
+            if chunk != b"VP8 " && chunk != b"VP8L" && chunk != b"VP8X" {
+                return Err("WebP 壁纸编码类型不受支持".to_string());
+            }
+            let chunk_size = u32::from_le_bytes(
+                bytes[16..20]
+                    .try_into()
+                    .expect("WebP chunk size bytes"),
+            );
+            let chunk_end = u64::from(chunk_size).saturating_add(20);
+            if chunk_end > bytes.len() as u64
+                || (chunk_size % 2 == 1 && chunk_end == bytes.len() as u64)
+            {
+                return Err("WebP 壁纸 chunk 大小无效".to_string());
+            }
+        }
+        _ => return Err("壁纸格式不受支持".to_string()),
+    }
+    Ok(())
+}
+
 fn lowercase_hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -313,8 +358,8 @@ fn encode_wallpaper_metadata(metadata: &WallpaperAssetMetadata) -> Result<Vec<u8
     }
     if let Some(blob_id) = metadata.blob_id.as_deref() {
         validate_blob_id(blob_id)?;
-        if metadata.media_type != "image/png" {
-            return Err("只有安全规范化 PNG 可以生成同步 blob".to_string());
+        if !matches!(metadata.media_type.as_str(), "image/png" | "image/jpeg" | "image/webp") {
+            return Err("只有受支持的图片格式可以生成同步 blob".to_string());
         }
     }
     serde_json::to_vec(metadata).map_err(|_| "无法编码壁纸受管元数据".to_string())
@@ -446,11 +491,13 @@ impl LocalAssetManager {
         };
         let media_type = wallpaper_type(&bytes)
             .ok_or_else(|| "壁纸内容不是有效 PNG、JPEG 或 WebP".to_string())?;
-        let (bytes, blob_id) = if media_type == "image/png" {
-            (normalize_png(&bytes)?, Some(new_blob_id()?))
+        let bytes = if media_type == "image/png" {
+            normalize_png(&bytes)?
         } else {
-            (bytes, None)
+            validate_encoded_wallpaper(&bytes, media_type)?;
+            bytes
         };
+        let blob_id = Some(new_blob_id()?);
         let metadata = WallpaperAssetMetadata {
             format_version: WALLPAPER_METADATA_VERSION,
             blob_id: blob_id.clone(),
@@ -488,6 +535,10 @@ impl LocalAssetManager {
         }
         let bytes = read_bounded(&path, MAX_WALLPAPER_BYTES)?;
         let media_type = wallpaper_type(&bytes).ok_or_else(|| "缓存壁纸格式损坏".to_string())?;
+        validate_encoded_wallpaper(&bytes, media_type)?;
+        if media_type == "image/png" && normalize_png(&bytes)? != bytes {
+            return Err("缓存 PNG 壁纸不是规范化编码".to_string());
+        }
         let managed_blob_id = read_bounded(&self.wallpaper_metadata_path(), 2048)
             .ok()
             .and_then(|encoded| decode_wallpaper_metadata(&encoded).ok())
@@ -522,12 +573,15 @@ impl LocalAssetManager {
                 .map_err(|_| "同步壁纸缺少受管元数据".to_string())?,
         )?;
         if metadata.blob_id.as_deref() != Some(expected_blob_id)
-            || metadata.media_type != "image/png"
+            || !matches!(metadata.media_type.as_str(), "image/png" | "image/jpeg" | "image/webp")
             || metadata.size != bytes.len()
             || metadata.content_hash != content_hash(&bytes)
-            || normalize_png(&bytes)? != bytes
         {
             return Err("同步壁纸与受管引用不匹配".to_string());
+        }
+        validate_encoded_wallpaper(&bytes, &metadata.media_type)?;
+        if metadata.media_type == "image/png" && normalize_png(&bytes)? != bytes {
+            return Err("同步 PNG 壁纸不是规范化编码".to_string());
         }
         Ok(ManagedWallpaper {
             blob_id: expected_blob_id.to_string(),
@@ -544,12 +598,16 @@ impl LocalAssetManager {
         bytes: &[u8],
     ) -> Result<RenderAsset, String> {
         validate_blob_id(blob_id)?;
-        if media_type != "image/png" || bytes.is_empty() || bytes.len() > MAX_WALLPAPER_BYTES {
-            return Err("远端壁纸只接受 1 字节至 8 MiB 的 PNG".to_string());
+        if !matches!(media_type, "image/png" | "image/jpeg" | "image/webp") {
+            return Err("远端壁纸只接受 PNG、JPEG 或 WebP".to_string());
         }
-        let normalized = normalize_png(bytes)?;
-        if normalized != bytes {
-            return Err("远端 PNG 壁纸不是规范化编码".to_string());
+        if media_type == "image/png" {
+            let normalized = normalize_png(bytes)?;
+            if normalized != bytes {
+                return Err("远端 PNG 壁纸不是规范化编码".to_string());
+            }
+        } else {
+            validate_encoded_wallpaper(bytes, media_type)?;
         }
         let label = "同步壁纸".to_string();
         let metadata = WallpaperAssetMetadata {
@@ -630,6 +688,18 @@ mod tests {
             .unwrap()
     }
 
+    fn jpeg_fixture() -> Vec<u8> {
+        vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]
+    }
+
+    fn webp_fixture() -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&12_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WEBPVP8 ");
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes
+    }
+
     struct TempDir(PathBuf);
     impl TempDir {
         fn new() -> Self {
@@ -695,6 +765,45 @@ mod tests {
 
         assert!(!stale.exists());
         assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn jpeg_and_webp_assets_are_bounded_structurally_valid_and_syncable() {
+        let root = TempDir::new();
+        let manager = LocalAssetManager::load(root.0.clone()).unwrap();
+        for (name, bytes, media_type) in [
+            ("wallpaper.jpg", jpeg_fixture(), "image/jpeg"),
+            ("wallpaper.webp", webp_fixture(), "image/webp"),
+        ] {
+            let path = root.0.join(name);
+            fs::write(&path, &bytes).unwrap();
+            let installed = manager
+                .install_wallpaper(InstallWallpaperRequest {
+                    source: "local".to_string(),
+                    value: path.to_str().unwrap().to_string(),
+                })
+                .unwrap();
+            assert_eq!(installed.media_type, media_type);
+            let blob_id = installed.managed_blob_id.as_deref().unwrap();
+            let managed = manager.syncable_wallpaper(blob_id).unwrap();
+            assert_eq!(managed.media_type, media_type);
+            assert_eq!(managed.bytes, bytes);
+            assert!(
+                manager
+                    .install_synced_wallpaper(&managed.blob_id, media_type, &managed.bytes)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_jpeg_and_webp_are_rejected_before_storage() {
+        let mut jpeg = jpeg_fixture();
+        jpeg.pop();
+        assert!(validate_encoded_wallpaper(&jpeg, "image/jpeg").is_err());
+        let mut webp = webp_fixture();
+        webp[4..8].copy_from_slice(&11_u32.to_le_bytes());
+        assert!(validate_encoded_wallpaper(&webp, "image/webp").is_err());
     }
 
     #[test]

@@ -95,7 +95,10 @@ fn chunk_key(vault_id: &str, blob_id: &str, index: usize) -> String {
 fn validate_manifest(manifest: &WallpaperBlobManifest) -> Result<(), String> {
     validate_blob_id(&manifest.blob_id)?;
     if manifest.format_version != BLOB_FORMAT_VERSION
-        || manifest.media_type != "image/png"
+        || !matches!(
+            manifest.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/webp"
+        )
         || manifest.total_size == 0
         || manifest.total_size > MAX_WALLPAPER_BYTES
         || manifest.chunk_size != CHUNK_BYTES
@@ -120,7 +123,10 @@ pub(crate) fn prepare_wallpaper_blob(
     wallpaper: &ManagedWallpaper,
 ) -> Result<Vec<PreparedBlobObject>, String> {
     validate_blob_id(&wallpaper.blob_id)?;
-    if wallpaper.media_type != "image/png"
+    if !matches!(
+        wallpaper.media_type.as_str(),
+        "image/png" | "image/jpeg" | "image/webp"
+    )
         || wallpaper.bytes.is_empty()
         || wallpaper.bytes.len() > MAX_WALLPAPER_BYTES
         || wallpaper.content_hash != hash(&wallpaper.bytes)
@@ -372,6 +378,18 @@ mod tests {
         }
     }
 
+    fn jpeg_fixture() -> Vec<u8> {
+        vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]
+    }
+
+    fn webp_fixture() -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&12_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WEBPVP8 ");
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes
+    }
+
     #[test]
     fn wallpaper_blob_round_trips_multiple_authenticated_chunks() {
         let root = TempDir::new();
@@ -402,6 +420,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restored.bytes, bytes);
+    }
+
+    #[test]
+    fn jpeg_and_webp_blob_manifests_round_trip_media_type() {
+        let root = TempDir::new();
+        let provider = LocalFolderProvider::open(&root.0).unwrap();
+        let key = VaultKey::generate().unwrap();
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let cancellation = ProviderCancellation::default();
+        for (blob_id, media_type, bytes) in [
+            ("34".repeat(32), "image/jpeg", jpeg_fixture()),
+            ("56".repeat(32), "image/webp", webp_fixture()),
+        ] {
+            let wallpaper = ManagedWallpaper {
+                blob_id,
+                media_type: media_type.to_string(),
+                content_hash: hash(&bytes),
+                bytes: bytes.clone(),
+            };
+            for object in prepare_wallpaper_blob(&key, &vault_id, &wallpaper).unwrap() {
+                provider
+                    .put(&object.key, &object.encoded, &cancellation)
+                    .unwrap();
+            }
+            let restored = restore_wallpaper_blob(
+                &provider,
+                &cancellation,
+                &key,
+                &vault_id,
+                &wallpaper.blob_id,
+            )
+            .unwrap();
+            assert_eq!(restored.media_type, media_type);
+            assert_eq!(restored.bytes, bytes);
+        }
     }
 
     #[test]
