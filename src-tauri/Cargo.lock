@@ -6715,6 +6715,7 @@ dependencies = [
  "keyring-core",
  "md-5",
  "percent-encoding",
+ "png 0.17.16",
  "portable-pty",
  "quick-xml",
  "reqwest",

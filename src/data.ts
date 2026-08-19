@@ -6,6 +6,7 @@ import type {
   ParameterHistoryItem,
   PathHistoryItem,
   ScriptRecipe,
+  WallpaperSettings,
 } from "./types";
 
 const legacyDemoHostIds = new Set([
@@ -488,6 +489,14 @@ export function migratePersistedAppState(value: AppState): AppState {
     || settings.monitorIntervalSeconds > 300) {
     settings.monitorIntervalSeconds = initialState.settings.monitorIntervalSeconds;
   }
+  const wallpaper: WallpaperSettings = {
+    ...initialState.wallpaper,
+    ...(value.wallpaper ?? {}),
+  };
+  if ((wallpaper.source !== "local" && wallpaper.source !== "url")
+    || !/^[0-9a-f]{64}$/.test(wallpaper.managedBlobId ?? "")) {
+    delete wallpaper.managedBlobId;
+  }
 
   return {
     ...initialState,
@@ -498,6 +507,7 @@ export function migratePersistedAppState(value: AppState): AppState {
     parameterHistory: normalizeParameterHistoryEntries(value.parameterHistory),
     connectionHistory: (value.connectionHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
     pathHistory,
+    wallpaper,
     settings,
     onboardingCompleted: value.onboardingCompleted ?? false,
   };

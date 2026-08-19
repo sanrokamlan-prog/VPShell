@@ -17,12 +17,13 @@ use crate::sync_merge::{
     EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection, entity_fields_are_syncable,
 };
 
-const STORE_SCHEMA_VERSION: i64 = 10;
+const STORE_SCHEMA_VERSION: i64 = 11;
 const TERMINAL_APPEARANCE_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000001";
 const APPLICATION_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000002";
 const ONBOARDING_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000003";
 const MONITOR_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000004";
 const WALLPAPER_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000005";
+pub(crate) const MANAGED_BACKGROUND_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000006";
 const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVENTS: i64 = 10_000;
@@ -522,6 +523,70 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("无法创建认证连接事实表: {error}"))?;
     }
+    if version < 11 {
+        transaction
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_app_sync_changes_revision;
+                 DROP INDEX IF EXISTS idx_app_sync_changes_kind_revision;
+                 ALTER TABLE app_sync_changes RENAME TO app_sync_changes_v10;
+                 CREATE TABLE app_sync_changes (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    entity_id TEXT NOT NULL,
+                    mutation_kind TEXT NOT NULL CHECK (mutation_kind IN ('patch', 'delete')),
+                    fields_json TEXT,
+                    state_revision INTEGER NOT NULL CHECK (state_revision > 0),
+                    created_at_ms INTEGER NOT NULL,
+                    entity_kind TEXT NOT NULL CHECK (
+                        entity_kind IN ('host', 'script', 'setting', 'background', 'history')
+                    ),
+                    CHECK ((mutation_kind = 'patch') = (fields_json IS NOT NULL))
+                 );
+                 INSERT INTO app_sync_changes(
+                    seq, operation_id, entity_id, mutation_kind, fields_json,
+                    state_revision, created_at_ms, entity_kind
+                 ) SELECT seq, operation_id, entity_id, mutation_kind, fields_json,
+                          state_revision, created_at_ms, entity_kind
+                   FROM app_sync_changes_v10;
+                 DROP TABLE app_sync_changes_v10;
+                 CREATE INDEX idx_app_sync_changes_revision
+                    ON app_sync_changes(state_revision, seq);
+                 CREATE INDEX idx_app_sync_changes_kind_revision
+                    ON app_sync_changes(entity_kind, state_revision, seq);
+                 CREATE TABLE IF NOT EXISTS app_sync_background_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    content_hash TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS app_sync_background_projection (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    vault_id TEXT NOT NULL,
+                    merge_revision INTEGER NOT NULL CHECK (merge_revision >= 0),
+                    projection_hash TEXT NOT NULL
+                 );",
+            )
+            .map_err(|error| format!("无法创建 AppState 背景 blob 同步 schema: {error}"))?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT state_json FROM app_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取待迁移 AppState 背景: {error}"))?;
+        let fields = existing
+            .as_deref()
+            .and_then(|state_json| serde_json::from_str::<Value>(state_json).ok())
+            .map(|state| background_sync_fields(&state))
+            .transpose()?
+            .unwrap_or_else(default_background_sync_fields);
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO app_sync_background_state(singleton, content_hash)
+                 VALUES (1, ?1)",
+                params![sync_fields_hash(&fields)?],
+            )
+            .map_err(|error| format!("无法初始化 AppState 背景同步状态: {error}"))?;
+    }
     transaction
         .pragma_update(None, "user_version", STORE_SCHEMA_VERSION)
         .map_err(|error| format!("无法写入本地事件库 schema 版本: {error}"))?;
@@ -901,6 +966,8 @@ fn validate_state_json(state_json: &str) -> Result<Value, String> {
     for field in ["sync", "wallpaper", "terminalAppearance", "settings"] {
         ensure_object(root.get(field).expect("required field"), field)?;
     }
+    wallpaper_preference_sync_fields(&value)?;
+    background_sync_fields(&value)?;
     let mut nodes = 0;
     inspect_json(&value, None, 0, &mut nodes)?;
     Ok(value)
@@ -2401,6 +2468,128 @@ fn default_wallpaper_preference_sync_fields() -> BTreeMap<String, FieldValue> {
     BTreeMap::from([("wallpaperOpacity".to_string(), FieldValue::Integer(20))])
 }
 
+fn is_lowercase_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn background_sync_fields(value: &Value) -> Result<BTreeMap<String, FieldValue>, String> {
+    let root = ensure_object(value, "root")?;
+    let wallpaper = ensure_object(
+        root.get("wallpaper")
+            .ok_or_else(|| "本地状态缺少 wallpaper".to_string())?,
+        "wallpaper",
+    )?;
+    let source = wallpaper
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "本地状态 wallpaper.source 无效".to_string())?;
+    let fields = match source {
+        "none" if !wallpaper.contains_key("managedBlobId") => default_background_sync_fields(),
+        "none" => return Err("本地状态禁用壁纸时不能保留 managedBlobId".to_string()),
+        "local" | "url" => match wallpaper.get("managedBlobId") {
+            Some(Value::String(blob_id)) if is_lowercase_hash(blob_id) => BTreeMap::from([
+                (
+                    "blobId".to_string(),
+                    FieldValue::BlobRef(blob_id.to_string()),
+                ),
+                (
+                    "kind".to_string(),
+                    FieldValue::Text("managed-blob".to_string()),
+                ),
+            ]),
+            None => default_background_sync_fields(),
+            _ => return Err("本地状态 wallpaper.managedBlobId 无效".to_string()),
+        },
+        _ => return Err("本地状态 wallpaper.source 无效".to_string()),
+    };
+    if fields != default_background_sync_fields() {
+        validate_background_projection_fields(&fields)?;
+    }
+    Ok(fields)
+}
+
+fn default_background_sync_fields() -> BTreeMap<String, FieldValue> {
+    BTreeMap::from([(
+        "kind".to_string(),
+        FieldValue::Text("none".to_string()),
+    )])
+}
+
+fn queue_background_sync_change(
+    transaction: &Transaction<'_>,
+    previous: Option<&Value>,
+    next: &Value,
+    revision: u64,
+    now: i64,
+) -> Result<(), String> {
+    let next_fields = background_sync_fields(next)?;
+    let next_hash = sync_fields_hash(&next_fields)?;
+    let previous_hash: Option<String> = transaction
+        .query_row(
+            "SELECT content_hash FROM app_sync_background_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取 AppState 背景同步状态: {error}"))?;
+    let initial = previous.is_none() && previous_hash.is_none();
+    if previous_hash.as_deref() != Some(next_hash.as_str())
+        && !(initial && next_fields == default_background_sync_fields())
+    {
+        let pending: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
+        if pending >= MAX_PENDING_SYNC_CHANGES {
+            if initial {
+                return Ok(());
+            }
+            return Err("AppState 同步 changefeed 已达到 10000 项上限；请先完成同步".to_string());
+        }
+        let (mutation_kind, fields_json) = if next_fields == default_background_sync_fields() {
+            ("delete", None)
+        } else {
+            (
+                "patch",
+                Some(
+                    serde_json::to_string(&next_fields)
+                        .map_err(|error| format!("无法编码 AppState 背景同步字段: {error}"))?,
+                ),
+            )
+        };
+        transaction
+            .execute(
+                "INSERT INTO app_sync_changes(
+                    operation_id, entity_id, mutation_kind, fields_json,
+                    state_revision, created_at_ms, entity_kind
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'background')",
+                params![
+                    Uuid::new_v4().to_string(),
+                    MANAGED_BACKGROUND_ENTITY_ID,
+                    mutation_kind,
+                    fields_json,
+                    i64::try_from(revision)
+                        .map_err(|_| "AppState 背景同步 revision 超出范围".to_string())?,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("无法写入 AppState 背景同步 changefeed: {error}"))?;
+    }
+    transaction
+        .execute(
+            "INSERT INTO app_sync_background_state(singleton, content_hash)
+             VALUES (1, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET content_hash = excluded.content_hash",
+            params![next_hash],
+        )
+        .map_err(|error| format!("无法记录 AppState 背景同步状态: {error}"))?;
+    Ok(())
+}
+
 fn sync_fields_hash(fields: &BTreeMap<String, FieldValue>) -> Result<String, String> {
     let encoded =
         serde_json::to_vec(fields).map_err(|error| format!("无法编码本地同步字段指纹: {error}"))?;
@@ -2586,6 +2775,26 @@ fn validate_setting_projection_fields(
     };
     if !fields_match || !entity_fields_are_syncable(&EntityKind::Setting, fields) {
         return Err("远端设置同步投影字段未通过协议验证".to_string());
+    }
+    Ok(())
+}
+
+fn validate_background_projection_fields(
+    fields: &BTreeMap<String, FieldValue>,
+) -> Result<(), String> {
+    let shape = match fields.get("kind") {
+        Some(FieldValue::Text(kind)) if kind == "managed-blob" => {
+            fields.len() == 2
+                && fields.keys().all(|field| matches!(field.as_str(), "kind" | "blobId"))
+                && matches!(
+                    fields.get("blobId"),
+                    Some(FieldValue::BlobRef(value)) if is_lowercase_hash(value)
+                )
+        }
+        _ => false,
+    };
+    if !shape || !entity_fields_are_syncable(&EntityKind::Background, fields) {
+        return Err("远端背景同步投影字段未通过协议验证".to_string());
     }
     Ok(())
 }
@@ -3057,6 +3266,7 @@ impl AppStore {
         queue_host_sync_changes(&transaction, None, &state, 1, now)?;
         queue_script_sync_changes(&transaction, None, &state, 1, now)?;
         queue_setting_sync_changes(&transaction, None, &state, 1, now)?;
+        queue_background_sync_change(&transaction, None, &state, 1, now)?;
         queue_command_history_sync_changes(&transaction, None, &state, 1, now)?;
         queue_path_history_sync_changes(&transaction, None, &state, 1, now)?;
         queue_parameter_history_sync_changes(&transaction, None, &state, 1, now)?;
@@ -3298,6 +3508,13 @@ impl AppStore {
             now,
         )?;
         queue_setting_sync_changes(
+            &transaction,
+            previous_value.as_ref(),
+            &next_value,
+            next_revision,
+            now,
+        )?;
+        queue_background_sync_change(
             &transaction,
             previous_value.as_ref(),
             &next_value,
@@ -4198,6 +4415,200 @@ impl AppStore {
         })
     }
 
+    pub(crate) fn apply_remote_background_projection(
+        &self,
+        vault_id: &str,
+        merge_revision: u64,
+        backgrounds: &[MergedEntityProjection],
+        now: i64,
+    ) -> Result<ProjectionOutcome, String> {
+        if now < 0 {
+            return Err("AppState 背景同步投影时间不能为负数".to_string());
+        }
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| "AppState 同步 vault ID 无效".to_string())?
+            .to_string();
+        let mut projection = backgrounds.to_vec();
+        projection.sort_by(|left, right| left.entity_id.cmp(&right.entity_id));
+        if projection.len() > 1 {
+            return Err("AppState 背景同步投影包含多个实体".to_string());
+        }
+        if let Some(background) = projection.first() {
+            if background.entity_id != MANAGED_BACKGROUND_ENTITY_ID {
+                return Err("AppState 背景同步投影包含未接线实体".to_string());
+            }
+            if let Some(fields) = background.fields.as_ref() {
+                validate_background_projection_fields(fields)?;
+            }
+        }
+        let projection_hash = entity_projection_hash(&projection)?;
+        let merge_revision_sql = i64::try_from(merge_revision)
+            .map_err(|_| "AppState 同步 merge revision 超过 SQLite INTEGER".to_string())?;
+
+        let _guard = self
+            .inner
+            .lock
+            .lock()
+            .map_err(|_| "本地事件库锁不可用".to_string())?;
+        let mut connection = open_connection(&self.inner.database_path)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始 AppState 背景同步投影事务: {error}"))?;
+        let bound_vault: Option<String> = transaction
+            .query_row(
+                "SELECT vault_id FROM app_sync_binding WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取 AppState 同步绑定: {error}"))?;
+        if bound_vault.as_deref() != Some(vault_id.as_str()) {
+            return Err("AppState 背景同步投影与 vault 绑定不匹配".to_string());
+        }
+        let applied: Option<(i64, String)> = transaction
+            .query_row(
+                "SELECT merge_revision, projection_hash
+                 FROM app_sync_background_projection WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取 AppState 背景同步投影状态: {error}"))?;
+        if let Some((applied_revision, applied_hash)) = applied {
+            if applied_revision < 0 {
+                return Err("AppState 背景同步投影 revision 损坏".to_string());
+            }
+            let applied_revision = applied_revision as u64;
+            if merge_revision < applied_revision {
+                return Err("AppState 背景同步投影 revision 回退".to_string());
+            }
+            if merge_revision == applied_revision {
+                if projection_hash == applied_hash {
+                    return Ok(ProjectionOutcome::Unchanged);
+                }
+                return Err("相同 AppState 背景同步投影 revision 的内容不同".to_string());
+            }
+        }
+        let pending: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
+        if pending != 0 {
+            return Ok(ProjectionOutcome::Deferred);
+        }
+        let existing: Option<(i64, String)> = transaction
+            .query_row(
+                "SELECT revision, state_json FROM app_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取待投影 AppState: {error}"))?;
+        let Some((current_revision, state_json)) = existing else {
+            return Ok(ProjectionOutcome::Deferred);
+        };
+        if current_revision < 0 {
+            return Err("AppState revision 损坏".to_string());
+        }
+        let current_value = validate_state_json(&state_json)?;
+        let mut next_value = current_value.clone();
+        let projected_background = projection.first();
+        if let Some(background) = projected_background {
+            let wallpaper = next_value
+                .as_object_mut()
+                .and_then(|root| root.get_mut("wallpaper"))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "AppState wallpaper 损坏".to_string())?;
+            match background.fields.as_ref().and_then(|fields| fields.get("kind")) {
+                None => {
+                    wallpaper.insert("source".to_string(), Value::String("none".to_string()));
+                    wallpaper.insert("value".to_string(), Value::String(String::new()));
+                    wallpaper.remove("managedBlobId");
+                }
+                Some(FieldValue::Text(kind)) if kind == "managed-blob" => {
+                    let blob_id = match background
+                        .fields
+                        .as_ref()
+                        .and_then(|fields| fields.get("blobId"))
+                    {
+                        Some(FieldValue::BlobRef(value)) => value.clone(),
+                        _ => return Err("远端背景同步投影缺少 blobId".to_string()),
+                    };
+                    wallpaper.insert("source".to_string(), Value::String("local".to_string()));
+                    wallpaper.insert(
+                        "value".to_string(),
+                        Value::String("同步背景图.png".to_string()),
+                    );
+                    wallpaper.insert("managedBlobId".to_string(), Value::String(blob_id));
+                }
+                _ => return Err("远端背景同步投影 kind 无效".to_string()),
+            }
+        }
+        validate_state_json(
+            &serde_json::to_string(&next_value)
+                .map_err(|error| format!("无法编码 AppState 背景同步投影结果: {error}"))?,
+        )?;
+        let changed = next_value != current_value;
+        if changed {
+            let next_revision = (current_revision as u64)
+                .checked_add(1)
+                .ok_or_else(|| "AppState revision 已耗尽".to_string())?;
+            let next_revision_sql = i64::try_from(next_revision)
+                .map_err(|_| "AppState revision 超过 SQLite INTEGER".to_string())?;
+            let next_json = serde_json::to_string(&next_value)
+                .map_err(|error| format!("无法编码 AppState 背景同步投影结果: {error}"))?;
+            transaction
+                .execute(
+                    "UPDATE app_state SET schema_version = ?1, revision = ?2,
+                        state_json = ?3, updated_at_ms = ?4 WHERE singleton = 1",
+                    params![STORE_SCHEMA_VERSION, next_revision_sql, next_json, now],
+                )
+                .map_err(|error| format!("无法写入 AppState 背景同步投影: {error}"))?;
+            insert_event(
+                &transaction,
+                "sync-background-applied",
+                &changed_domains(Some(&current_value), &next_value),
+                now,
+            )?;
+            prune_events(&transaction, now)?;
+        }
+        if let Some(background) = projected_background {
+            let fields = background
+                .fields
+                .clone()
+                .unwrap_or_else(default_background_sync_fields);
+            transaction
+                .execute(
+                    "INSERT INTO app_sync_background_state(singleton, content_hash)
+                     VALUES (1, ?1)
+                     ON CONFLICT(singleton) DO UPDATE SET content_hash = excluded.content_hash",
+                    params![sync_fields_hash(&fields)?],
+                )
+                .map_err(|error| format!("无法记录 AppState 远端背景同步状态: {error}"))?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO app_sync_background_projection(
+                    singleton, vault_id, merge_revision, projection_hash
+                 ) VALUES (1, ?1, ?2, ?3)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                    vault_id = excluded.vault_id,
+                    merge_revision = excluded.merge_revision,
+                    projection_hash = excluded.projection_hash",
+                params![vault_id, merge_revision_sql, projection_hash],
+            )
+            .map_err(|error| format!("无法推进 AppState 背景同步投影状态: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交 AppState 背景同步投影事务: {error}"))?;
+        Ok(if changed {
+            ProjectionOutcome::Applied
+        } else {
+            ProjectionOutcome::Unchanged
+        })
+    }
+
     pub(crate) fn apply_remote_history_projection(
         &self,
         vault_id: &str,
@@ -4703,12 +5114,21 @@ impl AppStore {
                 "host" => EntityKind::Host,
                 "script" => EntityKind::Script,
                 "setting" => EntityKind::Setting,
+                "background" => EntityKind::Background,
                 "history" => EntityKind::History,
                 _ => return Err("AppState 同步 changefeed 实体类型损坏".to_string()),
             };
             if let LocalEntityMutation::Patch(fields) = &mutation {
                 if !entity_fields_are_syncable(&entity_kind, fields) {
                     return Err("AppState 同步 changefeed 字段未通过协议验证".to_string());
+                }
+            }
+            if entity_kind == EntityKind::Background {
+                if entity_id != MANAGED_BACKGROUND_ENTITY_ID {
+                    return Err("AppState 背景同步 changefeed 实体 ID 无效".to_string());
+                }
+                if let LocalEntityMutation::Patch(fields) = &mutation {
+                    validate_background_projection_fields(fields)?;
                 }
             }
             changes.push(PendingEntitySyncChange {
@@ -5539,6 +5959,166 @@ mod tests {
                 })
                 .is_err()
         );
+        assert_eq!(store.snapshot().unwrap().revision, revision);
+    }
+
+    #[test]
+    fn managed_background_changefeed_and_remote_projection_are_bounded_and_non_echoing() {
+        let root = TempDir::new("managed-background");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        acknowledge_initial_host(&store, &vault_id);
+
+        let first_blob = "ab".repeat(32);
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["wallpaper"] = serde_json::json!({
+            "source": "local",
+            "value": "normalized.png",
+            "opacity": 0.35,
+            "managedBlobId": first_blob,
+        });
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        let changes = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 2);
+        let background = changes
+            .iter()
+            .find(|change| change.entity_kind == EntityKind::Background)
+            .unwrap();
+        assert_eq!(background.entity_id, MANAGED_BACKGROUND_ENTITY_ID);
+        let LocalEntityMutation::Patch(fields) = &background.mutation else {
+            panic!("managed background must be a patch");
+        };
+        assert_eq!(
+            fields,
+            &BTreeMap::from([
+                ("blobId".to_string(), FieldValue::BlobRef(first_blob.clone())),
+                (
+                    "kind".to_string(),
+                    FieldValue::Text("managed-blob".to_string()),
+                ),
+            ])
+        );
+        for change in changes {
+            store
+                .acknowledge_entity_sync_change(&vault_id, &change.operation_id)
+                .unwrap();
+        }
+
+        let second_blob = "cd".repeat(32);
+        let projection = vec![MergedEntityProjection {
+            entity_id: MANAGED_BACKGROUND_ENTITY_ID.to_string(),
+            fields: Some(BTreeMap::from([
+                (
+                    "blobId".to_string(),
+                    FieldValue::BlobRef(second_blob.clone()),
+                ),
+                (
+                    "kind".to_string(),
+                    FieldValue::Text("managed-blob".to_string()),
+                ),
+            ])),
+        }];
+        assert_eq!(
+            store
+                .apply_remote_background_projection(&vault_id, 2, &projection, 5_000)
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let projected: Value = serde_json::from_str(
+            store.snapshot().unwrap().state_json.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(projected["wallpaper"]["source"], "local");
+        assert_eq!(projected["wallpaper"]["managedBlobId"], second_blob);
+        assert_eq!(projected["wallpaper"]["opacity"], 0.35);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+
+        let mut local_clear = projected.clone();
+        local_clear["wallpaper"]["source"] = Value::String("none".to_string());
+        local_clear["wallpaper"]["value"] = Value::String(String::new());
+        local_clear["wallpaper"]
+            .as_object_mut()
+            .unwrap()
+            .remove("managedBlobId");
+        store
+            .save(SaveAppStateRequest {
+                state_json: local_clear.to_string(),
+                expected_revision: store.snapshot().unwrap().revision,
+            })
+            .unwrap();
+        let clear_change = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(clear_change.len(), 1);
+        assert_eq!(clear_change[0].entity_kind, EntityKind::Background);
+        assert_eq!(clear_change[0].mutation, LocalEntityMutation::Delete);
+        store
+            .acknowledge_entity_sync_change(&vault_id, &clear_change[0].operation_id)
+            .unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: projected.to_string(),
+                expected_revision: store.snapshot().unwrap().revision,
+            })
+            .unwrap();
+        let restore_change = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(restore_change.len(), 1);
+        assert!(matches!(
+            &restore_change[0].mutation,
+            LocalEntityMutation::Patch(_)
+        ));
+        store
+            .acknowledge_entity_sync_change(&vault_id, &restore_change[0].operation_id)
+            .unwrap();
+
+        let none = vec![MergedEntityProjection {
+            entity_id: MANAGED_BACKGROUND_ENTITY_ID.to_string(),
+            fields: None,
+        }];
+        assert_eq!(
+            store
+                .apply_remote_background_projection(&vault_id, 3, &none, 5_001)
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let cleared: Value = serde_json::from_str(
+            store.snapshot().unwrap().state_json.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cleared["wallpaper"]["source"], "none");
+        assert!(cleared["wallpaper"].get("managedBlobId").is_none());
+        assert_eq!(cleared["wallpaper"]["opacity"], 0.35);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+
+        let revision = store.snapshot().unwrap().revision;
+        let mut invalid_none = cleared.clone();
+        invalid_none["wallpaper"]["managedBlobId"] = Value::String("ef".repeat(32));
+        assert!(store
+            .save(SaveAppStateRequest {
+                state_json: invalid_none.to_string(),
+                expected_revision: revision,
+            })
+            .is_err());
+        assert_eq!(store.snapshot().unwrap().revision, revision);
+
+        let mut invalid = cleared;
+        invalid["wallpaper"]["source"] = Value::String("local".to_string());
+        invalid["wallpaper"]["managedBlobId"] = Value::String("INVALID".to_string());
+        assert!(store
+            .save(SaveAppStateRequest {
+                state_json: invalid.to_string(),
+                expected_revision: revision,
+            })
+            .is_err());
         assert_eq!(store.snapshot().unwrap().revision, revision);
     }
 
@@ -7226,6 +7806,77 @@ mod tests {
                 .revision,
             0
         );
+    }
+
+    #[test]
+    fn version_ten_changefeed_is_preserved_when_background_contract_is_added() {
+        let root = TempDir::new("sync-v10-background-migration");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let operation_id = store.pending_entity_sync_changes(128).unwrap()[0]
+            .operation_id
+            .clone();
+        drop(store);
+
+        let connection = open_connection(&database_path(&root.0)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE app_sync_background_state;
+                 DROP TABLE app_sync_background_projection;
+                 DROP INDEX idx_app_sync_changes_revision;
+                 DROP INDEX idx_app_sync_changes_kind_revision;
+                 ALTER TABLE app_sync_changes RENAME TO app_sync_changes_v11;
+                 CREATE TABLE app_sync_changes (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    entity_id TEXT NOT NULL,
+                    mutation_kind TEXT NOT NULL CHECK (mutation_kind IN ('patch', 'delete')),
+                    fields_json TEXT,
+                    state_revision INTEGER NOT NULL CHECK (state_revision > 0),
+                    created_at_ms INTEGER NOT NULL,
+                    entity_kind TEXT NOT NULL CHECK (
+                        entity_kind IN ('host', 'script', 'setting', 'history')
+                    ),
+                    CHECK ((mutation_kind = 'patch') = (fields_json IS NOT NULL))
+                 );
+                 INSERT INTO app_sync_changes(
+                    seq, operation_id, entity_id, mutation_kind, fields_json,
+                    state_revision, created_at_ms, entity_kind
+                 ) SELECT seq, operation_id, entity_id, mutation_kind, fields_json,
+                          state_revision, created_at_ms, entity_kind
+                   FROM app_sync_changes_v11;
+                 DROP TABLE app_sync_changes_v11;
+                 CREATE INDEX idx_app_sync_changes_revision
+                    ON app_sync_changes(state_revision, seq);
+                 CREATE INDEX idx_app_sync_changes_kind_revision
+                    ON app_sync_changes(entity_kind, state_revision, seq);
+                 PRAGMA user_version = 10;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = AppStore::load(root.0.clone()).unwrap();
+        let changes = migrated.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].operation_id, operation_id);
+        let connection = open_connection(&database_path(&root.0)).unwrap();
+        assert_eq!(current_schema(&connection).unwrap(), STORE_SCHEMA_VERSION);
+        let tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN (
+                    'app_sync_background_state', 'app_sync_background_projection'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
     }
 
     #[test]

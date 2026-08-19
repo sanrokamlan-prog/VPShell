@@ -361,6 +361,7 @@ interface RenderAsset {
   label: string;
   mediaType: string;
   size: number;
+  managedBlobId: string | null;
 }
 
 const CUSTOM_FONT_FAMILY = "VPShell Custom Font";
@@ -1051,6 +1052,13 @@ function App() {
     void invoke<RenderAsset | null>("load_font_asset").then((asset) => {
       if (asset) void registerFontAsset(asset);
     }).catch(() => undefined);
+  // Managed fonts are restored once after the SQLite snapshot is ready.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appStoreStatus.ready]);
+
+  useEffect(() => {
+    if (!appStoreStatus.ready || !isDesktopRuntime()) return;
+    let active = true;
     if (appState.wallpaper.source === "none") {
       setRenderedWallpaper("");
       return;
@@ -1059,17 +1067,36 @@ function App() {
       void invoke<RenderAsset>("install_wallpaper_asset", {
         request: { source: "legacy-data", value: appState.wallpaper.value },
       }).then((asset) => {
+        if (!active) return;
         setRenderedWallpaper(asset.dataUrl);
-        setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, value: asset.label } }));
-      }).catch((error) => showToast(`旧壁纸迁移失败：${String(error)}`));
-      return;
+        setAppState((current) => ({
+          ...current,
+          wallpaper: {
+            ...current.wallpaper,
+            value: asset.label,
+            managedBlobId: asset.managedBlobId ?? undefined,
+          },
+        }));
+      }).catch((error) => {
+        if (active) showToast(`旧壁纸迁移失败：${String(error)}`);
+      });
+      return () => { active = false; };
     }
+    const expectedBlobId = appState.wallpaper.managedBlobId;
     void invoke<RenderAsset | null>("load_wallpaper_asset")
-      .then((asset) => setRenderedWallpaper(asset?.dataUrl ?? ""))
-      .catch(() => setRenderedWallpaper(""));
-  // Managed assets are restored once after the SQLite snapshot is ready.
+      .then((asset) => {
+        if (!active) return;
+        setRenderedWallpaper(
+          expectedBlobId && asset?.managedBlobId !== expectedBlobId ? "" : asset?.dataUrl ?? "",
+        );
+      })
+      .catch(() => {
+        if (active) setRenderedWallpaper("");
+      });
+    return () => { active = false; };
+  // The source/blob identity changes only after an asset has been installed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appStoreStatus.ready]);
+  }, [appState.wallpaper.managedBlobId, appState.wallpaper.source, appStoreStatus.ready]);
 
   const updateSession = useCallback((sessionId: string, patch: Partial<TerminalSession>) => {
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, ...patch } : session));
@@ -2114,7 +2141,12 @@ function App() {
       setRenderedWallpaper(asset.dataUrl);
       setAppState((current) => ({
         ...current,
-        wallpaper: { ...current.wallpaper, source: "local", value: asset.label },
+        wallpaper: {
+          ...current.wallpaper,
+          source: "local",
+          value: asset.label,
+          managedBlobId: asset.managedBlobId ?? undefined,
+        },
       }));
       showToast(`已启用本机壁纸 ${asset.label}`);
     } catch (error) {
@@ -2147,6 +2179,13 @@ function App() {
         request: { source: "url", value: appState.wallpaper.value.trim() },
       });
       setRenderedWallpaper(asset.dataUrl);
+      setAppState((current) => ({
+        ...current,
+        wallpaper: {
+          ...current.wallpaper,
+          managedBlobId: asset.managedBlobId ?? undefined,
+        },
+      }));
       showToast("HTTPS 壁纸已由 Rust 下载并缓存");
     } catch (error) {
       showToast(`壁纸下载失败：${String(error)}`);
@@ -3366,11 +3405,11 @@ function App() {
       {dialog === "wallpaper" ? (
         <Dialog title="终端外观" wide onClose={() => setDialog(null)} footer={<button className="primary-button" type="button" onClick={() => setDialog(null)}>完成</button>}>
           <div className="wallpaper-options">
-            <label className={appState.wallpaper.source === "none" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "none"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "none", value: "" } })); }} /><span>纯色背景</span></label>
+            <label className={appState.wallpaper.source === "none" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "none"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "none", value: "", managedBlobId: undefined } })); }} /><span>纯色背景</span></label>
             <button className={appState.wallpaper.source === "local" ? "active" : ""} type="button" onClick={() => void chooseLocalWallpaper()}><Image size={15} /><span>本机图片</span></button>
-            <label className={appState.wallpaper.source === "url" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "url"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: "" } })); }} /><span>URL 图片</span></label>
+            <label className={appState.wallpaper.source === "url" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "url"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: "", managedBlobId: undefined } })); }} /><span>URL 图片</span></label>
           </div>
-          <label className="field full"><span>图片地址</span><div className="path-picker"><input type="url" disabled={appState.wallpaper.source !== "url"} value={appState.wallpaper.source === "url" ? appState.wallpaper.value : ""} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: event.target.value } }))} placeholder="https://image.example.com/background.webp" /><button className="secondary-button" type="button" disabled={appState.wallpaper.source !== "url" || !appState.wallpaper.value.trim()} onClick={() => void applyRemoteWallpaper()}><Download size={14} /> 应用</button></div></label>
+          <label className="field full"><span>图片地址</span><div className="path-picker"><input type="url" disabled={appState.wallpaper.source !== "url"} value={appState.wallpaper.source === "url" ? appState.wallpaper.value : ""} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: event.target.value, managedBlobId: undefined } }))} placeholder="https://image.example.com/background.png" /><button className="secondary-button" type="button" disabled={appState.wallpaper.source !== "url" || !appState.wallpaper.value.trim()} onClick={() => void applyRemoteWallpaper()}><Download size={14} /> 应用</button></div></label>
           <label className="slider-field"><span>背景可见度</span><input type="range" min="0.05" max="0.65" step="0.05" value={appState.wallpaper.opacity} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, opacity: Number(event.target.value) } }))} /><output>{Math.round(appState.wallpaper.opacity * 100)}%</output></label>
           <div className="appearance-divider" />
           <div className="appearance-heading"><Type size={16} /><strong>终端字体</strong>{appState.terminalAppearance.customFontName ? <small>{appState.terminalAppearance.customFontName}</small> : null}</div>

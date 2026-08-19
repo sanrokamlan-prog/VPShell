@@ -15,12 +15,17 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{
-    app_store::AppStore,
+    app_store::{AppStore, MANAGED_BACKGROUND_ENTITY_ID},
+    local_assets::LocalAssetManager,
+    sync_blob::{
+        equivalent_blob_objects, object_key_matches_blob_envelope, prepare_wallpaper_blob,
+        restore_wallpaper_blob,
+    },
     sync_crypto::{
         Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
         create_password_keyslot, open_password_keyslot,
     },
-    sync_merge::MergeConflictSnapshot,
+    sync_merge::{EntityKind, FieldValue, LocalEntityMutation, MergeConflictSnapshot},
     sync_outbox::{AttemptFailure, JournalErrorCode, RemoteApplyOutcome, SyncJournal},
     sync_provider::{
         LocalFolderProvider, ProviderCancellation, ProviderError, ProviderErrorCode,
@@ -181,6 +186,7 @@ impl Default for CoordinatorRuntime {
 #[derive(Clone)]
 pub(crate) struct SyncCoordinatorManager {
     journal: SyncJournal,
+    assets: LocalAssetManager,
     runtime: Arc<Mutex<CoordinatorRuntime>>,
 }
 
@@ -211,10 +217,19 @@ struct CycleCounts {
 
 impl SyncCoordinatorManager {
     pub(crate) fn open(app_data_directory: std::path::PathBuf) -> Result<Self, String> {
+        let assets = LocalAssetManager::load(app_data_directory.clone())?;
+        Self::open_with_assets(app_data_directory, assets)
+    }
+
+    pub(crate) fn open_with_assets(
+        app_data_directory: std::path::PathBuf,
+        assets: LocalAssetManager,
+    ) -> Result<Self, String> {
         let journal = SyncJournal::open(app_data_directory)
             .map_err(|_| "无法初始化同步协调器 journal".to_string())?;
         Ok(Self {
             journal,
+            assets,
             runtime: Arc::new(Mutex::new(CoordinatorRuntime::default())),
         })
     }
@@ -659,6 +674,7 @@ impl SyncCoordinatorManager {
         self.drain_app_state_changes(app_store, vault_key, vault_id, now_ms)?;
         let uploaded = self.push_pending(
             provider,
+            vault_key,
             vault_id,
             remote_prefix,
             cancellation,
@@ -686,6 +702,13 @@ impl SyncCoordinatorManager {
             }
         }
         self.check_generation(generation, cancellation)?;
+        downloaded = downloaded.saturating_add(self.restore_background_asset(
+            app_store,
+            provider,
+            cancellation,
+            vault_key,
+            vault_id,
+        )?);
         self.apply_app_state_projections(app_store, vault_id, now_ms)?;
         self.journal.prune(now_ms).map_err(journal_code)?;
         Ok(CycleCounts {
@@ -735,6 +758,18 @@ impl SyncCoordinatorManager {
             .map_err(|_| "app-state-writeback".to_string())?;
         let projection = self
             .journal
+            .background_merge_projection()
+            .map_err(journal_code)?;
+        app_store
+            .apply_remote_background_projection(
+                vault_id,
+                projection.revision,
+                &projection.entities,
+                now_ms,
+            )
+            .map_err(|_| "app-state-writeback".to_string())?;
+        let projection = self
+            .journal
             .history_merge_projection()
             .map_err(journal_code)?;
         app_store
@@ -746,6 +781,65 @@ impl SyncCoordinatorManager {
             )
             .map_err(|_| "app-state-writeback".to_string())?;
         Ok(())
+    }
+
+    fn restore_background_asset(
+        &self,
+        app_store: &AppStore,
+        provider: &dyn SyncObjectProvider,
+        cancellation: &ProviderCancellation,
+        vault_key: &VaultKey,
+        vault_id: &str,
+    ) -> Result<u32, String> {
+        if !app_store
+            .pending_entity_sync_changes(1)
+            .map_err(|_| "app-state-handoff".to_string())?
+            .is_empty()
+        {
+            return Ok(0);
+        }
+        let projection = self
+            .journal
+            .background_merge_projection()
+            .map_err(journal_code)?;
+        if projection.entities.is_empty() {
+            return Ok(0);
+        }
+        if projection.entities.len() != 1
+            || projection.entities[0].entity_id != MANAGED_BACKGROUND_ENTITY_ID
+        {
+            return Err("protocol".to_string());
+        }
+        let Some(fields) = projection.entities[0].fields.as_ref() else {
+            return Ok(0);
+        };
+        match fields.get("kind") {
+            Some(FieldValue::Text(kind)) if kind == "managed-blob" && fields.len() == 2 => {
+                let blob_id = match fields.get("blobId") {
+                    Some(FieldValue::BlobRef(value)) => value,
+                    _ => return Err("protocol".to_string()),
+                };
+                if self.assets.syncable_wallpaper(blob_id).is_ok() {
+                    return Ok(0);
+                }
+                let restored = restore_wallpaper_blob(
+                    provider,
+                    cancellation,
+                    vault_key,
+                    vault_id,
+                    blob_id,
+                )?;
+                self.assets
+                    .install_synced_wallpaper(
+                        &restored.blob_id,
+                        &restored.media_type,
+                        &restored.bytes,
+                    )
+                    .map_err(|_| "blob-integrity".to_string())?;
+                Ok(restored.object_count)
+            }
+            _ => Err("protocol".to_string()),
+        }
     }
 
     fn drain_app_state_changes(
@@ -762,6 +856,48 @@ impl SyncCoordinatorManager {
             .pending_entity_sync_changes(MAX_PUSH_OBJECTS_PER_CYCLE)
             .map_err(|_| "app-state-handoff".to_string())?
         {
+            if change.entity_kind == EntityKind::Background {
+                match &change.mutation {
+                    LocalEntityMutation::Patch(fields)
+                        if matches!(
+                            fields.get("kind"),
+                            Some(FieldValue::Text(kind)) if kind == "managed-blob"
+                        ) && fields.len() == 2 =>
+                    {
+                        let blob_id = match fields.get("blobId") {
+                            Some(FieldValue::BlobRef(value)) => value,
+                            _ => return Err("app-state-handoff".to_string()),
+                        };
+                        let wallpaper = self
+                            .assets
+                            .syncable_wallpaper(blob_id)
+                            .map_err(|_| "blob-source-invalid".to_string())?;
+                        for object in prepare_wallpaper_blob(vault_key, vault_id, &wallpaper)? {
+                            let envelope = EncryptedSyncObject::decode(&object.encoded)
+                                .map_err(|_| "blob-encrypt".to_string())?;
+                            if !object_key_matches_blob_envelope(
+                                &object.key,
+                                vault_id,
+                                &envelope,
+                            ) {
+                                return Err("protocol".to_string());
+                            }
+                            self.journal
+                                .enqueue_local_blob(
+                                    vault_key,
+                                    &object.key,
+                                    &object.encoded,
+                                    now_ms,
+                                )
+                                .map_err(journal_code)?;
+                        }
+                    }
+                    LocalEntityMutation::Delete => {}
+                    LocalEntityMutation::Patch(_) => {
+                        return Err("app-state-handoff".to_string());
+                    }
+                }
+            }
             self.journal
                 .enqueue_local_entity_change(
                     vault_key,
@@ -789,6 +925,7 @@ impl SyncCoordinatorManager {
     fn push_pending(
         &self,
         provider: &dyn SyncObjectProvider,
+        vault_key: &VaultKey,
         vault_id: &str,
         remote_prefix: &str,
         cancellation: &ProviderCancellation,
@@ -819,15 +956,19 @@ impl SyncCoordinatorManager {
                     return Err("integrity".to_string());
                 }
             };
-            let device_prefix = envelope
-                .device_id()
-                .map(|device_id| format!("{remote_prefix}{device_id}/"));
-            if envelope.vault_id() != vault_id
-                || envelope.object_kind() != &SyncObjectKind::Event
-                || device_prefix
-                    .as_deref()
-                    .is_none_or(|prefix| !claim.object_key.starts_with(prefix))
-            {
+            let valid_identity = if envelope.object_kind() == &SyncObjectKind::Event {
+                envelope.vault_id() == vault_id
+                    && envelope.device_id().is_some_and(|device_id| {
+                        claim
+                            .object_key
+                            .starts_with(&format!("{remote_prefix}{device_id}/"))
+                    })
+            } else if envelope.object_kind() == &SyncObjectKind::Blob {
+                object_key_matches_blob_envelope(&claim.object_key, vault_id, &envelope)
+            } else {
+                false
+            };
+            if !valid_identity {
                 self.journal
                     .mark_failed(
                         &claim.object_key,
@@ -850,6 +991,47 @@ impl SyncCoordinatorManager {
                         .pause_claim(&claim.object_key, &claim.lease_id, now_ms)
                         .map_err(journal_code)?;
                     return Err("cancelled".to_string());
+                }
+                Err(error)
+                    if error.code == ProviderErrorCode::Conflict
+                        && envelope.object_kind() == &SyncObjectKind::Blob =>
+                {
+                    let remote = match provider.get(&claim.object_key, cancellation) {
+                        Ok(remote) => remote,
+                        Err(error) if error.code == ProviderErrorCode::Cancelled => {
+                            self.journal
+                                .pause_claim(&claim.object_key, &claim.lease_id, now_ms)
+                                .map_err(journal_code)?;
+                            return Err("cancelled".to_string());
+                        }
+                        Err(error) => {
+                            let (failure, code) = provider_failure(&error);
+                            self.journal
+                                .mark_failed(
+                                    &claim.object_key,
+                                    &claim.lease_id,
+                                    failure,
+                                    now_ms,
+                                )
+                                .map_err(journal_code)?;
+                            return Err(code.to_string());
+                        }
+                    };
+                    if !equivalent_blob_objects(vault_key, &claim.encrypted_object, &remote) {
+                        self.journal
+                            .mark_failed(
+                                &claim.object_key,
+                                &claim.lease_id,
+                                AttemptFailure::Conflict,
+                                now_ms,
+                            )
+                            .map_err(journal_code)?;
+                        return Err("immutable-conflict".to_string());
+                    }
+                    self.journal
+                        .mark_published(&claim.object_key, &claim.lease_id, now_ms)
+                        .map_err(journal_code)?;
+                    uploaded = uploaded.saturating_add(1);
                 }
                 Err(error) => {
                     let (failure, code) = provider_failure(&error);
@@ -1124,11 +1306,13 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use base64::prelude::*;
     use uuid::Uuid;
 
     use super::*;
     use crate::{
         app_store::SaveAppStateRequest,
+        local_assets::InstallWallpaperRequest,
         sync_crypto::{SyncObjectKind, encrypt_sync_object},
         sync_provider::{
             ProviderError, ProviderErrorCode, ProviderResult, PutObjectOutcome, SyncObjectPage,
@@ -1176,6 +1360,12 @@ mod tests {
             "onboardingCompleted": false
         })
         .to_string()
+    }
+
+    fn png_fixture() -> Vec<u8> {
+        BASE64_STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap()
     }
 
     #[derive(Default)]
@@ -1435,6 +1625,80 @@ mod tests {
                 .windows(b"ssh-reference".len())
                 .any(|value| value == b"ssh-reference")
         );
+    }
+
+    #[test]
+    fn managed_png_blob_uploads_before_reference_and_restores_after_local_loss() {
+        let root = TempDir::new("managed-wallpaper");
+        let store = test_app_store(&root);
+        let assets = LocalAssetManager::load(root.0.clone()).unwrap();
+        let source = root.0.join("source.png");
+        fs::write(&source, png_fixture()).unwrap();
+        let installed = assets
+            .install_wallpaper(InstallWallpaperRequest {
+                source: "local".to_string(),
+                value: source.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+        let blob_id = installed.managed_blob_id.unwrap();
+        let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
+        state["wallpaper"] = serde_json::json!({
+            "source": "local",
+            "value": "source.png",
+            "opacity": 0.2,
+            "managedBlobId": blob_id,
+        });
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 0,
+            })
+            .unwrap();
+
+        let coordinator =
+            SyncCoordinatorManager::open_with_assets(root.0.clone(), assets.clone()).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let vault_id = Uuid::new_v4().to_string();
+        coordinator
+            .attach_session(provider.clone(), VaultKey::generate().unwrap(), &vault_id)
+            .unwrap();
+        let uploaded = coordinator.run_once(&store, 2_000).unwrap();
+        assert_eq!(uploaded.last_uploaded_objects, 4);
+        assert!(provider
+            .objects
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.contains(&format!("/blobs/{blob_id}/manifest.oblob"))));
+
+        fs::remove_file(root.0.join("assets/wallpaper.asset")).unwrap();
+        fs::remove_file(root.0.join("assets/wallpaper.metadata.json")).unwrap();
+        let restored = coordinator.run_once(&store, 3_000).unwrap();
+        assert_eq!(restored.last_downloaded_objects, 2);
+        assert_eq!(
+            assets.syncable_wallpaper(&blob_id).unwrap().blob_id,
+            blob_id
+        );
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+
+        let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
+        let mut cleared: serde_json::Value =
+            serde_json::from_str(snapshot["stateJson"].as_str().unwrap()).unwrap();
+        cleared["wallpaper"]["source"] = serde_json::Value::String("none".to_string());
+        cleared["wallpaper"]["value"] = serde_json::Value::String(String::new());
+        cleared["wallpaper"]
+            .as_object_mut()
+            .unwrap()
+            .remove("managedBlobId");
+        store
+            .save(SaveAppStateRequest {
+                state_json: cleared.to_string(),
+                expected_revision: snapshot["revision"].as_u64().unwrap(),
+            })
+            .unwrap();
+        let cleared = coordinator.run_once(&store, 4_000).unwrap();
+        assert_eq!(cleared.last_uploaded_objects, 1);
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
     }
 
     #[test]

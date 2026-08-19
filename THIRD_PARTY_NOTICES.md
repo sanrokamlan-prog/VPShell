@@ -35,6 +35,14 @@ MIT license, for bounded WebDAV multistatus parsing and validated href decoding.
 were already present as transitive dependencies of the locked Tauri/reqwest graph; their default
 features remain disabled. No third-party WebDAV implementation or source code was copied.
 
+## PNG decoding and canonical encoding
+
+VPShell directly uses `png` 0.17.16 from image-rs through its public decoder and encoder APIs to
+bound, decode and canonicalize syncable wallpaper images. The crate is distributed under MIT or
+Apache-2.0 and was already present in the locked dependency graph. No upstream source, examples,
+fixtures or assets were copied. Removing managed PNG wallpaper synchronization removes this direct
+dependency without changing other sync object formats.
+
 ## Android SSH compatibility transport
 
 VPShell uses `ssh2` 0.9.6 and its `libssh2-sys` dependency through their public Rust APIs. Both are

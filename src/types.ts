@@ -140,6 +140,7 @@ export interface WallpaperSettings {
   source: "none" | "local" | "url";
   value: string;
   opacity: number;
+  managedBlobId?: string;
 }
 
 export interface TerminalAppearanceSettings {

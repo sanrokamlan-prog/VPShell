@@ -884,6 +884,16 @@ impl SyncJournal {
         })
     }
 
+    pub(crate) fn background_merge_projection(
+        &self,
+    ) -> JournalResult<EntityMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let entities = state.background_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
     pub(crate) fn history_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
         self.transaction(|transaction| {
             let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
@@ -935,6 +945,82 @@ impl SyncJournal {
                 &hash,
                 now_ms,
                 apply_business_change,
+            )
+        })
+    }
+
+    pub(crate) fn enqueue_local_blob(
+        &self,
+        vault_key: &VaultKey,
+        object_key: &str,
+        encrypted_object: &[u8],
+        now_ms: i64,
+    ) -> JournalResult<EnqueueOutcome> {
+        validate_now(now_ms)?;
+        validate_key(object_key).map_err(|_| {
+            JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步 blob object key 无效",
+            )
+        })?;
+        let object = validate_envelope(encrypted_object)?;
+        if object.object_kind() != &SyncObjectKind::Blob
+            || object.device_id().is_some()
+            || object.sequence().is_some()
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步 blob 信封身份无效",
+            ));
+        }
+        let plaintext = decrypt_sync_object(vault_key, &object).map_err(|_| {
+            JournalError::new(JournalErrorCode::Authentication, "同步 blob 无法认证")
+        })?;
+        let hash = object_hash(encrypted_object);
+        self.transaction(|transaction| {
+            ensure_unblocked(transaction)?;
+            let existing: Option<(String, String, Vec<u8>)> = transaction
+                .query_row(
+                    "SELECT object_key, origin, encrypted_object FROM sync_operations
+                     WHERE vault_id = ?1 AND object_kind = 'blob' AND object_id = ?2",
+                    params![object.vault_id(), object.object_id()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法检查同步 blob operation")
+                })?;
+            if let Some((existing_key, origin, existing_encrypted)) = existing {
+                if existing_key != object_key || origin != "local" {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Conflict,
+                        "同步 blob 身份已由其他对象占用",
+                    ));
+                }
+                let existing_object = validate_envelope(&existing_encrypted)?;
+                let existing_plaintext = decrypt_sync_object(vault_key, &existing_object)
+                    .map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Authentication,
+                            "现有同步 blob 无法认证",
+                        )
+                    })?;
+                if existing_plaintext == plaintext {
+                    return Ok(EnqueueOutcome::AlreadyQueued);
+                }
+                return Err(JournalError::new(
+                    JournalErrorCode::Conflict,
+                    "同一同步 blob 身份的认证内容不同",
+                ));
+            }
+            enqueue_local_in_transaction(
+                transaction,
+                object_key,
+                encrypted_object,
+                &object,
+                &hash,
+                now_ms,
+                |_| Ok(()),
             )
         })
     }
@@ -1291,6 +1377,17 @@ impl SyncJournal {
                      WHERE q.state IN ('pending', 'retry_wait')
                        AND q.next_attempt_ms <= ?1 AND q.attempt_count < ?2
                        AND (?3 IS NULL OR o.vault_id = ?3)
+                       AND (
+                           o.object_kind = 'blob'
+                           OR NOT EXISTS (
+                               SELECT 1
+                               FROM sync_outbox dependency_q
+                               JOIN sync_operations dependency_o USING(object_key)
+                               WHERE dependency_o.vault_id = o.vault_id
+                                 AND dependency_o.object_kind = 'blob'
+                                 AND dependency_q.state != 'published'
+                           )
+                       )
                      ORDER BY q.next_attempt_ms, q.updated_at_ms, q.object_key
                      LIMIT 1",
                     params![now_ms, MAX_ATTEMPTS, vault_id],
@@ -1914,6 +2011,57 @@ mod tests {
         let status = journal.status().unwrap();
         assert_eq!(status.pending_objects, 1);
         assert_eq!(status.pending_bytes, object.len() as u64);
+    }
+
+    #[test]
+    fn retrying_blob_blocks_events_until_the_blob_is_published() {
+        let root = TempDir::new("blob-dependency");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let key = VaultKey::generate().unwrap();
+        let event = encrypted(&key, 1, b"background-reference");
+        let blob_id = "ab".repeat(32);
+        let blob = encrypted_blob(&key, &format!("{blob_id}-000000"), b"chunk");
+        journal
+            .enqueue_local("segments/device/1.oseg", &event, 0, |_| Ok(()))
+            .unwrap();
+        journal
+            .enqueue_local_blob(
+                &key,
+                &format!("vpshell/v1/{VAULT_ID}/blobs/{blob_id}/000000.oblob"),
+                &blob,
+                0,
+            )
+            .unwrap();
+
+        let first = journal.claim_next_for_vault(VAULT_ID, 0).unwrap().unwrap();
+        assert_eq!(first.encrypted_object, blob);
+        journal
+            .mark_failed(
+                &first.object_key,
+                &first.lease_id,
+                AttemptFailure::Network,
+                1,
+            )
+            .unwrap();
+        assert!(journal.claim_next_for_vault(VAULT_ID, 2).unwrap().is_none());
+
+        let retry = journal
+            .claim_next_for_vault(VAULT_ID, BASE_RETRY_MS + 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.encrypted_object, blob);
+        journal
+            .mark_published(
+                &retry.object_key,
+                &retry.lease_id,
+                BASE_RETRY_MS + 2,
+            )
+            .unwrap();
+        let reference = journal
+            .claim_next_for_vault(VAULT_ID, BASE_RETRY_MS + 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.encrypted_object, event);
     }
 
     #[test]

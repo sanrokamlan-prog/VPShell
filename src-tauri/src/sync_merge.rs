@@ -748,6 +748,10 @@ impl MergeState {
         self.entity_projection(EntityKind::Setting)
     }
 
+    pub(crate) fn background_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::Background)
+    }
+
     pub(crate) fn history_entity_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
         self.entity_projection(EntityKind::History)
     }
@@ -1190,6 +1194,22 @@ fn validate_patch(payload: &PatchPayload, operation: &MergeOperation) -> MergeRe
             "同步 patch 字段必须为 1 至 64 项",
         ));
     }
+    if payload.entity_kind == EntityKind::Background
+        && !(payload.fields.len() == 2
+            && matches!(
+                payload.fields.get("kind"),
+                Some(FieldValue::Text(value)) if value == "managed-blob"
+            )
+            && matches!(
+                payload.fields.get("blobId"),
+                Some(FieldValue::BlobRef(value)) if validate_hash(value, "background blob").is_ok()
+            ))
+    {
+        return Err(MergeError::new(
+            MergeErrorCode::InvalidInput,
+            "同步背景 patch 必须包含完整 managed blob 引用",
+        ));
+    }
     for (field, value) in &payload.fields {
         validate_field(&payload.entity_kind, field, value)?;
     }
@@ -1435,17 +1455,12 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
             FieldValue::Text(value),
         ) if valid_text(value, 256) => Ok(()),
         (EntityKind::Background, "kind", FieldValue::Text(value))
-            if matches!(value.as_str(), "none" | "managed-blob") =>
+            if value == "managed-blob" =>
         {
             Ok(())
         }
         (EntityKind::Background, "blobId", FieldValue::BlobRef(value))
             if validate_hash(value, "background blob").is_ok() =>
-        {
-            Ok(())
-        }
-        (EntityKind::Background, "opacity", FieldValue::Integer(value))
-            if (0..=100).contains(value) =>
         {
             Ok(())
         }
@@ -1555,7 +1570,7 @@ fn field_allowed(kind: &EntityKind, field: &str) -> bool {
                 | "packageTransfersEnabled"
                 | "onboardingCompleted"
         ),
-        EntityKind::Background => matches!(field, "kind" | "blobId" | "opacity"),
+        EntityKind::Background => matches!(field, "kind" | "blobId"),
         EntityKind::History => {
             matches!(
                 field,
@@ -1905,6 +1920,39 @@ mod tests {
         }
     }
 
+    fn background_patch(operation_number: u128, physical_ms: i64) -> MergeOperation {
+        let fields = BTreeMap::from([
+            (
+                "blobId".to_string(),
+                FieldValue::BlobRef("ab".repeat(32)),
+            ),
+            (
+                "kind".to_string(),
+                FieldValue::Text("managed-blob".into()),
+            ),
+        ]);
+        MergeOperation {
+            format_version: FORMAT_VERSION,
+            operation_id: operation_id(operation_number),
+            device_id: DEVICE_A.to_string(),
+            sequence: operation_number as u64,
+            hlc: HybridLogicalClock {
+                physical_ms,
+                logical: 0,
+            },
+            payload: MergePayload::Patch(PatchPayload {
+                entity_kind: EntityKind::Background,
+                entity_id: HOST_ID.to_string(),
+                observed_fields: fields
+                    .keys()
+                    .map(|field| (field.clone(), None))
+                    .collect(),
+                fields,
+                observed_tombstone: None,
+            }),
+        }
+    }
+
     fn current_field(state: &MergeState, kind: EntityKind, id: &str, field: &str) -> FieldValue {
         state.entities[&entity_key(&kind, id)].fields[field]
             .value
@@ -2136,33 +2184,7 @@ mod tests {
                 "fontSize",
                 FieldValue::Integer(16),
             ),
-            patch(
-                71,
-                DEVICE_A,
-                101,
-                EntityKind::Background,
-                HOST_ID,
-                "kind",
-                FieldValue::Text("managed-blob".into()),
-            ),
-            patch(
-                72,
-                DEVICE_A,
-                102,
-                EntityKind::Background,
-                HOST_ID,
-                "blobId",
-                FieldValue::BlobRef("ab".repeat(32)),
-            ),
-            patch(
-                73,
-                DEVICE_A,
-                103,
-                EntityKind::Background,
-                HOST_ID,
-                "opacity",
-                FieldValue::Integer(35),
-            ),
+            background_patch(71, 101),
             patch(
                 74,
                 DEVICE_A,
@@ -2271,7 +2293,32 @@ mod tests {
             .entity_fields(&EntityKind::Background, HOST_ID)
             .unwrap();
         assert_eq!(background["kind"], FieldValue::Text("managed-blob".into()));
-        assert_eq!(background["opacity"], FieldValue::Integer(35));
+        assert!(
+            patch(
+                81,
+                DEVICE_A,
+                111,
+                EntityKind::Background,
+                HOST_ID,
+                "opacity",
+                FieldValue::Integer(35),
+            )
+            .encode()
+            .is_err()
+        );
+        assert!(
+            patch(
+                82,
+                DEVICE_A,
+                112,
+                EntityKind::Background,
+                HOST_ID,
+                "kind",
+                FieldValue::Text("none".into()),
+            )
+            .encode()
+            .is_err()
+        );
         assert_eq!(MergeState::decode(&state.encode().unwrap()).unwrap(), state);
     }
 
