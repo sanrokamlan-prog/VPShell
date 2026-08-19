@@ -2,7 +2,7 @@
 
 当前实现补充：`onboardingCompleted`、默认监控采样频率与背景可见度已分别作为第三、第四、第五个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；它们分别只含一个布尔字段、一个 5–300 秒整数和一个 5%–65% 整数。通过秘密扫描的命令、远端路径与具名非敏感参数历史，以及 Rust 证明的已认证连接历史，使用独立 `history` 实体、稳定 UUID 和 tombstone 接入同一链路；含明显秘密、敏感/未知参数的记录、没有真实时间的旧路径和没有认证事实的旧/伪造连接条目保持本机。背景使用独立 `background` 实体和加密分块；PNG 由 Rust 解码并规范化，JPEG/WebP 通过结构、RIFF/chunk 或 JPEG 结束标记校验后保留原始编码；原始 URL、引导内容、运行中监控状态及设备本地数据仍不入同步包。
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible/Gateway 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、本机 operation Ed25519 签名封套，以及默认关闭的独立凭据 vault。桌面五种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth、S3 SigV4 与 Gateway 登录密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录；Gateway 可选 TOTP 只进入当次登录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。协调器现在以签名、加密且按 revision 不可变的远端 registry 链作为授权锚，并在 schema-v4 journal 持久化已验证水位；设备管理写操作、系统钥匙串恢复写回和 VMK/CVK 轮换流程仍未实现。SFTP/S3/Gateway 没有条件删除能力而保守保留旧密文，真实 Gateway、外部服务器与多设备矩阵也仍需验收。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible/Gateway 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、本机 operation Ed25519 签名封套，以及默认关闭的独立凭据 vault。桌面五种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth、S3 SigV4 与 Gateway 登录密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录；Gateway 可选 TOTP 只进入当次登录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。协调器以签名、加密且按 revision 不可变的远端 registry 链作为授权锚，在 schema-v4 journal 持久化已验证水位，并提供桌面受控登记、改名和撤销；系统钥匙串恢复写回和 VMK/CVK 轮换流程仍未实现。SFTP/S3/Gateway 没有条件删除能力而保守保留旧密文，真实 Gateway、外部服务器与多设备矩阵也仍需验收。
 
 ### 当前 v1 密码学边界
 
@@ -105,7 +105,7 @@ worker claim 使用两分钟租约；进程中断后的过期租约不会立即�
 
 HLC 不是权限或真实性来源，只解决时间漂移下的合并排序。签名、AEAD 和已信任设备记录负责完整性验证。
 
-当前内部 `sync_recovery` device registry 为严格 schema v1，最多 32 台，只保存 canonical device UUID、1–128 byte 非控制字符标签、公开 32-byte 签名键、时间与 active/revoked 状态。更新使用 expected revision；相同设备的公钥和加入身份不可替换，撤销单调且禁止撤销最后活动设备，合并时撤销优先并拒绝身份冲突。registry 的签名信封使用独立 domain、前序信封哈希和发布者身份，随后进入 `device-registry` AEAD 域；协调器只信任连续验证并写入本地水位的版本。封套自带公钥不再是生产远端授权来源。设备管理写入 UI、受控新增/重命名/撤销发布和撤销后的 VMK/CVK 轮换仍待实现。
+当前内部 `sync_recovery` device registry 为严格 schema v1，最多 32 台，只保存 canonical device UUID、1–128 byte 非控制字符标签、公开 32-byte 签名键、时间与 active/revoked 状态。更新使用 expected revision；相同设备的公钥和加入身份不可替换，撤销单调且禁止撤销最后活动设备，合并时撤销优先并拒绝身份冲突。registry 的签名信封使用独立 domain、前序信封哈希和发布者身份，随后进入 `device-registry` AEAD 域；协调器只信任连续验证并写入本地水位的版本。封套自带公钥不再是生产远端授权来源。未登记桌面可生成最多 2 KiB、15 分钟有效、绑定 vault/device/标签/公钥/随机数并由设备私钥自签的 base64url 请求；现有活动设备验证后以 expected revision 新增，改名和撤销也必须刷新最新链、签署下一不可变 revision、条件创建并回读验证。已登记或已撤销身份不能重复申请，当前发布设备不能自撤销；Android capability 不含这些命令。撤销后的 VMK/CVK 轮换仍待实现。
 
 ## 6. Provider 抽象
 

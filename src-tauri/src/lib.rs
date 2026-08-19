@@ -1574,6 +1574,68 @@ async fn list_sync_conflicts(
 }
 
 #[tauri::command]
+async fn list_sync_devices(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+) -> Result<sync_coordinator::SyncDeviceRegistrySnapshot, String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || coordinator.device_registry_snapshot())
+        .await
+        .map_err(|error| format!("同步设备列表任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn create_sync_device_enrollment(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    request: sync_coordinator::CreateDeviceEnrollmentRequest,
+) -> Result<sync_coordinator::DeviceEnrollmentResponse, String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        coordinator.create_device_enrollment(request, unix_time_ms()?)
+    })
+    .await
+    .map_err(|error| format!("同步设备登记请求任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn approve_sync_device_enrollment(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    request: sync_coordinator::ApproveDeviceEnrollmentRequest,
+) -> Result<sync_coordinator::SyncDeviceRegistrySnapshot, String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        coordinator.approve_device_enrollment(request, unix_time_ms()?)
+    })
+    .await
+    .map_err(|error| format!("同步设备登记批准任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn rename_sync_device(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    request: sync_coordinator::RenameSyncDeviceRequest,
+) -> Result<sync_coordinator::SyncDeviceRegistrySnapshot, String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        coordinator.rename_sync_device(request, unix_time_ms()?)
+    })
+    .await
+    .map_err(|error| format!("同步设备重命名任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn revoke_sync_device(
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    request: sync_coordinator::RevokeSyncDeviceRequest,
+) -> Result<sync_coordinator::SyncDeviceRegistrySnapshot, String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        coordinator.revoke_sync_device(request, unix_time_ms()?)
+    })
+    .await
+    .map_err(|error| format!("同步设备撤销任务异常结束: {error}"))?
+}
+
+#[tauri::command]
 async fn configure_local_folder_sync(
     app: tauri::AppHandle,
     coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
@@ -1795,6 +1857,15 @@ fn lock_sync(
     scheduler.stop()?;
     coordinator.detach_session()?;
     coordinator.status_with_app_store(store.inner())
+}
+
+fn unix_time_ms() -> Result<i64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "系统时间早于 Unix epoch".to_string())?
+        .as_millis()
+        .try_into()
+        .map_err(|_| "系统时间超过支持范围".to_string())
 }
 
 #[tauri::command]
@@ -2104,6 +2175,11 @@ pub fn run() {
             save_app_state,
             desktop_sync_status,
             list_sync_conflicts,
+            list_sync_devices,
+            create_sync_device_enrollment,
+            approve_sync_device_enrollment,
+            rename_sync_device,
+            revoke_sync_device,
             configure_local_folder_sync,
             configure_webdav_sync,
             configure_sftp_sync,

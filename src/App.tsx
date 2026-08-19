@@ -43,6 +43,7 @@ import {
   Server,
   Settings2,
   ShieldCheck,
+  ShieldX,
   Square,
   SquareTerminal,
   Trash2,
@@ -326,6 +327,36 @@ interface SyncCoordinatorStatus {
 interface SyncCycleResult {
   status: SyncCoordinatorStatus;
   appStore: AppStoreSnapshot;
+}
+
+type SyncDeviceRevocationReason = "lost" | "stolen" | "retired" | "compromised";
+
+interface SyncDeviceRecord {
+  deviceId: string;
+  label: string;
+  labelUpdatedAtMs: number;
+  addedAtMs: number;
+  status: { state: "active" } | {
+    state: "revoked";
+    revoked_at_ms: number;
+    reason: SyncDeviceRevocationReason;
+  };
+}
+
+interface SyncDeviceRegistrySnapshot {
+  schemaVersion: number;
+  vaultId: string;
+  revision: number;
+  localDeviceId: string;
+  devices: SyncDeviceRecord[];
+}
+
+interface SyncDeviceEnrollmentResponse {
+  schemaVersion: number;
+  deviceId: string;
+  label: string;
+  expiresAtMs: number;
+  enrollmentRequest: string;
 }
 
 type SyncConflictEntityKind = "host" | "script" | "setting" | "background";
@@ -642,6 +673,14 @@ function App() {
   const [syncConflictOffset, setSyncConflictOffset] = useState(0);
   const [syncConflictError, setSyncConflictError] = useState<string | null>(null);
   const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(null);
+  const [syncDevices, setSyncDevices] = useState<SyncDeviceRegistrySnapshot | null>(null);
+  const [syncDeviceError, setSyncDeviceError] = useState<string | null>(null);
+  const [syncDeviceBusy, setSyncDeviceBusy] = useState(false);
+  const [syncDeviceLabel, setSyncDeviceLabel] = useState("VPShell desktop");
+  const [syncDeviceLabels, setSyncDeviceLabels] = useState<Record<string, string>>({});
+  const [syncEnrollment, setSyncEnrollment] = useState<SyncDeviceEnrollmentResponse | null>(null);
+  const [syncEnrollmentApproval, setSyncEnrollmentApproval] = useState("");
+  const [syncRevocationReason, setSyncRevocationReason] = useState<SyncDeviceRevocationReason>("retired");
   const [toast, setToast] = useState<string | null>(null);
   const [installedFonts, setInstalledFonts] = useState<string[]>([]);
   const [fontRevision, setFontRevision] = useState(0);
@@ -788,6 +827,28 @@ function App() {
     }
     void refreshSyncConflicts(syncConflictOffset);
   }, [desktopSyncStatus?.configured, desktopSyncStatus?.mergeRevision, desktopSyncStatus?.openConflicts, dialog, refreshSyncConflicts, syncConflictOffset]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime() || dialog !== "sync" || !desktopSyncStatus?.configured) {
+      setSyncDevices(null);
+      setSyncDeviceError(null);
+      return;
+    }
+    let active = true;
+    void invoke<SyncDeviceRegistrySnapshot>("list_sync_devices")
+      .then((snapshot) => {
+        if (!active) return;
+        setSyncDevices(snapshot);
+        setSyncDeviceLabels(Object.fromEntries(snapshot.devices.map((device) => [device.deviceId, device.label])));
+        setSyncDeviceError(null);
+      })
+      .catch((error) => {
+        if (active) setSyncDeviceError(invokeErrorMessage(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [desktopSyncStatus?.configured, desktopSyncStatus?.deviceRegistryRevision, dialog]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return undefined;
@@ -2500,6 +2561,104 @@ function App() {
     }
   }
 
+  function applySyncDeviceSnapshot(snapshot: SyncDeviceRegistrySnapshot) {
+    setSyncDevices(snapshot);
+    setSyncDeviceLabels(Object.fromEntries(snapshot.devices.map((device) => [device.deviceId, device.label])));
+    setDesktopSyncStatus((current) => current ? {
+      ...current,
+      deviceRegistryRevision: snapshot.revision,
+      localDeviceAuthorized: snapshot.devices.some((device) => (
+        device.deviceId === snapshot.localDeviceId && device.status.state === "active"
+      )),
+      keyRotationRequired: snapshot.devices.some((device) => device.status.state === "revoked"),
+    } : current);
+    setSyncDeviceError(null);
+  }
+
+  async function createSyncDeviceEnrollment() {
+    setSyncDeviceBusy(true);
+    try {
+      const enrollment = await invoke<SyncDeviceEnrollmentResponse>("create_sync_device_enrollment", {
+        request: { label: syncDeviceLabel.trim() },
+      });
+      setSyncEnrollment(enrollment);
+      setSyncDeviceError(null);
+      showToast("设备登记请求已生成");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncDeviceError(message);
+      showToast(`生成登记请求失败：${message}`);
+    } finally {
+      setSyncDeviceBusy(false);
+    }
+  }
+
+  async function approveSyncDeviceEnrollment() {
+    if (!syncDevices) return;
+    setSyncDeviceBusy(true);
+    try {
+      const snapshot = await invoke<SyncDeviceRegistrySnapshot>("approve_sync_device_enrollment", {
+        request: {
+          expectedRevision: syncDevices.revision,
+          enrollmentRequest: syncEnrollmentApproval.trim(),
+        },
+      });
+      applySyncDeviceSnapshot(snapshot);
+      setSyncEnrollmentApproval("");
+      showToast("新同步设备已登记");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncDeviceError(message);
+      showToast(`批准登记失败：${message}`);
+    } finally {
+      setSyncDeviceBusy(false);
+    }
+  }
+
+  async function renameSyncDevice(device: SyncDeviceRecord) {
+    if (!syncDevices) return;
+    setSyncDeviceBusy(true);
+    try {
+      const snapshot = await invoke<SyncDeviceRegistrySnapshot>("rename_sync_device", {
+        request: {
+          expectedRevision: syncDevices.revision,
+          deviceId: device.deviceId,
+          label: (syncDeviceLabels[device.deviceId] ?? device.label).trim(),
+        },
+      });
+      applySyncDeviceSnapshot(snapshot);
+      showToast("同步设备名称已更新");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncDeviceError(message);
+      showToast(`更新设备名称失败：${message}`);
+    } finally {
+      setSyncDeviceBusy(false);
+    }
+  }
+
+  async function revokeSyncDevice(device: SyncDeviceRecord) {
+    if (!syncDevices || !window.confirm(`永久撤销“${device.label}”的同步授权吗？此操作不能撤销。`)) return;
+    setSyncDeviceBusy(true);
+    try {
+      const snapshot = await invoke<SyncDeviceRegistrySnapshot>("revoke_sync_device", {
+        request: {
+          expectedRevision: syncDevices.revision,
+          deviceId: device.deviceId,
+          reason: syncRevocationReason,
+        },
+      });
+      applySyncDeviceSnapshot(snapshot);
+      showToast("同步设备已永久撤销；请轮换 vault 密钥");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncDeviceError(message);
+      showToast(`撤销设备失败：${message}`);
+    } finally {
+      setSyncDeviceBusy(false);
+    }
+  }
+
   async function cancelDesktopSync() {
     try {
       const status = await invoke<SyncCoordinatorStatus>("cancel_sync");
@@ -2519,6 +2678,10 @@ function App() {
       setSyncConflictCenter(null);
       setSyncConflictError(null);
       setSyncConflictOffset(0);
+      setSyncDevices(null);
+      setSyncDeviceError(null);
+      setSyncEnrollment(null);
+      setSyncEnrollmentApproval("");
       setSyncPassword("");
       setWebDavPassword("");
       setWebDavCaPath("");
@@ -3452,6 +3615,50 @@ function App() {
             {desktopSyncStatus?.recoveryNote ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncStatus.recoveryNote}</p> : null}
             {desktopSyncError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncError}</p> : null}
           </div>
+          {desktopSyncStatus?.configured && syncDevices ? (
+            <section className="sync-device-center" aria-live="polite">
+              <div className="sync-device-header">
+                <div><ShieldCheck size={16} /><strong>同步设备</strong><span>revision {syncDevices.revision}</span></div>
+                <select aria-label="撤销原因" value={syncRevocationReason} disabled={syncDeviceBusy} onChange={(event) => setSyncRevocationReason(event.target.value as SyncDeviceRevocationReason)}>
+                  <option value="retired">停用</option>
+                  <option value="lost">丢失</option>
+                  <option value="stolen">被盗</option>
+                  <option value="compromised">疑似泄漏</option>
+                </select>
+              </div>
+              {!desktopSyncStatus.localDeviceAuthorized ? (
+                <div className="sync-device-enrollment">
+                  <label className="field"><span>本机设备名称</span><input maxLength={128} value={syncDeviceLabel} disabled={syncDeviceBusy} onChange={(event) => setSyncDeviceLabel(event.target.value)} /></label>
+                  <button className="secondary-button" type="button" disabled={syncDeviceBusy || !syncDeviceLabel.trim()} onClick={() => void createSyncDeviceEnrollment()}><Plus size={14} /> 生成登记请求</button>
+                  {syncEnrollment ? <>
+                    <label className="field span-2"><span>登记请求 · {new Date(syncEnrollment.expiresAtMs).toLocaleTimeString("zh-CN", { hour12: false })} 到期</span><textarea readOnly rows={3} value={syncEnrollment.enrollmentRequest} /></label>
+                    <button className="secondary-button" type="button" onClick={() => void navigator.clipboard.writeText(syncEnrollment.enrollmentRequest).then(() => showToast("登记请求已复制")).catch(() => showToast("无法访问系统剪贴板"))}><Copy size={14} /> 复制请求</button>
+                  </> : null}
+                </div>
+              ) : (
+                <div className="sync-device-enrollment">
+                  <label className="field span-2"><span>批准设备登记请求</span><textarea rows={3} maxLength={4096} value={syncEnrollmentApproval} disabled={syncDeviceBusy} onChange={(event) => setSyncEnrollmentApproval(event.target.value)} /></label>
+                  <button className="secondary-button" type="button" disabled={syncDeviceBusy || !syncEnrollmentApproval.trim()} onClick={() => void approveSyncDeviceEnrollment()}><Plus size={14} /> 验证并登记</button>
+                </div>
+              )}
+              <div className="sync-device-list">
+                {syncDevices.devices.map((device) => {
+                  const active = device.status.state === "active";
+                  const isLocal = device.deviceId === syncDevices.localDeviceId;
+                  return <article className="sync-device-item" key={device.deviceId}>
+                    <div className="sync-device-identity">
+                      <input aria-label={`${device.label} 的设备名称`} maxLength={128} value={syncDeviceLabels[device.deviceId] ?? device.label} disabled={!active || syncDeviceBusy || !desktopSyncStatus.localDeviceAuthorized} onChange={(event) => setSyncDeviceLabels((current) => ({ ...current, [device.deviceId]: event.target.value }))} />
+                      <span>{device.deviceId.slice(0, 8)} · {isLocal ? "本机" : active ? "已授权" : "已撤销"}</span>
+                    </div>
+                    <button className="icon-button" type="button" title="保存设备名称" aria-label="保存设备名称" disabled={!active || syncDeviceBusy || !desktopSyncStatus.localDeviceAuthorized || !(syncDeviceLabels[device.deviceId] ?? "").trim() || (syncDeviceLabels[device.deviceId] ?? device.label) === device.label} onClick={() => void renameSyncDevice(device)}><Check size={15} /></button>
+                    <button className="icon-button danger" type="button" title="永久撤销设备" aria-label="永久撤销设备" disabled={!active || isLocal || syncDeviceBusy || !desktopSyncStatus.localDeviceAuthorized} onClick={() => void revokeSyncDevice(device)}><ShieldX size={15} /></button>
+                  </article>;
+                })}
+              </div>
+              {syncDeviceError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {syncDeviceError}</p> : null}
+            </section>
+          ) : null}
+          {desktopSyncStatus?.configured && !syncDevices && syncDeviceError ? <p className="sync-device-load-error"><AlertTriangle size={14} /> {syncDeviceError}</p> : null}
           {desktopSyncStatus?.configured && desktopSyncStatus.openConflicts > 0 ? (
             <section className="sync-conflict-center" aria-live="polite">
               <div className="sync-conflict-header">

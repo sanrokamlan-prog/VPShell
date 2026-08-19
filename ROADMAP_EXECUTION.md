@@ -70,7 +70,7 @@
 | --- | --- |
 | 完成 | SQLite schema v1、事务迁移、revision 冲突、损坏/截断隔离备份和 90 天/10,000 事件有界保留 |
 | 完成 | 主机、命令/参数/路径历史、脚本、设置和背景元数据经一次性 legacy 导入迁离 WebView localStorage；文件坞打包设置也已合并 |
-| 完成 | 显式严格 CSP，移除 `null`；main window capability 只列事件、窗口动作、dialog/opener/updater/restart 和当前 51 个实际 Rust commands |
+| 完成 | 显式严格 CSP，移除 `null`；main window 的桌面/Android capability 按平台精确覆盖当前 107 个实际 Rust commands，桌面写能力不泄漏到 Android |
 | 完成 | 状态秘密字段/私钥正文拒绝、value-free 事件元数据、资产 IPC、capability/manifest/localStorage 静态安全回归测试 |
 | 完成 | rusqlite 0.40.2 bundled 依赖的 MIT/Apache-2.0 边界、默认 feature、网络/扩展权限、维护/删除方案已记录 |
 
@@ -127,9 +127,10 @@
 | 完成 | 桌面 SFTP provider 产品入口：复用已保存主机、known_hosts/精确 host-key pin 与本机认证材料，接入 Rust-owned 协调器和自动调度；提交 `9c4262c` 的 PR #1 run `32274011250` 六项全绿，广泛外部服务器矩阵仍需外部验收 |
 | 完成 | 桌面 S3-compatible provider 产品入口：HTTPS/no redirect、SigV4、系统凭据引用、可选受管 PEM CA、path-style/virtual-hosted URL、ListObjectsV2/GET/条件 PUT 接入同一协调器；提交 `613bb285` 的 PR #1 run `32280932435` 六项全绿，AWS/MinIO/其他实现仍需外部验收 |
 | 完成 | 自建 Gateway 产品入口：版本化 HTTPS login/session/list/get/条件 PUT、系统密码引用、当次可选 TOTP、受管 PEM CA、Rust journal device ID 与同一协调器已接线；对象路径修复提交 `3178d40` 的 PR #1 run `32286301875` 六项全绿，真实服务端限流/重放/恢复码/审计/撤销仍需外部实现与验收 |
-| 进行中 | 设备 operation 签名：Ed25519 严格签名封套、本机系统凭据私钥与真实 outbox 已接线；远端签名 registry trust anchor、持久防回滚水位、配置后上传/下载授权验签和桌面/Android 只读状态已提交，首轮 Actions 仅格式门禁失败，当前工作树已按 runner 输出修复。设备登记/重命名/撤销管理 UI、凭据 vault 系统钥匙串恢复/轮换及真实多设备矩阵仍待实现 |
+| 完成 | 设备 operation Ed25519 严格签名封套、本机系统凭据私钥、真实 outbox、远端签名 registry trust anchor、持久防回滚水位、配置后上传/下载授权验签和桌面/Android 只读状态已接线；格式修复提交 `0e95b52` 的 PR #1 run `32296587857` 六项全绿 |
+| 进行中 | 桌面受控设备登记、重命名与撤销：15 分钟 vault-bound 新设备自签申请、活动设备 expected-revision successor 发布/回读、具名 IPC、管理 UI 与 Android 精确禁权已在当前工作树实现并等待 Actions；凭据 vault 系统钥匙串恢复/轮换及真实多设备矩阵仍待实现 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322`、JPEG/WebP 已在 `32256446076` 通过 Actions，活动设备确认式 blob GC 已在 `32264835549` 通过 Actions 并对无条件删除 provider 保守保留。SFTP 产品入口与单一 Linux OpenSSH fixture 已在 `32274011250` 全绿，S3 产品入口与独立 SigV4 HTTPS fixture 已在 `32280932435` 全绿，Gateway 产品入口已在 `32286301875` 全绿。广泛外部 provider、远端 registry 锚定的 operation 验签、凭据恢复/轮换和真实多设备仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322`、JPEG/WebP 已在 `32256446076` 通过 Actions，活动设备确认式 blob GC 已在 `32264835549` 通过 Actions 并对无条件删除 provider 保守保留。SFTP 产品入口与单一 Linux OpenSSH fixture 已在 `32274011250` 全绿，S3 产品入口与独立 SigV4 HTTPS fixture 已在 `32280932435` 全绿，Gateway 产品入口已在 `32286301875` 全绿，远端 registry 授权锚与防回滚链已在 `32296587857` 全绿。广泛外部 provider、凭据恢复/轮换和真实多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -354,7 +355,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-19 | B9 远端设备 registry trust anchor 本机轻量门禁 | 基线提交 `9673be2` 的 PR #1 run `32292813793` 六项全绿；本项 `git diff --check`、package/Cargo/Tauri/default/Android capability 严格 JSON/TOML 解析、registry 签名 domain/前序 hash/SQLite trust 表/可信 merge 接线、状态字段、无新增 Rust/前端调试日志、Android 仅保留 `android_sync_status` 且九个配置/运行/解决/取消/锁定权限继续排除检查通过。无 `.codex-roadmap-complete`、`.codex-ready-to-commit`、`node_modules` 或 `target`，根分区起止均为 64%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、依赖、SDK；四平台 locked fmt/check/test、frontend 与 Android aarch64 debug APK/Gradle gate交给本项提交后的 PR #1 Actions。 |
 | 2026-08-19 | B9 远端设备 registry trust anchor 首轮 Actions 与格式修复 | 提交 `2bb9ff4` 的 PR #1 run `32295618321` 已全部进入终态：frontend 生产构建及 Android aarch64 debug APK/Gradle gate 成功；Ubuntu、Windows、macOS Intel/arm 四个平台均只在首个 `cargo fmt --check` 报告 `sync_coordinator.rs` 13 段、`sync_outbox.rs` 6 段和 `sync_recovery.rs` 5 段相同排版差异，locked check/test 与 Linux 真实 fixture 因而跳过。已严格按 Ubuntu job `96206108299` 的完整 runner diff 机械应用，不改变 registry、授权、签名或同步行为；等待格式修复提交后的完整矩阵，未全绿前不进入设备管理。 |
 | 2026-08-19 | B9 远端设备 registry trust anchor 格式修复本机轻量门禁 | `git diff --check`、仅 `sync_coordinator.rs`/`sync_outbox.rs`/`sync_recovery.rs` 与账本四文件的差异范围、Ubuntu runner 24 段目标排版逐段精确匹配及四个平台一致失败证据、frontend/Android 成功终态、无 `.codex-roadmap-complete`/`.codex-ready-to-commit`/`.codex-commit-message`/`node_modules`/`target` 检查通过；根分区复核 64%。VPS 无 Cargo/rustfmt，本轮未下载工具链、依赖或 SDK；四平台 locked fmt/check/test、Linux 真实 fixture、frontend 与 Android 构建交给格式修复提交后的 PR #1 Actions。 |
+| 2026-08-19 | B9 远端设备 registry trust anchor Actions 完成 | 格式修复提交 `0e95b52` 的 PR #1 run `32296587857` 已确认 frontend、Android aarch64 debug APK/Gradle gate、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test 六项全部 `COMPLETED/SUCCESS`；PR #1 仍为面向 `main` 的 Draft，head 与该提交一致。远端授权锚与防回滚链闭合，进入设备管理独立项。 |
+| 2026-08-19 | B9 设备登记/重命名/撤销本机轻量门禁 | 当前工作树新增 15 分钟、2 KiB、vault-bound 自签登记请求；活动设备通过具名 IPC 按 expected revision 批准、改名、撤销，successor 以签名 registry 无覆盖发布并回读校验，系统时间/取消/授权/最后活动设备/自撤销/重复登记均 fail closed。桌面 UI 展示 revision、本机授权、登记请求复制、批准、设备改名和永久撤销；Android capability 精确排除五个管理命令。聚焦 Rust 测试覆盖登记请求跨 vault/过期/篡改/非规范编码、真实 MemoryProvider 多设备批准/重命名/陈旧 revision/撤销后的同步阻止；`git diff --check`、严格 JSON、107-command handler/capability、权限 TOML 结构、Android 只读边界、无日志/秘密和无构建产物检查通过。VPS 无 Cargo/rustfmt/TypeScript compiler，未运行本地构建或下载依赖/SDK；本项完整 frontend、四平台 locked fmt/check/test、Linux provider/同步回归及 Android aarch64 debug APK/Gradle gate 交给本项提交后的 PR #1 Actions。根分区复核 64%。 |
 
 ## 下一个动作
 
-等待 supervisor 提交远端设备 registry trust anchor 的 CI 格式修复。下一轮必须先等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则定位并修复；全绿后继续设备登记/重命名/撤销的受控管理 IPC 与桌面 UI，Android 仍只读且 Sync capability disabled。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收。
+等待 supervisor 提交本项设备管理代码。下一轮必须先等待本项 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则定位并修复；全绿后继续凭据 vault 的系统钥匙串恢复写回、CVK/VMK 轮换与恢复路径。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收。

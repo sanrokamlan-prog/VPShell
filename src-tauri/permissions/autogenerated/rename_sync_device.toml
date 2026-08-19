@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rename-sync-device"
+description = "Enables the rename_sync_device command without any pre-configured scope."
+commands.allow = ["rename_sync_device"]
+
+[[permission]]
+identifier = "deny-rename-sync-device"
+description = "Denies the rename_sync_device command without any pre-configured scope."
+commands.deny = ["rename_sync_device"]

@@ -34,6 +34,11 @@ initialize_app_store
 save_app_state
 desktop_sync_status
 list_sync_conflicts
+list_sync_devices
+create_sync_device_enrollment
+approve_sync_device_enrollment
+rename_sync_device
+revoke_sync_device
 configure_local_folder_sync
 configure_webdav_sync
 configure_sftp_sync

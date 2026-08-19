@@ -47,8 +47,9 @@ use crate::{
         S3SyncProvider, SftpProviderConfig, SftpSyncProvider,
     },
     sync_recovery::{
-        DeviceRegistry, SignedDeviceRegistryEnvelope, decrypt_signed_device_registry,
-        encrypt_signed_device_registry,
+        DeviceEnrollmentRequest, DeviceRegistry, DeviceRegistryEntry, RecoveryError,
+        RecoveryErrorCode, RevocationReason, SignedDeviceRegistryEnvelope,
+        decrypt_signed_device_registry, encrypt_signed_device_registry,
     },
     sync_s3_provider::ReqwestS3ObjectTransport,
     sync_sftp_provider::Ssh2SftpObjectTransport,
@@ -222,6 +223,55 @@ pub(crate) struct ResolveSyncConflictRequest {
     expected_revision: u64,
     conflict_id: String,
     alternative_index: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncDeviceRegistrySnapshot {
+    schema_version: u16,
+    vault_id: String,
+    revision: u64,
+    local_device_id: String,
+    devices: Vec<DeviceRegistryEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CreateDeviceEnrollmentRequest {
+    label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeviceEnrollmentResponse {
+    schema_version: u16,
+    device_id: String,
+    label: String,
+    expires_at_ms: i64,
+    enrollment_request: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ApproveDeviceEnrollmentRequest {
+    expected_revision: u64,
+    enrollment_request: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RenameSyncDeviceRequest {
+    expected_revision: u64,
+    device_id: String,
+    label: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RevokeSyncDeviceRequest {
+    expected_revision: u64,
+    device_id: String,
+    reason: RevocationReason,
 }
 
 struct CoordinatorSession {
@@ -411,6 +461,209 @@ impl SyncCoordinatorManager {
             offset,
             conflicts: snapshot.conflicts,
         })
+    }
+
+    pub(crate) fn device_registry_snapshot(&self) -> Result<SyncDeviceRegistrySnapshot, String> {
+        let local_device_id = self.journal.local_device_id().map_err(journal_code)?;
+        let runtime = self.lock_runtime()?;
+        let session = runtime
+            .session
+            .as_ref()
+            .ok_or_else(|| "同步 vault 尚未解锁".to_string())?;
+        let registry = session
+            .device_registry
+            .as_ref()
+            .ok_or_else(|| "设备 registry 尚未载入".to_string())?;
+        Ok(SyncDeviceRegistrySnapshot {
+            schema_version: COORDINATOR_SCHEMA_VERSION,
+            vault_id: session.vault_id.clone(),
+            revision: registry.revision(),
+            local_device_id,
+            devices: registry.entries(),
+        })
+    }
+
+    pub(crate) fn create_device_enrollment(
+        &self,
+        request: CreateDeviceEnrollmentRequest,
+        now_ms: i64,
+    ) -> Result<DeviceEnrollmentResponse, String> {
+        let _guard = self.begin_configuration()?;
+        let (vault_id, local_device_id) = {
+            let runtime = self.lock_runtime()?;
+            let session = runtime
+                .session
+                .as_ref()
+                .ok_or_else(|| "同步 vault 尚未解锁".to_string())?;
+            let local_device_id = self.journal.local_device_id().map_err(journal_code)?;
+            let registry = session
+                .device_registry
+                .as_ref()
+                .ok_or_else(|| "设备 registry 尚未载入".to_string())?;
+            if registry
+                .entries()
+                .iter()
+                .any(|device| device.device_id == local_device_id)
+            {
+                return Err("device-already-registered".to_string());
+            }
+            (session.vault_id.clone(), local_device_id)
+        };
+        let signing_key = DeviceSigningKey::load_or_create(&local_device_id)
+            .map_err(|_| "device-key-unavailable".to_string())?;
+        let enrollment = DeviceEnrollmentRequest::create(
+            &vault_id,
+            &local_device_id,
+            &request.label,
+            &signing_key,
+            now_ms,
+        )
+        .map_err(registry_recovery_code)?;
+        Ok(DeviceEnrollmentResponse {
+            schema_version: COORDINATOR_SCHEMA_VERSION,
+            device_id: enrollment.device_id().to_string(),
+            label: enrollment.label().to_string(),
+            expires_at_ms: enrollment.expires_at_ms(),
+            enrollment_request: enrollment.encode().map_err(registry_recovery_code)?,
+        })
+    }
+
+    pub(crate) fn approve_device_enrollment(
+        &self,
+        request: ApproveDeviceEnrollmentRequest,
+        now_ms: i64,
+    ) -> Result<SyncDeviceRegistrySnapshot, String> {
+        let enrollment = DeviceEnrollmentRequest::decode(&request.enrollment_request)
+            .map_err(registry_recovery_code)?;
+        self.mutate_device_registry(request.expected_revision, now_ms, |registry| {
+            let (device_id, label, public_key) = enrollment
+                .verify_for_vault(registry.vault_id(), now_ms)?;
+            registry.add_device(
+                request.expected_revision,
+                &device_id,
+                &label,
+                &public_key,
+                now_ms,
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn rename_sync_device(
+        &self,
+        request: RenameSyncDeviceRequest,
+        now_ms: i64,
+    ) -> Result<SyncDeviceRegistrySnapshot, String> {
+        self.mutate_device_registry(request.expected_revision, now_ms, |registry| {
+            registry.rename_device(
+                request.expected_revision,
+                &request.device_id,
+                &request.label,
+                now_ms,
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn revoke_sync_device(
+        &self,
+        request: RevokeSyncDeviceRequest,
+        now_ms: i64,
+    ) -> Result<SyncDeviceRegistrySnapshot, String> {
+        if request.device_id == self.journal.local_device_id().map_err(journal_code)? {
+            return Err("cannot-revoke-local-device".to_string());
+        }
+        self.mutate_device_registry(request.expected_revision, now_ms, |registry| {
+            registry.revoke_device(
+                request.expected_revision,
+                &request.device_id,
+                request.reason,
+                now_ms,
+            )?;
+            Ok(())
+        })
+    }
+
+    fn mutate_device_registry(
+        &self,
+        expected_revision: u64,
+        now_ms: i64,
+        mutation: impl FnOnce(&mut DeviceRegistry) -> Result<(), RecoveryError>,
+    ) -> Result<SyncDeviceRegistrySnapshot, String> {
+        let _guard = self.begin_configuration()?;
+        let (provider, vault_key, vault_id) = {
+            let runtime = self.lock_runtime()?;
+            let session = runtime
+                .session
+                .as_ref()
+                .ok_or_else(|| "同步 vault 尚未解锁".to_string())?;
+            (
+                Arc::clone(&session.provider),
+                Arc::clone(&session.vault_key),
+                session.vault_id.clone(),
+            )
+        };
+        let cancellation = ProviderCancellation::default();
+        let (mut registry, registry_hash) = self.refresh_device_registry(
+            provider.as_ref(),
+            vault_key.as_ref(),
+            &vault_id,
+            &cancellation,
+            now_ms,
+        )?;
+        if registry.revision() != expected_revision {
+            return Err("registry-conflict".to_string());
+        }
+        let local_device_id = self.journal.local_device_id().map_err(journal_code)?;
+        if !registry.is_authorized(&local_device_id) {
+            return Err("device-unauthorized".to_string());
+        }
+        mutation(&mut registry).map_err(registry_recovery_code)?;
+        let signing_key = DeviceSigningKey::load_or_create(&local_device_id)
+            .map_err(|_| "device-key-unavailable".to_string())?;
+        let signed = SignedDeviceRegistryEnvelope::sign(
+            &registry,
+            Some(&registry_hash),
+            &local_device_id,
+            &signing_key,
+        )
+        .map_err(registry_recovery_code)?;
+        let encrypted = encrypt_signed_device_registry(&signed, vault_key.as_ref())
+            .map_err(registry_recovery_code)?
+            .encode()
+            .map_err(|_| "registry-integrity".to_string())?;
+        let key = registry_object_key(&vault_id, registry.revision());
+        match provider.put(&key, &encrypted, &cancellation) {
+            Ok(PutObjectOutcome::Created) => {}
+            Ok(PutObjectOutcome::AlreadyPresent) => {
+                return Err("registry-conflict".to_string());
+            }
+            Err(error) if error.code == ProviderErrorCode::Conflict => {
+                return Err("registry-conflict".to_string());
+            }
+            Err(error) => return Err(provider_code(error)),
+        }
+        let (registry, hash) = self.refresh_device_registry(
+            provider.as_ref(),
+            vault_key.as_ref(),
+            &vault_id,
+            &cancellation,
+            now_ms,
+        )?;
+        {
+            let mut runtime = self.lock_runtime()?;
+            let session = runtime
+                .session
+                .as_mut()
+                .ok_or_else(|| "同步 vault 已锁定".to_string())?;
+            if session.vault_id != vault_id {
+                return Err("cancelled".to_string());
+            }
+            session.device_registry = Some(registry);
+            session.device_registry_hash = Some(hash);
+            runtime.last_error_code = None;
+        }
+        self.device_registry_snapshot()
     }
 
     pub(crate) fn resolve_conflict(
@@ -1794,6 +2047,18 @@ fn registry_journal_code(error: crate::sync_outbox::JournalError) -> String {
         JournalErrorCode::Replay | JournalErrorCode::Conflict => "registry-rollback".to_string(),
         _ => journal_code(error),
     }
+}
+
+fn registry_recovery_code(error: RecoveryError) -> String {
+    match error.code {
+        RecoveryErrorCode::InvalidInput => "invalid-input",
+        RecoveryErrorCode::Conflict | RecoveryErrorCode::NotFound => "registry-conflict",
+        RecoveryErrorCode::LimitExceeded => "resource-limit",
+        RecoveryErrorCode::Authentication => "authentication",
+        RecoveryErrorCode::Integrity => "registry-integrity",
+        RecoveryErrorCode::Storage => "local-storage",
+    }
+    .to_string()
 }
 
 fn validate_sync_password(password: &[u8]) -> Result<(), String> {
@@ -3300,6 +3565,153 @@ mod tests {
         assert_eq!(status.phase, SyncCoordinatorPhase::Suspended);
         assert_eq!(status.last_error_code.as_deref(), Some("authentication"));
         assert_eq!(status.merge_revision, 0);
+    }
+
+    #[test]
+    fn authorized_device_approves_renames_and_revokes_enrolled_device() {
+        let owner_root = TempDir::new("device-owner");
+        let joining_root = TempDir::new("device-joining");
+        let owner = SyncCoordinatorManager::open(owner_root.0.clone()).unwrap();
+        let joining = SyncCoordinatorManager::open(joining_root.0.clone()).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let password = "fixture-password";
+        owner
+            .configure_provider_inner(
+                provider.clone(),
+                Zeroizing::new(password.to_string()),
+                LocalFolderSetupMode::Initialize,
+                Argon2Parameters::minimum_for_tests(),
+                "Memory",
+            )
+            .unwrap();
+        joining
+            .configure_provider_inner(
+                provider.clone(),
+                Zeroizing::new(password.to_string()),
+                LocalFolderSetupMode::Unlock,
+                Argon2Parameters::minimum_for_tests(),
+                "Memory",
+            )
+            .unwrap();
+        assert!(!joining.status().unwrap().local_device_authorized);
+
+        let enrollment = joining
+            .create_device_enrollment(
+                CreateDeviceEnrollmentRequest {
+                    label: "Field laptop".to_string(),
+                },
+                2_000,
+            )
+            .unwrap();
+        let joining_device_id = enrollment.device_id.clone();
+        let approved = owner
+            .approve_device_enrollment(
+                ApproveDeviceEnrollmentRequest {
+                    expected_revision: 1,
+                    enrollment_request: enrollment.enrollment_request,
+                },
+                3_000,
+            )
+            .unwrap();
+        assert_eq!(approved.revision, 2);
+        assert_eq!(approved.devices.len(), 2);
+        assert_eq!(
+            owner
+                .create_device_enrollment(
+                    CreateDeviceEnrollmentRequest {
+                        label: "Duplicate owner".to_string(),
+                    },
+                    3_100,
+                )
+                .unwrap_err(),
+            "device-already-registered"
+        );
+        assert_eq!(
+            owner
+                .revoke_sync_device(
+                    RevokeSyncDeviceRequest {
+                        expected_revision: 2,
+                        device_id: approved.local_device_id.clone(),
+                        reason: RevocationReason::Retired,
+                    },
+                    3_200,
+                )
+                .unwrap_err(),
+            "cannot-revoke-local-device"
+        );
+        assert_eq!(
+            joining
+                .run_once(&test_app_store(&joining_root), 3_500)
+                .unwrap()
+                .local_device_authorized,
+            true
+        );
+
+        let renamed = owner
+            .rename_sync_device(
+                RenameSyncDeviceRequest {
+                    expected_revision: 2,
+                    device_id: joining_device_id.clone(),
+                    label: "Travel laptop".to_string(),
+                },
+                4_000,
+            )
+            .unwrap();
+        assert_eq!(renamed.revision, 3);
+        assert_eq!(
+            renamed
+                .devices
+                .iter()
+                .find(|device| device.device_id == joining_device_id)
+                .unwrap()
+                .label,
+            "Travel laptop"
+        );
+        assert_eq!(
+            owner
+                .rename_sync_device(
+                    RenameSyncDeviceRequest {
+                        expected_revision: 2,
+                        device_id: joining_device_id.clone(),
+                        label: "Stale".to_string(),
+                    },
+                    4_500,
+                )
+                .unwrap_err(),
+            "registry-conflict"
+        );
+
+        let revoked = owner
+            .revoke_sync_device(
+                RevokeSyncDeviceRequest {
+                    expected_revision: 3,
+                    device_id: joining_device_id,
+                    reason: RevocationReason::Retired,
+                },
+                5_000,
+            )
+            .unwrap();
+        assert_eq!(revoked.revision, 4);
+        assert!(owner.status().unwrap().key_rotation_required);
+        let joining_status = joining
+            .run_once(&test_app_store(&joining_root), 5_500)
+            .unwrap();
+        assert!(!joining_status.local_device_authorized);
+        assert_eq!(
+            joining_status.last_error_code.as_deref(),
+            Some("device-unauthorized")
+        );
+        assert_eq!(
+            joining
+                .create_device_enrollment(
+                    CreateDeviceEnrollmentRequest {
+                        label: "Revoked identity".to_string(),
+                    },
+                    6_000,
+                )
+                .unwrap_err(),
+            "device-already-registered"
+        );
     }
 
     #[test]

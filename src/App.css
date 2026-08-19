@@ -2700,6 +2700,119 @@ button.sync-status {
   overflow-wrap: anywhere;
 }
 
+.sync-device-center {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.sync-device-load-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 14px 0 0;
+  padding: 9px 11px;
+  color: #8f3b35;
+  background: #fff2ef;
+  border: 1px solid #e6b8b2;
+  border-radius: 4px;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.sync-device-header,
+.sync-device-header > div,
+.sync-device-item,
+.sync-device-identity {
+  display: flex;
+  align-items: center;
+}
+
+.sync-device-header {
+  min-height: 40px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.sync-device-header > div {
+  min-width: 0;
+  gap: 7px;
+}
+
+.sync-device-header strong {
+  font-size: 11px;
+}
+
+.sync-device-header span,
+.sync-device-identity span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.sync-device-header select {
+  min-width: 96px;
+  height: 28px;
+  padding: 0 7px;
+  font-size: 10px;
+}
+
+.sync-device-enrollment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sync-device-enrollment .span-2 {
+  grid-column: 1 / -1;
+}
+
+.sync-device-enrollment textarea {
+  min-height: 70px;
+  resize: vertical;
+  overflow-wrap: anywhere;
+}
+
+.sync-device-list {
+  display: grid;
+}
+
+.sync-device-item {
+  min-width: 0;
+  gap: 7px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sync-device-item:last-child {
+  border-bottom: 0;
+}
+
+.sync-device-identity {
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.sync-device-identity input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+}
+
+.sync-device-identity span {
+  overflow-wrap: anywhere;
+}
+
 .sync-conflict-center {
   margin-top: 14px;
   border: 1px solid var(--border);
@@ -4001,6 +4114,21 @@ button.sync-status {
 
   .sync-conflict-alternatives {
     grid-template-columns: 1fr;
+  }
+
+  .sync-device-enrollment {
+    grid-template-columns: 1fr;
+  }
+
+  .sync-device-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sync-device-header select,
+  .sync-device-enrollment .span-2 {
+    width: 100%;
+    grid-column: 1;
   }
 
   .field,

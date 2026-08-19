@@ -22,9 +22,15 @@ use crate::{
 const REGISTRY_FORMAT_VERSION: u32 = 1;
 const REGISTRY_SIGNATURE_FORMAT_VERSION: u32 = 1;
 const REGISTRY_SIGNATURE_DOMAIN: &[u8] = b"VPSHELL-SYNC-DEVICE-REGISTRY-V1";
+const ENROLLMENT_FORMAT_VERSION: u32 = 1;
+const ENROLLMENT_SIGNATURE_DOMAIN: &[u8] = b"VPSHELL-SYNC-DEVICE-ENROLLMENT-V1";
 const EXPORT_FORMAT_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: usize = 64 * 1024;
 const MAX_SIGNED_REGISTRY_BYTES: usize = 96 * 1024;
+const MAX_ENROLLMENT_BYTES: usize = 2 * 1024;
+const ENROLLMENT_NONCE_BYTES: usize = 16;
+const ENROLLMENT_TTL_MS: i64 = 15 * 60 * 1000;
+const ENROLLMENT_CLOCK_SKEW_MS: i64 = 60 * 1000;
 const MAX_DEVICES: usize = 32;
 const MAX_DEVICE_LABEL_BYTES: usize = 128;
 const MAX_KEYSLOTS: usize = 8;
@@ -89,6 +95,16 @@ pub(crate) struct DeviceRecord {
     public_signing_key: String,
     added_at_ms: i64,
     status: DeviceStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeviceRegistryEntry {
+    pub(crate) device_id: String,
+    pub(crate) label: String,
+    pub(crate) label_updated_at_ms: i64,
+    pub(crate) added_at_ms: i64,
+    pub(crate) status: DeviceStatus,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -364,6 +380,19 @@ impl DeviceRegistry {
             .any(|device| matches!(device.status, DeviceStatus::Revoked { .. }))
     }
 
+    pub(crate) fn entries(&self) -> Vec<DeviceRegistryEntry> {
+        self.devices
+            .values()
+            .map(|device| DeviceRegistryEntry {
+                device_id: device.device_id.clone(),
+                label: device.label.clone(),
+                label_updated_at_ms: device.label_updated_at_ms,
+                added_at_ms: device.added_at_ms,
+                status: device.status.clone(),
+            })
+            .collect()
+    }
+
     fn require_revision(&self, expected: u64) -> RecoveryResult<()> {
         if self.revision != expected {
             Err(RecoveryError::new(
@@ -593,6 +622,207 @@ impl SignedDeviceRegistryEnvelope {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DeviceEnrollmentRequest {
+    format_version: u32,
+    vault_id: String,
+    device_id: String,
+    label: String,
+    public_signing_key: String,
+    created_at_ms: i64,
+    expires_at_ms: i64,
+    nonce: String,
+    signature: String,
+}
+
+impl DeviceEnrollmentRequest {
+    pub(crate) fn create(
+        vault_id: &str,
+        device_id: &str,
+        label: &str,
+        signing_key: &DeviceSigningKey,
+        now_ms: i64,
+    ) -> RecoveryResult<Self> {
+        validate_uuid(vault_id, "vault")?;
+        validate_uuid(device_id, "device")?;
+        validate_label(label)?;
+        validate_time(now_ms)?;
+        let expires_at_ms = now_ms.checked_add(ENROLLMENT_TTL_MS).ok_or_else(|| {
+            RecoveryError::new(
+                RecoveryErrorCode::LimitExceeded,
+                "设备登记请求过期时间溢出",
+            )
+        })?;
+        let mut nonce = [0_u8; ENROLLMENT_NONCE_BYTES];
+        getrandom::fill(&mut nonce).map_err(|_| {
+            RecoveryError::new(
+                RecoveryErrorCode::Storage,
+                "无法生成设备登记请求随机数",
+            )
+        })?;
+        let public_signing_key = signing_key.public_key();
+        let message = enrollment_signature_message(
+            vault_id,
+            device_id,
+            label,
+            &public_signing_key,
+            now_ms,
+            expires_at_ms,
+            &nonce,
+        );
+        let request = Self {
+            format_version: ENROLLMENT_FORMAT_VERSION,
+            vault_id: vault_id.to_string(),
+            device_id: device_id.to_string(),
+            label: label.to_string(),
+            public_signing_key: URL_SAFE_NO_PAD.encode(public_signing_key),
+            created_at_ms: now_ms,
+            expires_at_ms,
+            nonce: URL_SAFE_NO_PAD.encode(nonce),
+            signature: URL_SAFE_NO_PAD.encode(signing_key.sign_bytes(&message).to_bytes()),
+        };
+        request.validate_shape()?;
+        Ok(request)
+    }
+
+    pub(crate) fn encode(&self) -> RecoveryResult<String> {
+        self.validate_shape()?;
+        let encoded = serde_json::to_vec(self).map_err(|_| {
+            RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "无法序列化设备登记请求",
+            )
+        })?;
+        if encoded.len() > MAX_ENROLLMENT_BYTES {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::LimitExceeded,
+                "设备登记请求超过 2 KiB",
+            ));
+        }
+        Ok(URL_SAFE_NO_PAD.encode(encoded))
+    }
+
+    pub(crate) fn decode(encoded: &str) -> RecoveryResult<Self> {
+        let decoded = decode_canonical(encoded, MAX_ENROLLMENT_BYTES, "设备登记请求")?;
+        let request: Self = serde_json::from_slice(&decoded).map_err(|_| {
+            RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "设备登记请求 JSON 损坏或字段不受支持",
+            )
+        })?;
+        request.validate_shape()?;
+        Ok(request)
+    }
+
+    pub(crate) fn verify_for_vault(
+        &self,
+        vault_id: &str,
+        now_ms: i64,
+    ) -> RecoveryResult<(String, String, [u8; 32])> {
+        self.validate_shape()?;
+        validate_uuid(vault_id, "vault")?;
+        validate_time(now_ms)?;
+        if self.vault_id != vault_id {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Authentication,
+                "设备登记请求属于其他 vault",
+            ));
+        }
+        if self.created_at_ms > now_ms.saturating_add(ENROLLMENT_CLOCK_SKEW_MS)
+            || now_ms > self.expires_at_ms
+        {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Authentication,
+                "设备登记请求尚未生效或已经过期",
+            ));
+        }
+        Ok((
+            self.device_id.clone(),
+            self.label.clone(),
+            decode_exact_32(&self.public_signing_key, "设备登记公钥")?,
+        ))
+    }
+
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub(crate) fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+
+    fn validate_shape(&self) -> RecoveryResult<()> {
+        use ed25519_dalek::{Signature, VerifyingKey};
+
+        if self.format_version != ENROLLMENT_FORMAT_VERSION {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "设备登记请求版本不受支持",
+            ));
+        }
+        validate_uuid(&self.vault_id, "vault")?;
+        validate_uuid(&self.device_id, "device")?;
+        validate_label(&self.label)?;
+        validate_time(self.created_at_ms)?;
+        validate_time(self.expires_at_ms)?;
+        let maximum_expiry = self
+            .created_at_ms
+            .checked_add(ENROLLMENT_TTL_MS)
+            .ok_or_else(|| {
+                RecoveryError::new(
+                    RecoveryErrorCode::LimitExceeded,
+                    "设备登记请求过期时间溢出",
+                )
+            })?;
+        if self.expires_at_ms <= self.created_at_ms || self.expires_at_ms > maximum_expiry {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "设备登记请求有效期无效",
+            ));
+        }
+        let public_key = decode_exact_32(&self.public_signing_key, "设备登记公钥")?;
+        let nonce = decode_canonical(&self.nonce, ENROLLMENT_NONCE_BYTES, "设备登记随机数")?;
+        if nonce.len() != ENROLLMENT_NONCE_BYTES {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "设备登记随机数长度无效",
+            ));
+        }
+        let signature = Signature::from_bytes(&decode_exact_64(
+            &self.signature,
+            "设备登记请求签名",
+        )?);
+        let verifying_key = VerifyingKey::from_bytes(&public_key).map_err(|_| {
+            RecoveryError::new(
+                RecoveryErrorCode::Authentication,
+                "设备登记请求公钥无效",
+            )
+        })?;
+        let message = enrollment_signature_message(
+            &self.vault_id,
+            &self.device_id,
+            &self.label,
+            &public_key,
+            self.created_at_ms,
+            self.expires_at_ms,
+            &nonce,
+        );
+        verifying_key
+            .verify_strict(&message, &signature)
+            .map_err(|_| {
+                RecoveryError::new(
+                    RecoveryErrorCode::Authentication,
+                    "设备登记请求签名验证失败",
+                )
+            })
+    }
+}
+
 fn validate_registry_successor(
     previous: &DeviceRegistry,
     successor: &DeviceRegistry,
@@ -647,6 +877,35 @@ fn registry_signature_message(
         previous_registry_hash.unwrap_or("").as_bytes(),
     );
     push_signature_field(&mut message, registry_bytes);
+    message
+}
+
+fn enrollment_signature_message(
+    vault_id: &str,
+    device_id: &str,
+    label: &str,
+    public_signing_key: &[u8; 32],
+    created_at_ms: i64,
+    expires_at_ms: i64,
+    nonce: &[u8],
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        ENROLLMENT_SIGNATURE_DOMAIN.len()
+            + vault_id.len()
+            + device_id.len()
+            + label.len()
+            + public_signing_key.len()
+            + nonce.len()
+            + 72,
+    );
+    message.extend_from_slice(ENROLLMENT_SIGNATURE_DOMAIN);
+    push_signature_field(&mut message, vault_id.as_bytes());
+    push_signature_field(&mut message, device_id.as_bytes());
+    push_signature_field(&mut message, label.as_bytes());
+    push_signature_field(&mut message, public_signing_key);
+    push_signature_field(&mut message, &created_at_ms.to_be_bytes());
+    push_signature_field(&mut message, &expires_at_ms.to_be_bytes());
+    push_signature_field(&mut message, nonce);
     message
 }
 
@@ -1650,6 +1909,68 @@ mod tests {
             .code,
             RecoveryErrorCode::Authentication
         );
+    }
+
+    #[test]
+    fn enrollment_request_is_vault_bound_short_lived_and_self_signed() {
+        let signing_key = DeviceSigningKey::from_bytes([11; 32]);
+        let request =
+            DeviceEnrollmentRequest::create(VAULT_ID, DEVICE_B, "Phone", &signing_key, 1_000)
+                .unwrap();
+        let encoded = request.encode().unwrap();
+        let decoded = DeviceEnrollmentRequest::decode(&encoded).unwrap();
+        assert_eq!(decoded.device_id(), DEVICE_B);
+        assert_eq!(decoded.label(), "Phone");
+        assert_eq!(decoded.expires_at_ms(), 901_000);
+        assert_eq!(
+            decoded.verify_for_vault(VAULT_ID, 2_000).unwrap(),
+            (
+                DEVICE_B.to_string(),
+                "Phone".to_string(),
+                signing_key.public_key(),
+            )
+        );
+        assert_eq!(
+            decoded
+                .verify_for_vault("22222222-2222-4222-8222-222222222222", 2_000)
+                .unwrap_err()
+                .code,
+            RecoveryErrorCode::Authentication
+        );
+        assert_eq!(
+            decoded
+                .verify_for_vault(VAULT_ID, 901_001)
+                .unwrap_err()
+                .code,
+            RecoveryErrorCode::Authentication
+        );
+
+        let mut tampered: serde_json::Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD.decode(&encoded).unwrap(),
+        )
+        .unwrap();
+        tampered["label"] = serde_json::json!("Attacker");
+        let tampered = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&tampered).unwrap());
+        assert_eq!(
+            DeviceEnrollmentRequest::decode(&tampered)
+                .unwrap_err()
+                .code,
+            RecoveryErrorCode::Authentication
+        );
+
+        let mut extended: serde_json::Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD.decode(&encoded).unwrap(),
+        )
+        .unwrap();
+        extended["expiresAtMs"] = serde_json::json!(901_001);
+        let extended = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&extended).unwrap());
+        assert_eq!(
+            DeviceEnrollmentRequest::decode(&extended)
+                .unwrap_err()
+                .code,
+            RecoveryErrorCode::InvalidInput
+        );
+        assert!(DeviceEnrollmentRequest::decode(&format!("{encoded}=")).is_err());
     }
 
     #[test]

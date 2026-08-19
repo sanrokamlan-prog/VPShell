@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            102,
+            107,
             "command manifest contains duplicates or changed count"
         );
 
@@ -161,6 +161,11 @@ mod tests {
             "allow-sync-acknowledge-reconciliation",
             "allow-desktop-sync-status",
             "allow-list-sync-conflicts",
+            "allow-list-sync-devices",
+            "allow-create-sync-device-enrollment",
+            "allow-approve-sync-device-enrollment",
+            "allow-rename-sync-device",
+            "allow-revoke-sync-device",
             "allow-configure-local-folder-sync",
             "allow-configure-webdav-sync",
             "allow-configure-sftp-sync",
@@ -264,6 +269,11 @@ mod tests {
         for command in [
             "desktop_sync_status",
             "list_sync_conflicts",
+            "list_sync_devices",
+            "create_sync_device_enrollment",
+            "approve_sync_device_enrollment",
+            "rename_sync_device",
+            "revoke_sync_device",
             "configure_local_folder_sync",
             "configure_webdav_sync",
             "configure_sftp_sync",
