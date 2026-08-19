@@ -958,10 +958,7 @@ impl SyncJournal {
     ) -> JournalResult<EnqueueOutcome> {
         validate_now(now_ms)?;
         validate_key(object_key).map_err(|_| {
-            JournalError::new(
-                JournalErrorCode::InvalidInput,
-                "同步 blob object key 无效",
-            )
+            JournalError::new(JournalErrorCode::InvalidInput, "同步 blob object key 无效")
         })?;
         let object = validate_envelope(encrypted_object)?;
         if object.object_kind() != &SyncObjectKind::Blob
@@ -998,8 +995,8 @@ impl SyncJournal {
                     ));
                 }
                 let existing_object = validate_envelope(&existing_encrypted)?;
-                let existing_plaintext = decrypt_sync_object(vault_key, &existing_object)
-                    .map_err(|_| {
+                let existing_plaintext =
+                    decrypt_sync_object(vault_key, &existing_object).map_err(|_| {
                         JournalError::new(
                             JournalErrorCode::Authentication,
                             "现有同步 blob 无法认证",
@@ -2051,11 +2048,7 @@ mod tests {
             .unwrap();
         assert_eq!(retry.encrypted_object, blob);
         journal
-            .mark_published(
-                &retry.object_key,
-                &retry.lease_id,
-                BASE_RETRY_MS + 2,
-            )
+            .mark_published(&retry.object_key, &retry.lease_id, BASE_RETRY_MS + 2)
             .unwrap();
         let reference = journal
             .claim_next_for_vault(VAULT_ID, BASE_RETRY_MS + 3)

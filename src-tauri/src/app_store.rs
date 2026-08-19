@@ -2512,10 +2512,7 @@ fn background_sync_fields(value: &Value) -> Result<BTreeMap<String, FieldValue>,
 }
 
 fn default_background_sync_fields() -> BTreeMap<String, FieldValue> {
-    BTreeMap::from([(
-        "kind".to_string(),
-        FieldValue::Text("none".to_string()),
-    )])
+    BTreeMap::from([("kind".to_string(), FieldValue::Text("none".to_string()))])
 }
 
 fn queue_background_sync_change(
@@ -2785,7 +2782,9 @@ fn validate_background_projection_fields(
     let shape = match fields.get("kind") {
         Some(FieldValue::Text(kind)) if kind == "managed-blob" => {
             fields.len() == 2
-                && fields.keys().all(|field| matches!(field.as_str(), "kind" | "blobId"))
+                && fields
+                    .keys()
+                    .all(|field| matches!(field.as_str(), "kind" | "blobId"))
                 && matches!(
                     fields.get("blobId"),
                     Some(FieldValue::BlobRef(value)) if is_lowercase_hash(value)
@@ -4520,7 +4519,11 @@ impl AppStore {
                 .and_then(|root| root.get_mut("wallpaper"))
                 .and_then(Value::as_object_mut)
                 .ok_or_else(|| "AppState wallpaper 损坏".to_string())?;
-            match background.fields.as_ref().and_then(|fields| fields.get("kind")) {
+            match background
+                .fields
+                .as_ref()
+                .and_then(|fields| fields.get("kind"))
+            {
                 None => {
                     wallpaper.insert("source".to_string(), Value::String("none".to_string()));
                     wallpaper.insert("value".to_string(), Value::String(String::new()));
@@ -6002,7 +6005,10 @@ mod tests {
         assert_eq!(
             fields,
             &BTreeMap::from([
-                ("blobId".to_string(), FieldValue::BlobRef(first_blob.clone())),
+                (
+                    "blobId".to_string(),
+                    FieldValue::BlobRef(first_blob.clone())
+                ),
                 (
                     "kind".to_string(),
                     FieldValue::Text("managed-blob".to_string()),
@@ -6035,10 +6041,8 @@ mod tests {
                 .unwrap(),
             ProjectionOutcome::Applied
         );
-        let projected: Value = serde_json::from_str(
-            store.snapshot().unwrap().state_json.as_deref().unwrap(),
-        )
-        .unwrap();
+        let projected: Value =
+            serde_json::from_str(store.snapshot().unwrap().state_json.as_deref().unwrap()).unwrap();
         assert_eq!(projected["wallpaper"]["source"], "local");
         assert_eq!(projected["wallpaper"]["managedBlobId"], second_blob);
         assert_eq!(projected["wallpaper"]["opacity"], 0.35);
@@ -6090,10 +6094,8 @@ mod tests {
                 .unwrap(),
             ProjectionOutcome::Applied
         );
-        let cleared: Value = serde_json::from_str(
-            store.snapshot().unwrap().state_json.as_deref().unwrap(),
-        )
-        .unwrap();
+        let cleared: Value =
+            serde_json::from_str(store.snapshot().unwrap().state_json.as_deref().unwrap()).unwrap();
         assert_eq!(cleared["wallpaper"]["source"], "none");
         assert!(cleared["wallpaper"].get("managedBlobId").is_none());
         assert_eq!(cleared["wallpaper"]["opacity"], 0.35);
@@ -6102,23 +6104,27 @@ mod tests {
         let revision = store.snapshot().unwrap().revision;
         let mut invalid_none = cleared.clone();
         invalid_none["wallpaper"]["managedBlobId"] = Value::String("ef".repeat(32));
-        assert!(store
-            .save(SaveAppStateRequest {
-                state_json: invalid_none.to_string(),
-                expected_revision: revision,
-            })
-            .is_err());
+        assert!(
+            store
+                .save(SaveAppStateRequest {
+                    state_json: invalid_none.to_string(),
+                    expected_revision: revision,
+                })
+                .is_err()
+        );
         assert_eq!(store.snapshot().unwrap().revision, revision);
 
         let mut invalid = cleared;
         invalid["wallpaper"]["source"] = Value::String("local".to_string());
         invalid["wallpaper"]["managedBlobId"] = Value::String("INVALID".to_string());
-        assert!(store
-            .save(SaveAppStateRequest {
-                state_json: invalid.to_string(),
-                expected_revision: revision,
-            })
-            .is_err());
+        assert!(
+            store
+                .save(SaveAppStateRequest {
+                    state_json: invalid.to_string(),
+                    expected_revision: revision,
+                })
+                .is_err()
+        );
         assert_eq!(store.snapshot().unwrap().revision, revision);
     }
 

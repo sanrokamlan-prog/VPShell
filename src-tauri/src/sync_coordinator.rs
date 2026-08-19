@@ -822,13 +822,8 @@ impl SyncCoordinatorManager {
                 if self.assets.syncable_wallpaper(blob_id).is_ok() {
                     return Ok(0);
                 }
-                let restored = restore_wallpaper_blob(
-                    provider,
-                    cancellation,
-                    vault_key,
-                    vault_id,
-                    blob_id,
-                )?;
+                let restored =
+                    restore_wallpaper_blob(provider, cancellation, vault_key, vault_id, blob_id)?;
                 self.assets
                     .install_synced_wallpaper(
                         &restored.blob_id,
@@ -875,20 +870,11 @@ impl SyncCoordinatorManager {
                         for object in prepare_wallpaper_blob(vault_key, vault_id, &wallpaper)? {
                             let envelope = EncryptedSyncObject::decode(&object.encoded)
                                 .map_err(|_| "blob-encrypt".to_string())?;
-                            if !object_key_matches_blob_envelope(
-                                &object.key,
-                                vault_id,
-                                &envelope,
-                            ) {
+                            if !object_key_matches_blob_envelope(&object.key, vault_id, &envelope) {
                                 return Err("protocol".to_string());
                             }
                             self.journal
-                                .enqueue_local_blob(
-                                    vault_key,
-                                    &object.key,
-                                    &object.encoded,
-                                    now_ms,
-                                )
+                                .enqueue_local_blob(vault_key, &object.key, &object.encoded, now_ms)
                                 .map_err(journal_code)?;
                         }
                     }
@@ -1007,12 +993,7 @@ impl SyncCoordinatorManager {
                         Err(error) => {
                             let (failure, code) = provider_failure(&error);
                             self.journal
-                                .mark_failed(
-                                    &claim.object_key,
-                                    &claim.lease_id,
-                                    failure,
-                                    now_ms,
-                                )
+                                .mark_failed(&claim.object_key, &claim.lease_id, failure, now_ms)
                                 .map_err(journal_code)?;
                             return Err(code.to_string());
                         }
@@ -1664,12 +1645,14 @@ mod tests {
             .unwrap();
         let uploaded = coordinator.run_once(&store, 2_000).unwrap();
         assert_eq!(uploaded.last_uploaded_objects, 4);
-        assert!(provider
-            .objects
-            .lock()
-            .unwrap()
-            .keys()
-            .any(|key| key.contains(&format!("/blobs/{blob_id}/manifest.oblob"))));
+        assert!(
+            provider
+                .objects
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|key| key.contains(&format!("/blobs/{blob_id}/manifest.oblob")))
+        );
 
         fs::remove_file(root.0.join("assets/wallpaper.asset")).unwrap();
         fs::remove_file(root.0.join("assets/wallpaper.metadata.json")).unwrap();

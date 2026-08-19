@@ -8,8 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     local_assets::ManagedWallpaper,
     sync_crypto::{
-        EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object,
-        encrypt_sync_object,
+        EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object, encrypt_sync_object,
     },
     sync_provider::{
         ProviderCancellation, ProviderErrorCode, SyncObjectProvider, validate_object_bytes,
@@ -204,7 +203,8 @@ fn decrypt_expected(
     vault_id: &str,
     object_id: &str,
 ) -> Result<Vec<u8>, String> {
-    let envelope = EncryptedSyncObject::decode(encoded).map_err(|_| "blob-integrity".to_string())?;
+    let envelope =
+        EncryptedSyncObject::decode(encoded).map_err(|_| "blob-integrity".to_string())?;
     if envelope.vault_id() != vault_id
         || envelope.object_kind() != &SyncObjectKind::Blob
         || envelope.object_id() != object_id
@@ -224,7 +224,9 @@ pub(crate) fn restore_wallpaper_blob(
     blob_id: &str,
 ) -> Result<RestoredWallpaper, String> {
     validate_blob_id(blob_id)?;
-    cancellation.check().map_err(|error| provider_code(error.code))?;
+    cancellation
+        .check()
+        .map_err(|error| provider_code(error.code))?;
     let manifest_encoded = provider
         .get(&manifest_key(vault_id, blob_id), cancellation)
         .map_err(|error| provider_code(error.code))?;
@@ -246,7 +248,9 @@ pub(crate) fn restore_wallpaper_blob(
     let mut bytes = Vec::with_capacity(manifest.total_size);
     let mut seen = BTreeSet::new();
     for index in 0..manifest.chunk_count {
-        cancellation.check().map_err(|error| provider_code(error.code))?;
+        cancellation
+            .check()
+            .map_err(|error| provider_code(error.code))?;
         let key = chunk_key(vault_id, blob_id, index);
         if !seen.insert(key.clone()) {
             return Err("blob-integrity".to_string());
@@ -273,7 +277,9 @@ pub(crate) fn restore_wallpaper_blob(
     if bytes.len() != manifest.total_size || hash(&bytes) != manifest.content_hash {
         return Err("blob-integrity".to_string());
     }
-    cancellation.check().map_err(|error| provider_code(error.code))?;
+    cancellation
+        .check()
+        .map_err(|error| provider_code(error.code))?;
     Ok(RestoredWallpaper {
         blob_id: blob_id.to_string(),
         media_type: manifest.media_type,
@@ -354,10 +360,8 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "vpshell-sync-blob-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("vpshell-sync-blob-{}", uuid::Uuid::new_v4()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -385,7 +389,9 @@ mod tests {
         let objects = prepare_wallpaper_blob(&key, &vault_id, &wallpaper).unwrap();
         assert_eq!(objects.len(), 3);
         for object in objects {
-            provider.put(&object.key, &object.encoded, &cancellation).unwrap();
+            provider
+                .put(&object.key, &object.encoded, &cancellation)
+                .unwrap();
         }
         let restored = restore_wallpaper_blob(
             &provider,
@@ -410,7 +416,11 @@ mod tests {
         };
         let objects = prepare_wallpaper_blob(&key, &vault_id, &wallpaper).unwrap();
         let envelope = EncryptedSyncObject::decode(&objects[0].encoded).unwrap();
-        assert!(object_key_matches_blob_envelope(&objects[0].key, &vault_id, &envelope));
+        assert!(object_key_matches_blob_envelope(
+            &objects[0].key,
+            &vault_id,
+            &envelope
+        ));
         assert!(!object_key_matches_blob_envelope(
             &objects[0].key.replace("000000", "000001"),
             &vault_id,

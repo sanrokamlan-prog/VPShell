@@ -259,8 +259,8 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn cleanup_asset_staging(directory: &Path) -> Result<(), String> {
-    for entry in fs::read_dir(directory)
-        .map_err(|error| format!("无法扫描本地资产暂存文件: {error}"))?
+    for entry in
+        fs::read_dir(directory).map_err(|error| format!("无法扫描本地资产暂存文件: {error}"))?
     {
         let entry = entry.map_err(|error| format!("无法读取本地资产暂存项: {error}"))?;
         let name = entry.file_name();
@@ -761,8 +761,10 @@ mod tests {
         let managed = manager
             .syncable_wallpaper(installed.managed_blob_id.as_deref().unwrap())
             .unwrap();
-        assert!(manager
-            .install_synced_wallpaper(&managed.blob_id, &managed.media_type, &managed.bytes)
-            .is_ok());
+        assert!(
+            manager
+                .install_synced_wallpaper(&managed.blob_id, &managed.media_type, &managed.bytes)
+                .is_ok()
+        );
     }
 }

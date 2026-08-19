@@ -41,8 +41,8 @@ mod route_measurement;
 mod safe_broadcast;
 mod security_regression;
 mod shell_integration;
-mod sync_coordinator;
 mod sync_blob;
+mod sync_coordinator;
 #[allow(dead_code)] // The coordinator/UI phases consume this opt-in credential vault API.
 mod sync_credential_vault;
 #[allow(dead_code)] // The coordinator/provider phases consume this bounded crypto API.
@@ -1922,8 +1922,7 @@ pub fn run() {
                 app_cache_directory,
             ));
             app.manage(app_store::AppStore::load(app_data_directory.clone())?);
-            let local_assets =
-                local_assets::LocalAssetManager::load(app_data_directory.clone())?;
+            let local_assets = local_assets::LocalAssetManager::load(app_data_directory.clone())?;
             app.manage(local_assets.clone());
             app.manage(sync_provider_ca::SyncProviderCaManager::load(
                 app_data_directory.clone(),

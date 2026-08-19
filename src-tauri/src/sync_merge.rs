@@ -1454,8 +1454,7 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
             "terminalTheme" | "fontFamily" | "locale",
             FieldValue::Text(value),
         ) if valid_text(value, 256) => Ok(()),
-        (EntityKind::Background, "kind", FieldValue::Text(value))
-            if value == "managed-blob" =>
+        (EntityKind::Background, "kind", FieldValue::Text(value)) if value == "managed-blob" =>
         {
             Ok(())
         }
@@ -1922,14 +1921,8 @@ mod tests {
 
     fn background_patch(operation_number: u128, physical_ms: i64) -> MergeOperation {
         let fields = BTreeMap::from([
-            (
-                "blobId".to_string(),
-                FieldValue::BlobRef("ab".repeat(32)),
-            ),
-            (
-                "kind".to_string(),
-                FieldValue::Text("managed-blob".into()),
-            ),
+            ("blobId".to_string(), FieldValue::BlobRef("ab".repeat(32))),
+            ("kind".to_string(), FieldValue::Text("managed-blob".into())),
         ]);
         MergeOperation {
             format_version: FORMAT_VERSION,
@@ -1943,10 +1936,7 @@ mod tests {
             payload: MergePayload::Patch(PatchPayload {
                 entity_kind: EntityKind::Background,
                 entity_id: HOST_ID.to_string(),
-                observed_fields: fields
-                    .keys()
-                    .map(|field| (field.clone(), None))
-                    .collect(),
+                observed_fields: fields.keys().map(|field| (field.clone(), None)).collect(),
                 fields,
                 observed_tombstone: None,
             }),
