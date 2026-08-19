@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
+use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use reqwest::Url;
 use zeroize::Zeroizing;
 
@@ -13,6 +14,7 @@ const MAX_OBJECT_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_TRANSPORT_LIST: usize = 10_000;
 const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_ROOT_BYTES: usize = 1_024;
+const MAX_ROOT_DEPTH: usize = 32;
 const MIN_TIMEOUT_SECONDS: u64 = 5;
 const MAX_TIMEOUT_SECONDS: u64 = 60;
 
@@ -481,6 +483,7 @@ fn valid_remote_root(root: &str) -> bool {
     };
     !relative.is_empty()
         && root.len() <= MAX_ROOT_BYTES
+        && relative.split('/').count() <= MAX_ROOT_DEPTH
         && !root.contains('\\')
         && !root.chars().any(char::is_control)
         && relative
@@ -490,10 +493,10 @@ fn valid_remote_root(root: &str) -> bool {
 
 fn valid_sha256_fingerprint(value: &str) -> bool {
     value.strip_prefix("SHA256:").is_some_and(|digest| {
-        (43..=44).contains(&digest.len())
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        digest.len() == 43
+            && BASE64_STANDARD_NO_PAD
+                .decode(digest)
+                .is_ok_and(|bytes| bytes.len() == 32)
     })
 }
 
@@ -830,6 +833,8 @@ mod tests {
         unsafe_root.root = "/".into();
         assert!(unsafe_root.validate().is_err());
         unsafe_root.root = "/safe/../escape".into();
+        assert!(unsafe_root.validate().is_err());
+        unsafe_root.root = format!("/{}", vec!["safe"; MAX_ROOT_DEPTH + 1].join("/"));
         assert!(unsafe_root.validate().is_err());
     }
 }

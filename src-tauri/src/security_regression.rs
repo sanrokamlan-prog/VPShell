@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            97,
+            98,
             "command manifest contains duplicates or changed count"
         );
 
@@ -163,6 +163,7 @@ mod tests {
             "allow-list-sync-conflicts",
             "allow-configure-local-folder-sync",
             "allow-configure-webdav-sync",
+            "allow-configure-sftp-sync",
             "allow-store-webdav-credential",
             "allow-install-webdav-ca",
             "allow-delete-webdav-ca",
@@ -233,8 +234,10 @@ mod tests {
         let coordinator = include_str!("sync_coordinator.rs");
         let provider_credentials = include_str!("sync_provider_credentials.rs");
         let provider_ca = include_str!("sync_provider_ca.rs");
+        let sftp_provider = include_str!("sync_sftp_provider.rs");
         assert!(coordinator.contains("pub(crate) struct ConfigureLocalFolderSyncRequest"));
         assert!(coordinator.contains("pub(crate) struct ConfigureWebDavSyncRequest"));
+        assert!(coordinator.contains("pub(crate) struct ConfigureSftpSyncRequest"));
         assert!(coordinator.contains("let password = Zeroizing::new(request.password)"));
         assert!(
             coordinator
@@ -244,6 +247,7 @@ mod tests {
             assert!(!coordinator.contains(forbidden));
             assert!(!provider_credentials.contains(forbidden));
             assert!(!provider_ca.contains(forbidden));
+            assert!(!sftp_provider.contains(forbidden));
         }
 
         let frontend = include_str!("../../src/App.tsx");
@@ -252,6 +256,7 @@ mod tests {
             "list_sync_conflicts",
             "configure_local_folder_sync",
             "configure_webdav_sync",
+            "configure_sftp_sync",
             "store_webdav_credential",
             "install_webdav_ca",
             "delete_webdav_ca",
@@ -262,12 +267,18 @@ mod tests {
         ] {
             assert!(frontend.contains(command));
         }
-        assert!(frontend.contains("disabled={provider !== \"local\" && provider !== \"webdav\"}"));
+        assert!(frontend.contains("provider === \"sftp\""));
         assert!(frontend.contains("Android Preview 中禁用"));
         let types = include_str!("../../src/types.ts");
         assert!(types.contains("providerCredentialRef?: string"));
         assert!(types.contains("providerCaRef?: string"));
+        assert!(types.contains("providerHostId?: string"));
         assert!(!types.contains("providerPassword"));
+        assert!(sftp_provider.contains("OpenFlags::EXCLUSIVE"));
+        assert!(sftp_provider.contains("Some(RenameFlags::ATOMIC | RenameFlags::NATIVE)"));
+        assert!(!sftp_provider.contains("RenameFlags::OVERWRITE"));
+        assert!(sftp_provider.contains("connect_pinned"));
+        assert!(!sftp_provider.contains("delete_exact"));
     }
 
     #[test]

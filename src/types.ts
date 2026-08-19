@@ -129,6 +129,7 @@ export interface SyncSettings {
   endpoint: string;
   remotePath: string;
   username: string;
+  providerHostId?: string;
   providerCredentialRef?: string;
   providerCaRef?: string;
   lastSyncedAt?: string;

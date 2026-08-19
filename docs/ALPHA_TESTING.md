@@ -120,6 +120,7 @@
 
 - 测试本机 PNG/JPEG/WebP 和无凭据/query/fragment 的 HTTPS 图片 URL 作为终端背景，以及可读性调节；符号链接、错误魔数、超过 8 MiB、重定向 URL 必须由 Rust 拒绝。
 - 使用两个已配置同一 vault 的桌面测试设备往返 PNG、JPEG 和 WebP 背景，确认接收端只在全部加密分块和 manifest 认证后切换画面；分别移除一个分块和篡改密文应保持旧画面并给出稳定失败。JPEG/WebP 应保持原始编码但经过 Rust 结构校验；确认旧 blob 被移除后，只有两台设备 frontier 都稳定确认、30 天保留期满足且对象重认证成功时才允许条件删除，不支持删除的 provider 必须继续保守保留。
+- 在自有非生产 SFTP 服务器创建权限为 `0700` 的空专用目录，从已核验 SHA256 指纹且已配置本机密码/私钥的主机中选择它，分别初始化和在第二台桌面解锁同一 vault。换错 pin、移除 known_hosts、把 root 或对象父目录替换成符号链接、预置同名不同内容、断网和取消都必须 fail closed；SFTP 旧 blob 不得被 GC 删除。Linux 单个 OpenSSH fixture 不能替代不同服务端、权限、认证方式和网络条件矩阵。
 - 测试系统字体、选择 TTF/OTF/WOFF/WOFF2 和字号；错误魔数、符号链接和超过 12 MiB 必须拒绝，确认长主机名、中文和窗口缩放后没有遮挡。
 - 修改主机、历史、脚本、打包传输、编辑器和背景设置，重启应用确认从 `vpshell-state.sqlite3` 恢复；旧 WebView 状态只在 SQLite 初始化成功后删除。
 - 在测试副本中截断 SQLite 文件，确认显示恢复诊断、最多保留两个 `.corrupt-*` 备份且不崩溃。不要把数据库或备份上传到 Issue。

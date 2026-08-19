@@ -13,8 +13,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::sync_merge::{
-    EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection, entity_fields_are_syncable,
+use crate::{
+    file_transfer::{ConnectionSpec, validate_connection, validate_host_key_sha256},
+    sync_merge::{
+        EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection,
+        entity_fields_are_syncable,
+    },
 };
 
 const STORE_SCHEMA_VERSION: i64 = 11;
@@ -104,6 +108,12 @@ pub(crate) struct AuthenticatedConnectionRecord {
     pub(crate) host_id: String,
     pub(crate) connected_at: String,
     pub(crate) path: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct SftpSyncHost {
+    pub(crate) connection: ConnectionSpec,
+    pub(crate) host_key_sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3320,6 +3330,86 @@ impl AppStore {
         })
     }
 
+    pub(crate) fn sftp_sync_host(&self, host_id: &str) -> Result<SftpSyncHost, String> {
+        if host_id.is_empty()
+            || host_id.len() > 128
+            || host_id.chars().any(char::is_control)
+        {
+            return Err("SFTP 同步主机标识无效".to_string());
+        }
+        let snapshot = self.snapshot()?;
+        let state_json = snapshot
+            .state_json
+            .ok_or_else(|| "SFTP 同步需要先保存主机配置".to_string())?;
+        let state = validate_state_json(&state_json)?;
+        let hosts = state["hosts"]
+            .as_array()
+            .ok_or_else(|| "本地状态主机列表无效".to_string())?;
+        let mut matches = hosts.iter().filter(|host| host["id"].as_str() == Some(host_id));
+        let host = matches
+            .next()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "未找到所选 SFTP 同步主机".to_string())?;
+        if matches.next().is_some() {
+            return Err("SFTP 同步主机标识重复".to_string());
+        }
+
+        let required_string = |field: &str| {
+            host.get(field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("SFTP 同步主机缺少 {field}"))
+        };
+        let optional_string = |field: &str| -> Result<Option<String>, String> {
+            match host.get(field) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+                _ => Err(format!("SFTP 同步主机字段 {field} 无效")),
+            }
+        };
+        let identity_file = optional_string("identityFile")?;
+        let identity_passphrase_ref = if let Some(identity_file) = identity_file.as_deref() {
+            state["sshKeys"]
+                .as_array()
+                .ok_or_else(|| "本地状态 SSH 密钥列表无效".to_string())?
+                .iter()
+                .find(|key| key["privateKeyPath"].as_str() == Some(identity_file))
+                .and_then(|key| key.get("passphraseRef"))
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|reference| !reference.is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| "SFTP 同步私钥口令引用无效".to_string())
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let port = host
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or_else(|| "SFTP 同步主机端口无效".to_string())?;
+        let connection = ConnectionSpec {
+            host: required_string("host")?,
+            port,
+            username: required_string("username")?,
+            credential_ref: optional_string("credentialRef")?,
+            identity_file,
+            identity_passphrase_ref,
+        };
+        let host_key_sha256 = required_string("hostKeySha256")?;
+        validate_connection(&connection)?;
+        validate_host_key_sha256(&host_key_sha256)?;
+        Ok(SftpSyncHost {
+            connection,
+            host_key_sha256,
+        })
+    }
+
     pub(crate) fn record_authenticated_connection(
         &self,
         host_id: &str,
@@ -5321,6 +5411,34 @@ mod tests {
             "settings": {"externalEditorPath": "", "autoUploadEditedFiles": false, "packageTransfersEnabled": true},
             "onboardingCompleted": false
         }).to_string()
+    }
+
+    #[test]
+    fn sftp_sync_host_is_derived_from_saved_active_profile_and_pin() {
+        let root = TempDir::new("sftp-sync-host");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        let mut state: Value = serde_json::from_str(&fixture()).unwrap();
+        state["hosts"][0]["hostKeySha256"] =
+            Value::String(format!("SHA256:{}", "A".repeat(43)));
+        store
+            .initialize(InitializeAppStoreRequest {
+                legacy_state_json: Some(state.to_string()),
+            })
+            .unwrap();
+
+        let selected = store.sftp_sync_host("host-1").unwrap();
+        assert_eq!(selected.connection.host, "192.0.2.1");
+        assert_eq!(selected.connection.port, 22);
+        assert_eq!(selected.connection.username, "dev");
+        assert_eq!(
+            selected.connection.credential_ref.as_deref(),
+            Some("ssh-public-reference")
+        );
+        assert_eq!(
+            selected.host_key_sha256,
+            format!("SHA256:{}", "A".repeat(43))
+        );
+        assert!(store.sftp_sync_host("missing-host").is_err());
     }
 
     fn acknowledge_initial_host(

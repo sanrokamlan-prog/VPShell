@@ -95,6 +95,7 @@ jobs:
           sudo install -m 600 -o vpshell-jump-ci -g vpshell-jump-ci "$JUMP_KEY.pub" /home/vpshell-jump-ci/.ssh/authorized_keys
           sudo install -d -m 700 -o vpshell-ci -g vpshell-ci /home/vpshell-ci/.ssh
           sudo install -m 600 -o vpshell-ci -g vpshell-ci "$TARGET_KEY.pub" /home/vpshell-ci/.ssh/authorized_keys
+          sudo install -d -m 700 -o vpshell-ci -g vpshell-ci /home/vpshell-ci/vpshell-sync-ci
           sudo mkdir -p /run/sshd
           sudo /usr/sbin/sshd \
             -p 22223 \
@@ -148,6 +149,7 @@ jobs:
           echo "VPSHELL_NATIVE_TEST_USER=vpshell-ci" >> "$GITHUB_ENV"
           echo "VPSHELL_NATIVE_TEST_IDENTITY_FILE=$TARGET_KEY" >> "$GITHUB_ENV"
           echo "VPSHELL_NATIVE_TEST_HOST_KEY_SHA256=$TARGET_HOST_KEY_SHA256" >> "$GITHUB_ENV"
+          echo "VPSHELL_SYNC_SFTP_TEST_ROOT=/home/vpshell-ci/vpshell-sync-ci" >> "$GITHUB_ENV"
           echo "VPSHELL_NATIVE_TEST_JUMP_HOST=127.0.0.1" >> "$GITHUB_ENV"
           echo "VPSHELL_NATIVE_TEST_JUMP_PORT=22222" >> "$GITHUB_ENV"
           echo "VPSHELL_NATIVE_TEST_JUMP_USER=vpshell-jump-ci" >> "$GITHUB_ENV"

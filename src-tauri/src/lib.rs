@@ -63,6 +63,7 @@ mod sync_provider_ext;
 #[allow(dead_code)] // The coordinator/UI phases consume recovery and encrypted export APIs.
 mod sync_recovery;
 mod sync_scheduler;
+mod sync_sftp_provider;
 mod transfer_manager;
 
 pub(crate) const CREDENTIAL_SERVICE: &str = "com.sanro.vpshell.credentials";
@@ -1627,6 +1628,33 @@ async fn configure_webdav_sync(
     Ok(status)
 }
 
+#[tauri::command]
+async fn configure_sftp_sync(
+    app: tauri::AppHandle,
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    scheduler: State<'_, sync_scheduler::AutomaticSyncScheduler>,
+    store: State<'_, app_store::AppStore>,
+    request: sync_coordinator::ConfigureSftpSyncRequest,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    sync_scheduler::AutomaticSyncScheduler::ensure_supported()?;
+    let coordinator = coordinator.inner().clone();
+    let store = store.inner().clone();
+    let worker_coordinator = coordinator.clone();
+    let worker_store = store.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let host = worker_store.sftp_sync_host(request.host_id())?;
+        worker_coordinator.configure_sftp(request, host)?;
+        worker_coordinator.status_with_app_store(&worker_store)
+    })
+    .await
+    .map_err(|error| format!("SFTP 同步配置任务异常结束: {error}"))??;
+    if let Err(error) = scheduler.start(app, coordinator.clone(), store) {
+        let _ = coordinator.detach_session();
+        return Err(error);
+    }
+    Ok(status)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunSyncOnceResult {
@@ -1984,6 +2012,7 @@ pub fn run() {
             list_sync_conflicts,
             configure_local_folder_sync,
             configure_webdav_sync,
+            configure_sftp_sync,
             run_sync_once,
             resolve_sync_conflict,
             cancel_sync,

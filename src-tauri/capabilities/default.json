@@ -61,6 +61,7 @@
     "allow-list-sync-conflicts",
     "allow-configure-local-folder-sync",
     "allow-configure-webdav-sync",
+    "allow-configure-sftp-sync",
     "allow-run-sync-once",
     "allow-resolve-sync-conflict",
     "allow-cancel-sync",

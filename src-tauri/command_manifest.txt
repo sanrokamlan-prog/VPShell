@@ -34,6 +34,7 @@ desktop_sync_status
 list_sync_conflicts
 configure_local_folder_sync
 configure_webdav_sync
+configure_sftp_sync
 run_sync_once
 resolve_sync_conflict
 cancel_sync

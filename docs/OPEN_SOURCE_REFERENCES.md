@@ -81,6 +81,7 @@ inventory and per-item partial results. No reviewed project's file-manager code 
 - 2026-08-09: Rechecked remote file-operation and visual chmod behavior before the independent
   preview-token/batch implementation; no new third-party code or dependency was added.
 - 2026-08-10: Enabled the existing ssh2/libssh2 vendored OpenSSL build path for Android NDK
+- 2026-08-19: Inspected `ssh2-rs` 0.9.6 commit `011cfc4bb6040928c6827c7b821dddd132f7cfc8` public SFTP APIs for exclusive create, fsync, close and rename flags while implementing the independent SFTP sync transport; no source or assets were copied
   cross-compilation and recorded its dependency boundary; no upstream implementation was copied.
 - 2026-08-10: Added the maintained Android-native keyring store through its public Rust API and
   recorded its Keystore/SharedPreferences, license and removal boundaries; no upstream source was copied.

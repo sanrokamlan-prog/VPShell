@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{
-    app_store::{AppStore, MANAGED_BACKGROUND_ENTITY_ID},
+    app_store::{AppStore, MANAGED_BACKGROUND_ENTITY_ID, SftpSyncHost},
     local_assets::LocalAssetManager,
     sync_blob::{
         equivalent_blob_objects, object_key_matches_blob_envelope, prepare_wallpaper_blob,
@@ -35,6 +35,8 @@ use crate::{
     },
     sync_provider_ca::validate_webdav_ca_reference,
     sync_provider_credentials::{read_webdav_credential, validate_webdav_credential_reference},
+    sync_provider_ext::{SftpProviderConfig, SftpSyncProvider},
+    sync_sftp_provider::Ssh2SftpObjectTransport,
 };
 
 const COORDINATOR_SCHEMA_VERSION: u16 = 1;
@@ -73,9 +75,24 @@ pub(crate) struct ConfigureWebDavSyncRequest {
     mode: LocalFolderSetupMode,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfigureSftpSyncRequest {
+    host_id: String,
+    root_path: String,
+    password: String,
+    mode: LocalFolderSetupMode,
+}
+
 impl ConfigureWebDavSyncRequest {
     pub(crate) fn provider_ca_reference(&self) -> Option<&str> {
         self.provider_ca_ref.as_deref()
+    }
+}
+
+impl ConfigureSftpSyncRequest {
+    pub(crate) fn host_id(&self) -> &str {
+        &self.host_id
     }
 }
 
@@ -525,6 +542,37 @@ impl SyncCoordinatorManager {
             request.mode,
             Argon2Parameters::default(),
             "WebDAV",
+        )
+    }
+
+    pub(crate) fn configure_sftp(
+        &self,
+        request: ConfigureSftpSyncRequest,
+        host: SftpSyncHost,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        let _guard = self.begin_configuration()?;
+        let password = Zeroizing::new(request.password);
+        validate_sync_password(password.as_bytes())?;
+        let config = SftpProviderConfig {
+            host: host.connection.host.clone(),
+            port: host.connection.port,
+            username: host.connection.username.clone(),
+            root: request.root_path,
+            host_key_sha256: host.host_key_sha256,
+            timeout_seconds: 30,
+        };
+        let transport = Ssh2SftpObjectTransport::connect(&config, host.connection)
+            .map_err(|error| provider_setup_error(&error, "SFTP"))?;
+        let provider: Arc<dyn SyncObjectProvider> = Arc::new(
+            SftpSyncProvider::connect(config, transport)
+                .map_err(|error| provider_setup_error(&error, "SFTP"))?,
+        );
+        self.configure_provider_inner(
+            provider,
+            password,
+            request.mode,
+            Argon2Parameters::default(),
+            "SFTP",
         )
     }
 

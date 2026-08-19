@@ -123,10 +123,11 @@
 | 完成 | 命令模板具名非敏感参数历史使用稳定 history 实体、事务 operation、tombstone 和远端投影接入；敏感/未知字段保持本机；PR #1 run `32201986897`（`5310070`）全平台 Actions 全绿 |
 | 完成 | Rust-owned 已认证连接历史：原生/Android 认证事实、系统 OpenSSH/Mosh 有界认证检查、稳定 history operation/tombstone 与远端投影；PR #1 run `32219104481`（`6c0a32c`）全平台 Actions 全绿 |
 | 完成 | 背景图片 blob：PNG Rust 解码/重编码，JPEG/WebP 有界结构校验，分块 AEAD/manifest、operation/outbox、完整恢复安装和 AppState 投影；PNG PR #1 run `32225659322`、JPEG/WebP 修复 PR #1 run `32256446076` 全绿 |
-| 待 Actions | 活动设备确认式远端 blob 回收：schema-v3 候选 frontier、加密 member/ack 索引、30 天确认保留、manifest/chunk 重认证和 Local Folder/WebDAV 条件删除；首轮 Actions 仅 rustfmt 失败，格式修复待提交后重跑完整矩阵 |
-| 待实现 | 其他尚未建模设置等业务域 operation、扩展 provider 产品入口与真实多设备矩阵 |
+| 完成 | 活动设备确认式远端 blob 回收：schema-v3 候选 frontier、加密 member/ack 索引、30 天确认保留、manifest/chunk 重认证和 Local Folder/WebDAV 条件删除；测试修复提交 `49e765c` 的 PR #1 run `32264835549` 全绿 |
+| 待 Actions | 桌面 SFTP provider 产品入口：复用已保存主机、known_hosts/精确 host-key pin 与本机认证材料，接入 Rust-owned 协调器和自动调度；Linux 单一临时 OpenSSH fixture 覆盖真实路径，广泛外部服务器矩阵仍需外部验收 |
+| 待实现 | 其他尚未建模设置等业务域 operation、S3/Gateway 等扩展 provider 产品入口与真实多设备矩阵 |
 
-Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322`、JPEG/WebP 已在 `32256446076` 通过 Actions，活动设备确认式 blob GC 已接线并对无条件删除 provider 保守保留，其他尚未建模设置、扩展 provider、真实外部 provider 和多设备仍未完成。
+Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322`、JPEG/WebP 已在 `32256446076` 通过 Actions，活动设备确认式 blob GC 已在 `32264835549` 通过 Actions并对无条件删除 provider 保守保留。SFTP 产品入口与单一 Linux OpenSSH fixture 已接线并等待 Actions；其他尚未建模设置、S3/Gateway、广泛外部 provider 和多设备仍未完成。
 
 ## Phase C：Android Preview
 
@@ -315,7 +316,10 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-19 | B9 活动设备确认式远端 blob GC 第二轮 Actions 编译修复 | 格式修复提交 `391fd8d` 的 PR #1 run `32261537035` 已进入编译阶段：frontend 成功，但四个平台 Rust check 与 Android 构建均发现 `sync_blob_gc.rs` frontier 空 map 类型无法推断、`sync_coordinator.rs` 直接读取私有 `AppStoreSnapshot.state_json` 两个相同错误，后续 locked test/fixture/gate 因而未完成。已改为显式 `BTreeMap<String,u64>` 并复用仓库既有 `serde_json::to_value(snapshot)["stateJson"]` 公共序列化读取；不改变 GC 行为。本机 `git diff --check` 与静态门禁待交接前复核，等待修复提交后的完整矩阵。 |
 | 2026-08-19 | B9 活动设备确认式远端 blob GC 第三轮 Actions 与格式修复 | 编译修复提交 `d92d544` 的 PR #1 run `32262411916` 已完成：frontend 成功，四个平台 Rust check 与 Android 构建均已编译并仅在同一 `sync_coordinator.rs` 长 `serde_json::to_value` 表达式的 `cargo fmt --check` 报告 1 处差异，后续 locked test/fixture/gate 因而未执行。已按四个平台一致 runner diff 机械应用该单段格式，不改行为；等待格式修复提交后的完整矩阵。 |
 | 2026-08-19 | B9 活动设备确认式远端 blob GC 第四轮 Actions 测试修复 | 格式修复提交 `bad7bfd` 的 PR #1 run `32263244580` 已完成：frontend、Android aarch64 debug APK/Gradle gate、四平台 fmt/check 均成功；四平台 Rust 测试一致失败 4 项既有 coordinator 断言，根因是空 AppState 的合法 `stateJson=null` 被 GC live-set 读取误报 `app-state-handoff`，以及 GC member/ack 元数据被错误计入用户上传计数。已改为 null 状态返回无 live blob，并保持 `last_uploaded_objects` 只统计普通同步对象；待本轮修复提交后的完整矩阵。 |
+| 2026-08-19 | B9 活动设备确认式远端 blob GC（Actions 完成） | 测试修复提交 `49e765c` 的 PR #1 run `32264835549` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture 及 Android aarch64 debug APK/Gradle gate 六项全部 `COMPLETED/SUCCESS`；PR head、分支 head 与提交一致。空 AppState 与用户对象计数回归均已通过完整矩阵。 |
+| 2026-08-19 | B9 桌面 SFTP provider 产品入口（待 Actions） | 新增真实 `ssh2` SFTP object transport 与桌面配置命令：Rust 只从 AppStore 选择的活动主机派生 endpoint、credential/private-key/passphrase reference 和精确 SHA256 pin，先验证本机 known_hosts、再比较 pin、最后认证；配置本身无秘密且不进入同步包。transport 限制 24 MiB 对象、10,000 项/16 层扫描、32 层/1024 字节绝对远端根、5–60 秒超时，逐级 `lstat` 拒绝观察到的符号链接/特殊条目；写入先在专用 `0700` 暂存目录以 `EXCLUSIVE`/`0600` 创建，分块 flush/fsync/close/属性检查后以不含 overwrite 的 rename 发布并回读，半文件不会占用最终 key，崩溃遗留暂存项隔离但需外部维护清理。不提供不可靠的条件删除，因此 blob GC 保守保留。协调器复用显式初始化/解锁、单周期、冲突与自动调度，前端只选择已保存且已有 pin 的主机；S3/Gateway 继续禁用，Android capability 继续只读。Linux Actions 复用临时 OpenSSH fixture，覆盖正确/错误 pin、真实认证、创建/回读/列举和同名冲突；多版本服务器、权限/symlink 竞态、断网/限流、真实多设备仍为外部矩阵。 |
+| 2026-08-19 | B9 SFTP 产品入口本机轻量门禁 | `git diff --check`、Tauri/default/package 严格 JSON、98-command manifest 唯一性、桌面 command/permission/handler 与 Android 禁用边界、无日志宏/明文 provider 密码字段、精确 pin/`EXCLUSIVE`/无 `delete_exact` 静态回归、CI 临时根与真实 fixture 环境、文档状态、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过；根分区 58%。VPS 无 Cargo/rustfmt/TypeScript compiler，未下载工具链、依赖或 SDK；frontend、四平台 locked fmt/check/test、Linux 真实 SFTP fixture 与 Android 构建交给 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交并推送活动设备确认式远端 blob GC 的第三轮 rustfmt 修复；下一轮必须先等待本项 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复，未全绿前不进入其他尚未建模设置或扩展 provider。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。
+等待 supervisor 提交桌面 SFTP provider 产品入口。下一轮必须先等待该提交 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复；全绿后再从其他尚未建模设置与 S3/Gateway 产品入口中选择第一个可独立验收项。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收；Android Sync capability 继续 disabled。

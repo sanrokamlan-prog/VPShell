@@ -2230,12 +2230,27 @@ function App() {
   }
 
   async function configureDesktopSync() {
-    if (appState.sync.provider !== "local" && appState.sync.provider !== "webdav") {
-      showToast("当前只开放 Local Folder 与 WebDAV 同步");
+    if (appState.sync.provider !== "local" && appState.sync.provider !== "webdav" && appState.sync.provider !== "sftp") {
+      showToast("当前只开放 Local Folder、WebDAV 与 SFTP 同步");
       return;
     }
-    if (!appState.sync.endpoint.trim()) {
+    if (appState.sync.provider !== "sftp" && !appState.sync.endpoint.trim()) {
       showToast(appState.sync.provider === "local" ? "请输入已存在的同步目录" : "请输入 WebDAV HTTPS endpoint");
+      return;
+    }
+    const sftpHost = appState.sync.provider === "sftp"
+      ? appState.hosts.find((host) => host.id === appState.sync.providerHostId)
+      : undefined;
+    if (appState.sync.provider === "sftp" && !sftpHost) {
+      showToast("请选择一台已保存的 SFTP 同步主机");
+      return;
+    }
+    if (sftpHost && !sftpHost.hostKeySha256) {
+      showToast("SFTP 同步主机必须先核验并保存 SHA256 主机指纹");
+      return;
+    }
+    if (appState.sync.provider === "sftp" && !appState.sync.remotePath.trim()) {
+      showToast("请输入已存在的 SFTP 同步根目录");
       return;
     }
     if (!syncPassword) {
@@ -2278,7 +2293,8 @@ function App() {
             mode: syncSetupMode,
           },
         })
-        : await invoke<SyncCoordinatorStatus>("configure_webdav_sync", {
+        : provider === "webdav"
+          ? await invoke<SyncCoordinatorStatus>("configure_webdav_sync", {
           request: {
             endpoint: appState.sync.endpoint.trim(),
             username,
@@ -2287,7 +2303,15 @@ function App() {
             password: syncPassword,
             mode: syncSetupMode,
           },
-        });
+          })
+          : await invoke<SyncCoordinatorStatus>("configure_sftp_sync", {
+            request: {
+              hostId: sftpHost?.id,
+              rootPath: appState.sync.remotePath.trim(),
+              password: syncPassword,
+              mode: syncSetupMode,
+            },
+          });
       setDesktopSyncStatus(status);
       setDesktopSyncError(null);
       setAppState((current) => ({
@@ -2297,6 +2321,7 @@ function App() {
           enabled: true,
           provider,
           username,
+          providerHostId: provider === "sftp" ? sftpHost?.id : current.sync.providerHostId,
           providerCredentialRef: provider === "webdav"
             ? providerCredentialRef ?? current.sync.providerCredentialRef
             : current.sync.providerCredentialRef,
@@ -3378,7 +3403,7 @@ function App() {
           {!desktopSyncStatus?.configured ? <>
           <div className="provider-grid">
             {(Object.keys(providerLabels) as SyncProviderKind[]).map((provider) => (
-              <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} disabled={provider !== "local" && provider !== "webdav"} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
+              <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} disabled={provider === "s3" || provider === "gateway"} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
                 {provider === "local" ? <HardDrive size={18} /> : provider === "webdav" ? <Globe2 size={18} /> : provider === "sftp" ? <SquareTerminal size={18} /> : provider === "s3" ? <Database size={18} /> : <Cloud size={18} />}
                 <span>{providerLabels[provider]}</span>
               </button>
@@ -3389,7 +3414,10 @@ function App() {
             <button type="button" className={syncSetupMode === "initialize" ? "active" : ""} onClick={() => setSyncSetupMode("initialize")}>初始化新 vault</button>
           </div>
           <div className="form-grid sync-form">
-            <label className="field span-2"><span>{appState.sync.provider === "local" ? "同步目录" : "WebDAV endpoint"}</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder={appState.sync.provider === "local" ? "D:\\VPShellSync" : "https://dav.example.com/vpshell/"} /></label>
+            {appState.sync.provider !== "sftp" ? <label className="field span-2"><span>{appState.sync.provider === "local" ? "同步目录" : "WebDAV endpoint"}</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder={appState.sync.provider === "local" ? "D:\\VPShellSync" : "https://dav.example.com/vpshell/"} /></label> : <>
+              <label className="field span-2"><span>SFTP 主机</span><select value={appState.sync.providerHostId ?? ""} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, providerHostId: event.target.value || undefined } }))}><option value="">选择已保存主机</option>{appState.hosts.map((host) => <option key={host.id} value={host.id} disabled={!host.hostKeySha256}>{host.name} · {host.username}@{host.host}:{host.port}{host.hostKeySha256 ? "" : " · 未核验指纹"}</option>)}</select></label>
+              <label className="field span-2"><span>远端同步根目录</span><input value={appState.sync.remotePath} maxLength={1024} spellCheck={false} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, remotePath: event.target.value } }))} placeholder="/home/user/vpshell-sync" /></label>
+            </>}
             {appState.sync.provider === "webdav" ? <>
               <label className="field"><span>WebDAV 用户名</span><input maxLength={256} value={appState.sync.username} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, username: event.target.value } }))} autoComplete="username" placeholder="可留空使用无认证存储" /></label>
               <label className="field"><span>WebDAV 密码</span><input type="password" maxLength={1024} value={webDavPassword} onChange={(event) => setWebDavPassword(event.target.value)} autoComplete="current-password" placeholder={appState.sync.providerCredentialRef ? "留空使用系统已保存密码" : "仅保存到系统凭据管理器"} /></label>
