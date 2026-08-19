@@ -3331,10 +3331,7 @@ impl AppStore {
     }
 
     pub(crate) fn sftp_sync_host(&self, host_id: &str) -> Result<SftpSyncHost, String> {
-        if host_id.is_empty()
-            || host_id.len() > 128
-            || host_id.chars().any(char::is_control)
-        {
+        if host_id.is_empty() || host_id.len() > 128 || host_id.chars().any(char::is_control) {
             return Err("SFTP 同步主机标识无效".to_string());
         }
         let snapshot = self.snapshot()?;
@@ -3345,7 +3342,9 @@ impl AppStore {
         let hosts = state["hosts"]
             .as_array()
             .ok_or_else(|| "本地状态主机列表无效".to_string())?;
-        let mut matches = hosts.iter().filter(|host| host["id"].as_str() == Some(host_id));
+        let mut matches = hosts
+            .iter()
+            .filter(|host| host["id"].as_str() == Some(host_id));
         let host = matches
             .next()
             .and_then(Value::as_object)
@@ -3384,7 +3383,6 @@ impl AppStore {
                         .ok_or_else(|| "SFTP 同步私钥口令引用无效".to_string())
                 })
                 .transpose()?
-                .flatten()
         } else {
             None
         };
@@ -5418,8 +5416,7 @@ mod tests {
         let root = TempDir::new("sftp-sync-host");
         let store = AppStore::load(root.0.clone()).unwrap();
         let mut state: Value = serde_json::from_str(&fixture()).unwrap();
-        state["hosts"][0]["hostKeySha256"] =
-            Value::String(format!("SHA256:{}", "A".repeat(43)));
+        state["hosts"][0]["hostKeySha256"] = Value::String(format!("SHA256:{}", "A".repeat(43)));
         store
             .initialize(InitializeAppStoreRequest {
                 legacy_state_json: Some(state.to_string()),

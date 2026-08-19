@@ -9,8 +9,8 @@ use ssh2::{FileStat, OpenFlags, OpenType, RenameFlags, Session, Sftp};
 use crate::{
     file_transfer::{ConnectionSpec, connect_pinned},
     sync_provider::{
-        ProviderCancellation, ProviderError, ProviderErrorCode, ProviderResult,
-        validate_key, validate_object_bytes,
+        ProviderCancellation, ProviderError, ProviderErrorCode, ProviderResult, validate_key,
+        validate_object_bytes,
     },
     sync_provider_ext::{
         ConditionalCreateResult, ObjectTransport, SftpObjectTransport, SftpProviderConfig,
@@ -52,16 +52,14 @@ impl Ssh2SftpObjectTransport {
         }
         let session = connect_pinned(&connection, &config.host_key_sha256)
             .map_err(|_| provider_error(ProviderErrorCode::Unavailable, "SFTP 同步连接失败"))?;
-        let timeout_ms = u32::try_from(config.timeout_seconds.saturating_mul(1_000)).map_err(|_| {
-            provider_error(
-                ProviderErrorCode::InvalidInput,
-                "SFTP 同步超时配置无效",
-            )
-        })?;
+        let timeout_ms =
+            u32::try_from(config.timeout_seconds.saturating_mul(1_000)).map_err(|_| {
+                provider_error(ProviderErrorCode::InvalidInput, "SFTP 同步超时配置无效")
+            })?;
         session.set_timeout(timeout_ms);
-        let sftp = session
-            .sftp()
-            .map_err(|_| provider_error(ProviderErrorCode::Unavailable, "无法建立 SFTP 同步通道"))?;
+        let sftp = session.sftp().map_err(|_| {
+            provider_error(ProviderErrorCode::Unavailable, "无法建立 SFTP 同步通道")
+        })?;
         let transport = Self {
             root: config.root.clone(),
             state: Mutex::new(SftpTransportState {
@@ -78,12 +76,9 @@ impl Ssh2SftpObjectTransport {
     }
 
     fn lock_state(&self) -> ProviderResult<std::sync::MutexGuard<'_, SftpTransportState>> {
-        self.state.lock().map_err(|_| {
-            provider_error(
-                ProviderErrorCode::Unavailable,
-                "SFTP 同步会话锁不可用",
-            )
-        })
+        self.state
+            .lock()
+            .map_err(|_| provider_error(ProviderErrorCode::Unavailable, "SFTP 同步会话锁不可用"))
     }
 
     fn object_path(&self, key: &str) -> ProviderResult<String> {
@@ -115,8 +110,7 @@ impl ObjectTransport for Ssh2SftpObjectTransport {
             cancellation,
         )?;
         entries.retain(|entry| {
-            entry.key.starts_with(prefix)
-                && cursor.is_none_or(|cursor| entry.key.as_str() > cursor)
+            entry.key.starts_with(prefix) && cursor.is_none_or(|cursor| entry.key.as_str() > cursor)
         });
         entries.sort_by(|left, right| left.key.cmp(&right.key));
         entries.truncate(limit);
@@ -141,20 +135,14 @@ impl ObjectTransport for Ssh2SftpObjectTransport {
         }
         let size = bounded_size(&stat)?;
         let mut file = state.sftp.open(Path::new(&path)).map_err(|_| {
-            provider_error(
-                ProviderErrorCode::Unavailable,
-                "无法打开 SFTP 同步对象",
-            )
+            provider_error(ProviderErrorCode::Unavailable, "无法打开 SFTP 同步对象")
         })?;
         let mut bytes = Vec::with_capacity(size);
         let mut buffer = [0u8; IO_CHUNK_BYTES];
         loop {
             cancellation.check()?;
             let count = file.read(&mut buffer).map_err(|_| {
-                provider_error(
-                    ProviderErrorCode::Unavailable,
-                    "无法读取 SFTP 同步对象",
-                )
+                provider_error(ProviderErrorCode::Unavailable, "无法读取 SFTP 同步对象")
             })?;
             if count == 0 {
                 break;
@@ -216,29 +204,17 @@ impl ObjectTransport for Ssh2SftpObjectTransport {
             for chunk in bytes.chunks(IO_CHUNK_BYTES) {
                 cancellation.check()?;
                 file.write_all(chunk).map_err(|_| {
-                    provider_error(
-                        ProviderErrorCode::Unavailable,
-                        "无法写入 SFTP 同步对象",
-                    )
+                    provider_error(ProviderErrorCode::Unavailable, "无法写入 SFTP 同步对象")
                 })?;
             }
             file.flush().map_err(|_| {
-                provider_error(
-                    ProviderErrorCode::Unavailable,
-                    "无法刷新 SFTP 同步对象",
-                )
+                provider_error(ProviderErrorCode::Unavailable, "无法刷新 SFTP 同步对象")
             })?;
             file.fsync().map_err(|_| {
-                provider_error(
-                    ProviderErrorCode::Unavailable,
-                    "无法持久化 SFTP 同步对象",
-                )
+                provider_error(ProviderErrorCode::Unavailable, "无法持久化 SFTP 同步对象")
             })?;
             file.close().map_err(|_| {
-                provider_error(
-                    ProviderErrorCode::Unavailable,
-                    "无法关闭 SFTP 同步对象",
-                )
+                provider_error(ProviderErrorCode::Unavailable, "无法关闭 SFTP 同步对象")
             })?;
             Ok(())
         })();
@@ -315,12 +291,8 @@ fn lstat_optional(sftp: &Sftp, path: &str) -> ProviderResult<Option<FileStat>> {
 }
 
 fn lstat_required(sftp: &Sftp, path: &str) -> ProviderResult<FileStat> {
-    lstat_optional(sftp, path)?.ok_or_else(|| {
-        provider_error(
-            ProviderErrorCode::NotFound,
-            "SFTP 同步对象不存在",
-        )
-    })
+    lstat_optional(sftp, path)?
+        .ok_or_else(|| provider_error(ProviderErrorCode::NotFound, "SFTP 同步对象不存在"))
 }
 
 fn verify_directory_chain(sftp: &Sftp, root: &str, create: bool) -> ProviderResult<()> {
@@ -338,10 +310,7 @@ fn verify_directory_chain(sftp: &Sftp, root: &str, create: bool) -> ProviderResu
             }
             None if create => {
                 sftp.mkdir(Path::new(&current), 0o700).map_err(|_| {
-                    provider_error(
-                        ProviderErrorCode::Unavailable,
-                        "无法创建 SFTP 同步目录",
-                    )
+                    provider_error(ProviderErrorCode::Unavailable, "无法创建 SFTP 同步目录")
                 })?;
                 let stat = lstat_required(sftp, &current)?;
                 if !stat.file_type().is_dir() || stat.file_type().is_symlink() {
@@ -368,10 +337,7 @@ fn ensure_staging_directory(sftp: &Sftp, root: &str) -> ProviderResult<()> {
         let _ = sftp.mkdir(Path::new(&path), 0o700);
     }
     let stat = lstat_required(sftp, &path)?;
-    if !stat.file_type().is_dir()
-        || stat.file_type().is_symlink()
-        || !private_permissions(&stat)
-    {
+    if !stat.file_type().is_dir() || stat.file_type().is_symlink() || !private_permissions(&stat) {
         return Err(provider_error(
             ProviderErrorCode::UnsafePath,
             "SFTP 同步暂存目录类型不安全",
@@ -381,7 +347,8 @@ fn ensure_staging_directory(sftp: &Sftp, root: &str) -> ProviderResult<()> {
 }
 
 fn private_permissions(stat: &FileStat) -> bool {
-    stat.perm.is_some_and(|permissions| permissions & 0o077 == 0)
+    stat.perm
+        .is_some_and(|permissions| permissions & 0o077 == 0)
 }
 
 fn verify_object_parent_chain(
@@ -406,10 +373,7 @@ fn verify_object_parent_chain(
             }
             None if create => {
                 sftp.mkdir(Path::new(&current), 0o700).map_err(|_| {
-                    provider_error(
-                        ProviderErrorCode::Unavailable,
-                        "无法创建 SFTP 同步对象目录",
-                    )
+                    provider_error(ProviderErrorCode::Unavailable, "无法创建 SFTP 同步对象目录")
                 })?;
                 let stat = lstat_required(sftp, &current)?;
                 if !stat.file_type().is_dir() || stat.file_type().is_symlink() {
@@ -463,12 +427,9 @@ fn collect_objects(
     } else {
         format!("{root}/{relative}")
     };
-    let children = sftp.readdir(Path::new(&directory)).map_err(|_| {
-        provider_error(
-            ProviderErrorCode::Unavailable,
-            "无法列出 SFTP 同步目录",
-        )
-    })?;
+    let children = sftp
+        .readdir(Path::new(&directory))
+        .map_err(|_| provider_error(ProviderErrorCode::Unavailable, "无法列出 SFTP 同步目录"))?;
     for (path, stat) in children {
         cancellation.check()?;
         let name = path
@@ -501,10 +462,7 @@ fn collect_objects(
             format!("{relative}/{name}")
         };
         validate_key(&key).map_err(|_| {
-            provider_error(
-                ProviderErrorCode::Protocol,
-                "SFTP 同步目录返回非法对象 key",
-            )
+            provider_error(ProviderErrorCode::Protocol, "SFTP 同步目录返回非法对象 key")
         })?;
         *visited = visited.saturating_add(1);
         if *visited > MAX_LIST_ENTRIES {
@@ -569,8 +527,7 @@ mod tests {
             .expect("numeric fixture port");
         let username = env::var("VPSHELL_NATIVE_TEST_USER").expect("fixture user");
         let identity_file = env::var("VPSHELL_NATIVE_TEST_IDENTITY_FILE").expect("fixture key");
-        let host_key_sha256 =
-            env::var("VPSHELL_NATIVE_TEST_HOST_KEY_SHA256").expect("fixture pin");
+        let host_key_sha256 = env::var("VPSHELL_NATIVE_TEST_HOST_KEY_SHA256").expect("fixture pin");
         let root = env::var("VPSHELL_SYNC_SFTP_TEST_ROOT").expect("fixture sync root");
         let connection = ConnectionSpec {
             host: host.clone(),
@@ -602,9 +559,7 @@ mod tests {
         let key = format!("objects/{}.oseg", uuid::Uuid::new_v4());
         assert!(provider.put(&key, b"alpha", &cancellation).is_ok());
         assert_eq!(provider.get(&key, &cancellation).unwrap(), b"alpha");
-        let page = provider
-            .list("objects/", None, 100, &cancellation)
-            .unwrap();
+        let page = provider.list("objects/", None, 100, &cancellation).unwrap();
         assert!(page.objects.iter().any(|object| object.key == key));
         assert!(
             page.objects
@@ -612,7 +567,10 @@ mod tests {
                 .all(|object| !object.key.contains(STAGING_DIRECTORY))
         );
         assert_eq!(
-            provider.put(&key, b"different", &cancellation).unwrap_err().code,
+            provider
+                .put(&key, b"different", &cancellation)
+                .unwrap_err()
+                .code,
             ProviderErrorCode::Conflict
         );
     }
