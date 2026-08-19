@@ -439,7 +439,9 @@ fn canonical_host(url: &Url) -> ProviderResult<String> {
     let host = url
         .host_str()
         .ok_or_else(|| provider_error(ProviderErrorCode::InvalidInput, "S3 请求 URL 缺少 host"))?;
-    let host = if host.contains(':') {
+    let host = if host.starts_with('[') && host.ends_with(']') {
+        host.to_string()
+    } else if host.contains(':') {
         format!("[{host}]")
     } else {
         host.to_string()
@@ -942,6 +944,8 @@ mod tests {
         );
         let ipv6 = Url::parse("https://[2001:db8::1]:9443/").unwrap();
         assert_eq!(canonical_host(&ipv6).unwrap(), "[2001:db8::1]:9443");
+        let ipv6_default = Url::parse("https://[2001:db8::1]/").unwrap();
+        assert_eq!(canonical_host(&ipv6_default).unwrap(), "[2001:db8::1]");
     }
 
     #[test]
