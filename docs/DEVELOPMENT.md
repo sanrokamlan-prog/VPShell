@@ -202,7 +202,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 
 - 精确锁定 RustCrypto `argon2 = 0.5.3`、`chacha20poly1305 = 0.10.1`、`hkdf = 0.12.4` 和 `getrandom = 0.3.4`；均为 MIT OR Apache-2.0。选择 Argon2 0.5 稳定线而非 0.6 RC；ChaCha 0.10 与现有 digest/aead 依赖兼容，避免为单模块引入第二套当前生态。
 - 四项均关闭默认 feature。Argon2 只启用 `alloc`/`zeroize`，带来纯 Rust `blake2`/`password-hash`；ChaCha 只启用 `alloc`，不启用 reduced-round/stream/std/getrandom；HKDF 与 getrandom 不启用可选 feature。随机字节通过直接锁定、依赖树已存在的 getrandom 0.3.4 从桌面 OS CSPRNG 获取。
-- 设备 operation 签名精确复用锁图中已有的 `ed25519-dalek = 2.2.0`（BSD-3-Clause），提升为关闭默认 feature、只启用 `alloc`/`zeroize` 的直接依赖。仅使用公开 `SigningKey`、`VerifyingKey::verify_strict` 与 signature trait；私钥仍由 `getrandom` 生成并由系统凭据持久化，没有复制上游源码、示例或向量。删除该依赖前必须以兼容实现读取 version-1 签名封套并完成迁移，不能把旧封套静默视为未签名 operation。
+- 设备 operation 签名精确复用锁图中已有的 `ed25519-dalek = 3.0.0`（BSD-3-Clause），提升为关闭默认 feature、只启用 `alloc`/`zeroize` 的直接依赖。仅使用公开 `SigningKey`、`VerifyingKey::verify_strict` 与 signature trait；私钥仍由 `getrandom` 生成并由系统凭据持久化，没有复制上游源码、示例或向量。该版本要求 Rust 1.85，低于仓库 edition 2024 所需工具链基线。删除该依赖前必须以兼容实现读取 version-1 签名封套并完成迁移，不能把旧封套静默视为未签名 operation。
 - 这些库没有网络、遥测、文件系统、Tauri capability 或外部可执行文件权限；运行面仅为 CPU、受 19–256 MiB 硬限制的 Argon2 内存和 OS 随机源。算法失败返回稳定无秘密诊断，密钥类型不可 Serialize/Debug，临时 KEK、域密钥和解包 VMK 使用清零容器。
 - 删除/替换不能静默改变 v1 密文：必须保留固定测试向量，用替代实现读取全部 v1 keyslot/对象并重加密到新格式，经恢复演练后才能删除依赖。旧算法解析器需按明确格式版本保留只读迁移期，不能就地降级参数或 nonce 长度。
 
