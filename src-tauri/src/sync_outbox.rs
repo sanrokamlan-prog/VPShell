@@ -808,9 +808,7 @@ impl SyncJournal {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|_| {
-                    JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份")
-                })
+                .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份"))
         })
     }
 

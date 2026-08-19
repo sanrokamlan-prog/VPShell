@@ -100,7 +100,10 @@ impl ReqwestGatewayAuthenticator {
             builder = builder.add_root_certificate(certificate);
         }
         let client = builder.build().map_err(|_| {
-            provider_error(ProviderErrorCode::Unavailable, "无法创建 Gateway HTTPS 客户端")
+            provider_error(
+                ProviderErrorCode::Unavailable,
+                "无法创建 Gateway HTTPS 客户端",
+            )
         })?;
         Ok(Self { client, endpoint })
     }
@@ -126,11 +129,9 @@ impl GatewayAuthenticator for ReqwestGatewayAuthenticator {
             password,
             totp,
         };
-        let encoded = Zeroizing::new(
-            serde_json::to_vec(&request).map_err(|_| {
-                provider_error(ProviderErrorCode::InvalidInput, "Gateway 登录请求无效")
-            })?,
-        );
+        let encoded = Zeroizing::new(serde_json::to_vec(&request).map_err(|_| {
+            provider_error(ProviderErrorCode::InvalidInput, "Gateway 登录请求无效")
+        })?);
         let encoded_length = encoded.len();
         let response = send(
             self.client
@@ -278,9 +279,8 @@ impl Read for SecretRequestBody {
 }
 
 fn parse_login_response(bytes: &[u8]) -> ProviderResult<Zeroizing<String>> {
-    let response: LoginResponse = serde_json::from_slice(bytes).map_err(|_| {
-        provider_error(ProviderErrorCode::Protocol, "Gateway 登录响应无效")
-    })?;
+    let response: LoginResponse = serde_json::from_slice(bytes)
+        .map_err(|_| provider_error(ProviderErrorCode::Protocol, "Gateway 登录响应无效"))?;
     let session_token = Zeroizing::new(response.session_token);
     if response.protocol_version != PROTOCOL_VERSION
         || !(MIN_SESSION_SECONDS..=MAX_SESSION_SECONDS).contains(&response.expires_in_seconds)
@@ -329,9 +329,9 @@ fn canonical_endpoint(endpoint: &str) -> ProviderResult<Url> {
 }
 
 fn endpoint_url(endpoint: &Url, relative: &str) -> ProviderResult<Url> {
-    endpoint.join(relative).map_err(|_| {
-        provider_error(ProviderErrorCode::InvalidInput, "Gateway endpoint 路径无效")
-    })
+    endpoint
+        .join(relative)
+        .map_err(|_| provider_error(ProviderErrorCode::InvalidInput, "Gateway endpoint 路径无效"))
 }
 
 fn send(
@@ -446,15 +446,22 @@ mod tests {
             session_token: Zeroizing::new("fixture-token".to_string()),
         };
         assert_eq!(
-            transport.object_url("vpshell/v1/object.oseg").unwrap().as_str(),
+            transport
+                .object_url("vpshell/v1/object.oseg")
+                .unwrap()
+                .as_str(),
             "https://gateway.example.test/api/v1/objects/vpshell/v1/object.oseg"
         );
     }
 
     #[test]
     fn login_and_list_responses_reject_unknown_versions_fields_and_limits() {
-        let valid_login = br#"{"protocolVersion":1,"sessionToken":"fixture-token","expiresInSeconds":300}"#;
-        assert_eq!(parse_login_response(valid_login).unwrap().as_str(), "fixture-token");
+        let valid_login =
+            br#"{"protocolVersion":1,"sessionToken":"fixture-token","expiresInSeconds":300}"#;
+        assert_eq!(
+            parse_login_response(valid_login).unwrap().as_str(),
+            "fixture-token"
+        );
         for invalid in [
             &br#"{"protocolVersion":2,"sessionToken":"fixture-token","expiresInSeconds":300}"#[..],
             &br#"{"protocolVersion":1,"sessionToken":"line\nbreak","expiresInSeconds":300}"#[..],
@@ -464,22 +471,14 @@ mod tests {
             assert!(parse_login_response(invalid).is_err());
         }
 
-        let list = br#"{"protocolVersion":1,"objects":[{"key":"objects/a.oseg","size":1,"etag":"etag"}]}"#;
+        let list =
+            br#"{"protocolVersion":1,"objects":[{"key":"objects/a.oseg","size":1,"etag":"etag"}]}"#;
         assert_eq!(parse_list_response(list, 1).unwrap().len(), 1);
         assert!(parse_list_response(list, 0).is_err());
+        assert!(parse_list_response(br#"{"protocolVersion":2,"objects":[]}"#, 1,).is_err());
         assert!(
-            parse_list_response(
-                br#"{"protocolVersion":2,"objects":[]}"#,
-                1,
-            )
-            .is_err()
-        );
-        assert!(
-            parse_list_response(
-                br#"{"protocolVersion":1,"objects":[],"next":"forged"}"#,
-                1,
-            )
-            .is_err()
+            parse_list_response(br#"{"protocolVersion":1,"objects":[],"next":"forged"}"#, 1,)
+                .is_err()
         );
     }
 
