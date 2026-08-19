@@ -73,6 +73,7 @@ import type {
   AppState,
   CommandParameter,
   CommandRecipe,
+  ConnectionHistoryItem,
   EnvironmentKind,
   HostProfile,
   ScriptRecipe,
@@ -200,18 +201,26 @@ interface NativeTerminalStartResult {
   schemaVersion: number;
   engine: "russh";
   sessionId: string;
+  connection: ConnectionHistoryItem;
 }
 
 interface OpenSshTerminalStartResult {
   schemaVersion: number;
   engine: "openssh";
   sessionId: string;
+  connection: ConnectionHistoryItem;
 }
 
 interface MoshTerminalStartResult {
   schemaVersion: number;
   engine: "mosh";
   sessionId: string;
+  connection: ConnectionHistoryItem;
+}
+
+interface AndroidConnectionResult {
+  sessionId: string;
+  connection: ConnectionHistoryItem;
 }
 
 interface NativeLocalForwardSnapshot {
@@ -1148,7 +1157,9 @@ function App() {
       if (!credentialRef || !host.hostKeySha256) {
         throw new Error("Android 连接需要已保存凭据和已确认的 SHA256 主机指纹");
       }
-      const sessionId = await invoke<string>("android_connect_host", {
+      const connected = await invoke<AndroidConnectionResult>("android_connect_host", {
+        hostId: host.id,
+        initialPath: session.currentPath,
         request: {
           sessionId: session.id,
           host: host.host,
@@ -1161,6 +1172,7 @@ function App() {
           passphraseRef: host.androidKeyPassphraseRef,
         },
       });
+      const sessionId = connected.sessionId;
       let terminalId: string;
       try {
         terminalId = await invoke<string>("android_open_terminal", {
@@ -1176,12 +1188,7 @@ function App() {
       updateSession(session.id, { state: "connected" });
       setAppState((current) => ({
         ...current,
-        connectionHistory: [{
-          id: crypto.randomUUID(),
-          hostId: host.id,
-          connectedAt: new Date().toISOString(),
-          path: session.currentPath,
-        }, ...(current.connectionHistory ?? [])],
+        connectionHistory: [connected.connection, ...(current.connectionHistory ?? [])].slice(0, 10_000),
       }));
       showToast(`已连接 ${host.name}`);
       return;
@@ -1191,6 +1198,8 @@ function App() {
     )?.passphraseRef;
     const startOpenSshTerminal = async () => {
       const result = await invoke<OpenSshTerminalStartResult>("start_ssh_session", {
+        hostId: host.id,
+        initialPath: session.currentPath,
         request: {
           sessionId: session.id,
           host: host.host,
@@ -1207,10 +1216,12 @@ function App() {
         await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
         throw new Error("OpenSSH 返回了不受支持的会话结果");
       }
+      return result.connection;
     };
     updateSession(session.id, { state: "connecting" });
     let effectiveEngine = session.engine;
     let usedCompatibilityFallback = false;
+    let authenticatedConnection: ConnectionHistoryItem | undefined;
     if (session.engine === "russh") {
       if (!hostKeySha256) throw new Error("原生终端需要已验证的 SHA256 主机指纹");
       if (!host.identityFile && !host.credentialRef) {
@@ -1220,6 +1231,8 @@ function App() {
       let result: NativeTerminalStartResult | undefined;
       try {
         result = await invoke<NativeTerminalStartResult>("start_native_terminal", {
+          hostId: host.id,
+          initialPath: session.currentPath,
           request: {
             sessionId: session.id,
             route: nativeRoute(host, appState.hosts, appState.sshKeys, hostKeySha256),
@@ -1229,7 +1242,7 @@ function App() {
         });
       } catch (error) {
         if (host.jumpRoute?.length || !canFallbackNativeTerminalToOpenSsh(error)) throw error;
-        await startOpenSshTerminal();
+        authenticatedConnection = await startOpenSshTerminal();
         effectiveEngine = "openssh";
         usedCompatibilityFallback = true;
         updateSession(session.id, { engine: "openssh" });
@@ -1241,11 +1254,14 @@ function App() {
         await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
         throw new Error("原生终端返回了不受支持的会话结果");
       }
+      if (effectiveEngine === "russh") authenticatedConnection = result?.connection;
     } else if (session.engine === "mosh") {
       if (host.jumpRoute?.length) {
         throw new Error("Mosh 是直连 UDP 交互模式，不支持跳板路线");
       }
       const result = await invoke<MoshTerminalStartResult>("start_mosh_session", {
+        hostId: host.id,
+        initialPath: session.currentPath,
         request: {
           sessionId: session.id,
           host: host.host,
@@ -1264,18 +1280,18 @@ function App() {
         await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
         throw new Error("Mosh 返回了不受支持的会话结果");
       }
+      authenticatedConnection = result.connection;
     } else {
-      await startOpenSshTerminal();
+      authenticatedConnection = await startOpenSshTerminal();
+    }
+    if (!authenticatedConnection) {
+      await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+      throw new Error("连接成功但未返回 Rust 认证记录");
     }
     updateSession(session.id, { state: "connected" });
     setAppState((current) => ({
       ...current,
-      connectionHistory: [{
-        id: crypto.randomUUID(),
-        hostId: host.id,
-        connectedAt: new Date().toISOString(),
-        path: session.currentPath,
-      }, ...(current.connectionHistory ?? [])],
+      connectionHistory: [authenticatedConnection, ...(current.connectionHistory ?? [])].slice(0, 10_000),
     }));
     const engineLabel = effectiveEngine === "russh"
       ? "原生 russh"

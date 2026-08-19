@@ -1,5 +1,3 @@
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use std::time::Duration;
 use std::{
     collections::HashMap,
     env,
@@ -9,6 +7,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use base64::prelude::*;
@@ -174,6 +173,16 @@ struct SystemTerminalStartResponse {
     schema_version: u16,
     engine: &'static str,
     session_id: String,
+    connection: app_store::AuthenticatedConnectionRecord,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeTerminalStartResponse {
+    schema_version: u16,
+    engine: &'static str,
+    session_id: String,
+    connection: app_store::AuthenticatedConnectionRecord,
 }
 
 #[derive(Clone, Serialize)]
@@ -472,6 +481,48 @@ fn openssh_terminal_arguments(request: &ValidatedStartSshRequest, kex: &str) -> 
     arguments
 }
 
+fn verify_system_ssh_authentication(
+    request: &ValidatedStartSshRequest,
+    kex: &str,
+) -> Result<(), String> {
+    let mut command = std::process::Command::new("ssh");
+    command.args(openssh_policy_arguments(request, kex));
+    if request.credential_ref.is_none() && request.identity_passphrase_ref.is_none() {
+        command.args(["-o", "BatchMode=yes"]);
+    }
+    configure_process_ssh_askpass(
+        &mut command,
+        request.credential_ref.as_deref(),
+        request.identity_passphrase_ref.as_deref(),
+    )?;
+    let target = format!("{}@{}", request.username, request.host);
+    command.args(["-o", "ConnectTimeout=15", "-o", "RequestTTY=no", "--"]);
+    command.arg(target).arg("true");
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动 OpenSSH 认证检查: {error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("无法读取 OpenSSH 认证检查状态: {error}"))?
+        {
+            Some(status) if status.success() => return Ok(()),
+            Some(_) => return Err("OpenSSH 主机密钥校验或认证失败".to_string()),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("OpenSSH 认证检查超时".to_string());
+            }
+            None => thread::sleep(Duration::from_millis(25)),
+        }
+    }
+}
+
 fn mosh_terminal_arguments(
     request: &ValidatedStartMoshRequest,
     kex: &str,
@@ -619,8 +670,21 @@ async fn start_native_terminal(
     app: tauri::AppHandle,
     terminals: State<'_, TerminalManager>,
     native: State<'_, native_engine::NativeEngineManager>,
+    store: State<'_, app_store::AppStore>,
+    host_id: String,
+    initial_path: String,
     request: native_engine::NativeTerminalStartRequest,
-) -> Result<native_engine::NativeTerminalStartResult, native_engine::NativeEngineError> {
+) -> Result<NativeTerminalStartResponse, native_engine::NativeEngineError> {
+    let (target_host, target_port, target_username) = request
+        .target_identity()
+        .map(|(host, port, username)| (host.to_string(), port, username.to_string()))
+        .ok_or_else(|| {
+            native_engine::NativeEngineError::new(
+                "native-terminal-route-empty",
+                "原生终端路线不能为空",
+                false,
+            )
+        })?;
     let launch = native.start_terminal(request).await?;
     let session_id = launch.result.session_id.clone();
     let generation = match next_terminal_generation(&terminals) {
@@ -638,6 +702,23 @@ async fn start_native_terminal(
     let (acknowledgements, mut acknowledgement_receiver) = mpsc::channel(NATIVE_TERMINAL_ACK_QUEUE);
     let pending_delivery = Arc::new(AtomicU64::new(0));
     let bridge_handle = launch.handle.clone();
+    let connection = match store.record_authenticated_connection(
+        &host_id,
+        &target_host,
+        target_port,
+        &target_username,
+        &initial_path,
+    ) {
+        Ok(connection) => connection,
+        Err(_) => {
+            launch.handle.stop();
+            return Err(native_engine::NativeEngineError::new(
+                "native-terminal-history-rejected",
+                "认证连接记录未通过 AppState 一致性验证",
+                false,
+            ));
+        }
+    };
     {
         let mut sessions = match lock_sessions(&terminals) {
             Ok(sessions) => sessions,
@@ -816,7 +897,12 @@ async fn start_native_terminal(
             }
         }
     });
-    Ok(result)
+    Ok(NativeTerminalStartResponse {
+        schema_version: result.schema_version,
+        engine: result.engine,
+        session_id: result.session_id,
+        connection,
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -1023,11 +1109,15 @@ fn ack_native_terminal_output(_session_id: String, _delivery_id: u32) -> Result<
 fn start_ssh_session(
     app: tauri::AppHandle,
     manager: State<'_, TerminalManager>,
+    store: State<'_, app_store::AppStore>,
+    host_id: String,
+    initial_path: String,
     request: StartSshRequest,
 ) -> Result<SystemTerminalStartResponse, String> {
     let request = ValidatedStartSshRequest::try_from(request)?;
     let mut command = CommandBuilder::new("ssh");
     let kex = file_transfer::openssh_kex_algorithms()?;
+    verify_system_ssh_authentication(&request, &kex)?;
     for argument in openssh_terminal_arguments(&request, &kex) {
         command.arg(argument);
     }
@@ -1046,6 +1136,12 @@ fn start_ssh_session(
         command,
         OPENSSH_ENGINE_NAME,
         "OpenSSH",
+        &store,
+        &host_id,
+        &request.host,
+        request.port,
+        &request.username,
+        &initial_path,
     )
 }
 
@@ -1053,11 +1149,15 @@ fn start_ssh_session(
 fn start_mosh_session(
     app: tauri::AppHandle,
     manager: State<'_, TerminalManager>,
+    store: State<'_, app_store::AppStore>,
+    host_id: String,
+    initial_path: String,
     request: StartMoshRequest,
 ) -> Result<SystemTerminalStartResponse, String> {
     let request = ValidatedStartMoshRequest::try_from(request)?;
     let mut command = CommandBuilder::new("mosh");
     let kex = file_transfer::openssh_kex_algorithms()?;
+    verify_system_ssh_authentication(&request.ssh, &kex)?;
     for argument in mosh_terminal_arguments(&request, &kex)? {
         command.arg(argument);
     }
@@ -1076,6 +1176,12 @@ fn start_mosh_session(
         command,
         MOSH_ENGINE_NAME,
         "Mosh；请确认本机已安装 mosh、远端已安装 mosh-server，并放行 UDP 60000–61000",
+        &store,
+        &host_id,
+        &request.ssh.host,
+        request.ssh.port,
+        &request.ssh.username,
+        &initial_path,
     )
 }
 
@@ -1089,6 +1195,12 @@ fn spawn_system_terminal(
     command: CommandBuilder,
     engine: &'static str,
     launch_name: &'static str,
+    store: &app_store::AppStore,
+    host_id: &str,
+    host: &str,
+    port: u16,
+    username: &str,
+    initial_path: &str,
 ) -> Result<SystemTerminalStartResponse, String> {
     if lock_sessions(&manager)?.contains_key(&session_id) {
         return Err("该终端会话已经连接".to_string());
@@ -1134,6 +1246,26 @@ fn spawn_system_terminal(
             generation,
         },
     );
+
+    let connection = match store.record_authenticated_connection(
+        host_id,
+        host,
+        port,
+        username,
+        initial_path,
+    ) {
+        Ok(connection) => connection,
+        Err(error) => {
+            if let Some(session) = lock_sessions(&manager)?.remove(&session_id) {
+                if let TerminalTransport::SystemPty { mut killer, .. } = session.transport {
+                    killer.kill().map_err(|kill_error| {
+                        format!("{error}；同时无法停止未记录终端: {kill_error}")
+                    })?;
+                }
+            }
+            return Err(error);
+        }
+    };
 
     let output_app = app.clone();
     let output_session_id = session_id.clone();
@@ -1219,6 +1351,7 @@ fn spawn_system_terminal(
         schema_version: 1,
         engine,
         session_id,
+        connection,
     })
 }
 
@@ -1925,8 +2058,17 @@ mod tests {
     use super::{
         StartMoshRequest, StartSshRequest, SystemTerminalStartResponse, TerminalOutputEvent,
         ValidatedStartMoshRequest, ValidatedStartSshRequest, mosh_terminal_arguments,
-        openssh_terminal_arguments, select_askpass_reference,
+        openssh_terminal_arguments, select_askpass_reference, verify_system_ssh_authentication,
     };
+
+    fn authenticated_connection() -> super::app_store::AuthenticatedConnectionRecord {
+        super::app_store::AuthenticatedConnectionRecord {
+            id: "018f1f55-26f8-7a9f-9cd8-4d7558482214".to_string(),
+            host_id: "host-1".to_string(),
+            connected_at: "2026-08-19T00:00:00.000Z".to_string(),
+            path: "~".to_string(),
+        }
+    }
 
     fn openssh_request() -> StartSshRequest {
         StartSshRequest {
@@ -2066,11 +2208,13 @@ mod tests {
             schema_version: 1,
             engine: "openssh",
             session_id: "018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string(),
+            connection: authenticated_connection(),
         })
         .unwrap();
         assert_eq!(value["schemaVersion"], 1);
         assert_eq!(value["engine"], "openssh");
         assert_eq!(value["sessionId"], "018f1f55-26f8-7a9f-9cd8-4d7558482211");
+        assert_eq!(value["connection"]["hostId"], "host-1");
     }
 
     #[test]
@@ -2142,6 +2286,7 @@ mod tests {
             schema_version: 1,
             engine: "mosh",
             session_id: "018f1f55-26f8-7a9f-9cd8-4d7558482211".to_string(),
+            connection: authenticated_connection(),
         })
         .unwrap();
         assert_eq!(value["schemaVersion"], 1);
@@ -2173,6 +2318,8 @@ mod tests {
         })
         .expect("validated OpenSSH fixture request");
         let kex = super::file_transfer::openssh_kex_algorithms().expect("OpenSSH KEX policy");
+        verify_system_ssh_authentication(&request, &kex)
+            .expect("bounded OpenSSH authentication check");
         let mut arguments = openssh_terminal_arguments(&request, &kex);
         arguments.push("printf 'VPSHELL_SYSTEM_OPENSSH_OK\\n'".to_string());
         let output = std::process::Command::new("ssh")

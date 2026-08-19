@@ -100,6 +100,15 @@ pub(crate) struct NativeTerminalStartRequest {
     rows: u16,
 }
 
+impl NativeTerminalStartRequest {
+    pub(crate) fn target_identity(&self) -> Option<(&str, u16, &str)> {
+        self.route
+            .hops
+            .last()
+            .map(|hop| (hop.host.as_str(), hop.port, hop.username.as_str()))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct NativeSftpListRequest {

@@ -1956,9 +1956,24 @@ mod tests {
     }
 
     #[test]
-    fn cycle_syncs_public_command_path_and_parameter_history() {
+    fn cycle_syncs_public_command_path_parameter_and_authenticated_connection_history() {
         let root = TempDir::new("app-state-command-history");
         let store = test_app_store(&root);
+        store
+            .save(SaveAppStateRequest {
+                state_json: app_state_fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let connection = store
+            .record_authenticated_connection(
+                "host-local",
+                "192.0.2.1",
+                22,
+                "dev",
+                "/srv/app",
+            )
+            .unwrap();
         let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
         state["commandHistory"] = serde_json::json!([{
             "id": "local-history-entry",
@@ -1986,10 +2001,11 @@ mod tests {
             "value": "nginx",
             "createdAt": "2026-08-19T00:10:00.000Z"
         }]);
+        state["connectionHistory"] = serde_json::json!([connection]);
         store
             .save(SaveAppStateRequest {
                 state_json: state.to_string(),
-                expected_revision: 0,
+                expected_revision: 1,
             })
             .unwrap();
         let history_change = store
@@ -2032,7 +2048,7 @@ mod tests {
             .unwrap();
 
         let status = coordinator.run_once(&store, 1_000).unwrap();
-        assert_eq!(status.last_uploaded_objects, 4);
+        assert_eq!(status.last_uploaded_objects, 5);
         assert_eq!(status.last_downloaded_objects, 1);
         assert_eq!(status.open_conflicts, 1);
         let snapshot = serde_json::to_value(store.snapshot().unwrap()).unwrap();
@@ -2047,6 +2063,8 @@ mod tests {
         assert_eq!(state["pathHistory"]["host-local"][0]["path"], "/srv/app");
         assert_eq!(state["parameterHistory"][0]["value"], "nginx");
         assert_eq!(state["parameterHistory"][0]["parameterName"], "SERVICE");
+        assert_eq!(state["connectionHistory"][0]["hostId"], "host-local");
+        assert_eq!(state["connectionHistory"][0]["path"], "/srv/app");
         assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
     }
 

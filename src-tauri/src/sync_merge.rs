@@ -1315,6 +1315,12 @@ pub(crate) fn entity_fields_are_syncable(
                     )
                 })
         }
+        Some(FieldValue::Text(kind)) if kind == "connection" => {
+            fields.len() == 4
+                && fields.keys().all(|field| {
+                    matches!(field.as_str(), "kind" | "hostId" | "remotePath" | "createdAt")
+                })
+        }
         _ => false,
     }
 }
@@ -1441,7 +1447,10 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
             Ok(())
         }
         (EntityKind::History, "kind", FieldValue::Text(value))
-            if matches!(value.as_str(), "command" | "path" | "argument") =>
+            if matches!(
+                value.as_str(),
+                "command" | "path" | "argument" | "connection"
+            ) =>
         {
             Ok(())
         }
@@ -2455,6 +2464,44 @@ mod tests {
         assert!(!entity_fields_are_syncable(
             &EntityKind::History,
             &incomplete,
+        ));
+    }
+
+    #[test]
+    fn connection_history_requires_host_path_and_rust_timestamp_shape() {
+        let fields = BTreeMap::from([
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-19T01:20:00.000Z".into()),
+            ),
+            ("hostId".to_string(), FieldValue::Text(HOST_ID.into())),
+            ("kind".to_string(), FieldValue::Text("connection".into())),
+            (
+                "remotePath".to_string(),
+                FieldValue::Text("/srv/app".into()),
+            ),
+        ]);
+        assert!(entity_fields_are_syncable(&EntityKind::History, &fields));
+        let mut with_value = fields.clone();
+        with_value.insert("value".to_string(), FieldValue::Text("connected".into()));
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &with_value,
+        ));
+        let mut relative_path = fields.clone();
+        relative_path.insert(
+            "remotePath".to_string(),
+            FieldValue::Text("srv/app".into()),
+        );
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &relative_path,
+        ));
+        let mut missing_host = fields;
+        missing_host.remove("hostId");
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &missing_host,
         ));
     }
 

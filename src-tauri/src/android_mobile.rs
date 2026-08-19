@@ -23,6 +23,7 @@ use crate::{
         AndroidHostRequest, AndroidLifecycle, AndroidPreviewManifest, AndroidPreviewOperation,
         AndroidPreviewRuntime,
     },
+    app_store::{AppStore, AuthenticatedConnectionRecord},
     file_transfer,
     sync_coordinator::{SyncCoordinatorManager, SyncCoordinatorStatus},
 };
@@ -48,6 +49,13 @@ struct AndroidMobileState {
 struct AndroidMobileSession {
     connection: AndroidNativeSession,
     terminals: HashMap<Uuid, AndroidTerminalChannel>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AndroidConnectionResult {
+    session_id: String,
+    connection: AuthenticatedConnectionRecord,
 }
 
 impl Default for AndroidMobileState {
@@ -551,8 +559,11 @@ pub(crate) fn android_enter_background(
 #[tauri::command]
 pub(crate) fn android_connect_host(
     manager: tauri::State<'_, AndroidMobileManager>,
+    store: tauri::State<'_, AppStore>,
+    host_id: String,
+    initial_path: String,
     request: AndroidHostRequest,
-) -> Result<String, String> {
+) -> Result<AndroidConnectionResult, String> {
     let session_id = request.validate()?;
     {
         let mut state = lock_manager(&manager)?;
@@ -588,6 +599,19 @@ pub(crate) fn android_connect_host(
         state.runtime.close_session(session_id);
         return Err("Android 生命周期已变化，连接结果已丢弃".to_string());
     }
+    let authenticated = match store.record_authenticated_connection(
+        &host_id,
+        &request.host,
+        request.port,
+        &request.username,
+        &initial_path,
+    ) {
+        Ok(connection) => connection,
+        Err(error) => {
+            state.runtime.close_session(session_id);
+            return Err(error);
+        }
+    };
     state.sessions.insert(
         session_id,
         Arc::new(Mutex::new(AndroidMobileSession {
@@ -595,7 +619,10 @@ pub(crate) fn android_connect_host(
             terminals: HashMap::new(),
         })),
     );
-    Ok(session_id.to_string())
+    Ok(AndroidConnectionResult {
+        session_id: session_id.to_string(),
+        connection: authenticated,
+    })
 }
 
 #[tauri::command]

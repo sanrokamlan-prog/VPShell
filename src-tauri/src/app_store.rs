@@ -17,7 +17,7 @@ use crate::sync_merge::{
     EntityKind, FieldValue, LocalEntityMutation, MergedEntityProjection, entity_fields_are_syncable,
 };
 
-const STORE_SCHEMA_VERSION: i64 = 9;
+const STORE_SCHEMA_VERSION: i64 = 10;
 const TERMINAL_APPEARANCE_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000001";
 const APPLICATION_PREFERENCES_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000002";
 const ONBOARDING_ENTITY_ID: &str = "00000000-0000-4000-8000-000000000003";
@@ -36,6 +36,7 @@ const MAX_PENDING_SYNC_CHANGES: i64 = 10_000;
 const MAX_SYNCED_HOSTS: usize = 2_000;
 const PATH_HISTORY_LOCAL_KEY_PREFIX: &str = "vpshell-path-history:";
 const PARAMETER_HISTORY_LOCAL_KEY_PREFIX: &str = "vpshell-parameter-history:";
+const CONNECTION_HISTORY_LOCAL_KEY_PREFIX: &str = "vpshell-connection-history:";
 
 const TOP_LEVEL_FIELDS: &[&str] = &[
     "hosts",
@@ -93,6 +94,15 @@ pub(crate) struct SaveAppStateRequest {
 pub(crate) struct SaveAppStateResult {
     revision: u64,
     retained_events: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthenticatedConnectionRecord {
+    pub(crate) id: String,
+    pub(crate) host_id: String,
+    pub(crate) connected_at: String,
+    pub(crate) path: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -496,6 +506,21 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
                 updated_at_ms.max(0),
             )?;
         }
+    }
+    if version < 10 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS app_authenticated_connection_facts (
+                    local_id TEXT PRIMARY KEY,
+                    host_id TEXT NOT NULL,
+                    connected_at TEXT NOT NULL,
+                    remote_path TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK (source IN ('local-pending', 'local', 'remote'))
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_app_authenticated_connection_host
+                    ON app_authenticated_connection_facts(host_id, connected_at);",
+            )
+            .map_err(|error| format!("无法创建认证连接事实表: {error}"))?;
     }
     transaction
         .pragma_update(None, "user_version", STORE_SCHEMA_VERSION)
@@ -1304,6 +1329,7 @@ fn command_history_objects(
             || local_id.len() > 128
             || local_id.starts_with(PATH_HISTORY_LOCAL_KEY_PREFIX)
             || local_id.starts_with(PARAMETER_HISTORY_LOCAL_KEY_PREFIX)
+            || local_id.starts_with(CONNECTION_HISTORY_LOCAL_KEY_PREFIX)
             || local_id.chars().any(char::is_control)
         {
             continue;
@@ -1555,6 +1581,181 @@ fn parameter_history_sync_fields(
         ),
     ]);
     entity_fields_are_syncable(&EntityKind::History, &fields).then_some(fields)
+}
+
+fn connection_history_storage_key(local_id: &str) -> String {
+    format!("{CONNECTION_HISTORY_LOCAL_KEY_PREFIX}{local_id}")
+}
+
+fn connection_history_objects(
+    value: Option<&Value>,
+) -> Result<BTreeMap<String, serde_json::Map<String, Value>>, String> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let root = ensure_object(value, "root")?;
+    let history = ensure_array(
+        root.get("connectionHistory")
+            .ok_or_else(|| "本地状态缺少 connectionHistory".to_string())?,
+        "connectionHistory",
+        10_000,
+    )?;
+    let mut result = BTreeMap::new();
+    for item in history.iter().filter_map(Value::as_object) {
+        let Some(local_id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if local_id.is_empty() || local_id.len() > 128 || local_id.chars().any(char::is_control) {
+            continue;
+        }
+        let storage_key = connection_history_storage_key(local_id);
+        if result.insert(storage_key, item.clone()).is_some() {
+            return Err("本地连接历史包含重复 ID".to_string());
+        }
+    }
+    Ok(result)
+}
+
+fn load_authenticated_connection_facts(
+    transaction: &Transaction<'_>,
+) -> Result<BTreeMap<String, (String, String, String)>, String> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT local_id, host_id, connected_at, remote_path
+             FROM app_authenticated_connection_facts",
+        )
+        .map_err(|error| format!("无法准备认证连接事实读取: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| format!("无法读取认证连接事实: {error}"))?;
+    let mut result = BTreeMap::new();
+    for row in rows {
+        let (local_id, host_id, connected_at, remote_path) =
+            row.map_err(|error| format!("认证连接事实损坏: {error}"))?;
+        let storage_key = connection_history_storage_key(&local_id);
+        if result
+            .insert(storage_key, (host_id, connected_at, remote_path))
+            .is_some()
+        {
+            return Err("认证连接事实包含重复 ID".to_string());
+        }
+    }
+    Ok(result)
+}
+
+fn connection_history_sync_fields(
+    storage_key: &str,
+    item: &serde_json::Map<String, Value>,
+    facts: &BTreeMap<String, (String, String, String)>,
+    host_entity_ids: &BTreeMap<String, String>,
+) -> Option<BTreeMap<String, FieldValue>> {
+    let text = |field: &str| item.get(field).and_then(Value::as_str);
+    let host_id = text("hostId")?;
+    let connected_at = text("connectedAt")?;
+    let remote_path = text("path")?;
+    let fact = facts.get(storage_key)?;
+    if fact != &(host_id.to_string(), connected_at.to_string(), remote_path.to_string()) {
+        return None;
+    }
+    let fields = BTreeMap::from([
+        (
+            "createdAt".to_string(),
+            FieldValue::Text(connected_at.to_string()),
+        ),
+        (
+            "hostId".to_string(),
+            FieldValue::Text(host_entity_ids.get(host_id)?.clone()),
+        ),
+        (
+            "kind".to_string(),
+            FieldValue::Text("connection".to_string()),
+        ),
+        (
+            "remotePath".to_string(),
+            FieldValue::Text(remote_path.to_string()),
+        ),
+    ]);
+    entity_fields_are_syncable(&EntityKind::History, &fields).then_some(fields)
+}
+
+fn retained_connection_fact_ids(value: &Value) -> Result<BTreeSet<String>, String> {
+    let root = ensure_object(value, "root")?;
+    let mut ids = connection_history_objects(Some(value))?
+        .keys()
+        .filter_map(|key| key.strip_prefix(CONNECTION_HISTORY_LOCAL_KEY_PREFIX))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let deleted_hosts = ensure_array(
+        root.get("deletedHosts")
+            .ok_or_else(|| "本地状态缺少 deletedHosts".to_string())?,
+        "deletedHosts",
+        MAX_SYNCED_HOSTS,
+    )?;
+    for deleted in deleted_hosts.iter().filter_map(Value::as_object) {
+        let Some(history) = deleted.get("connectionHistory") else {
+            continue;
+        };
+        for item in ensure_array(history, "deleted host connectionHistory", 10_000)? {
+            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                if !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    if ids.len() > 10_000 {
+        return Err("认证连接历史与回收站事实合计超过 10000 项".to_string());
+    }
+    Ok(ids)
+}
+
+fn prune_authenticated_connection_facts(
+    transaction: &Transaction<'_>,
+    state: &Value,
+) -> Result<(), String> {
+    let retained = retained_connection_fact_ids(state)?;
+    let mut statement = transaction
+        .prepare(
+            "SELECT local_id FROM app_authenticated_connection_facts
+             WHERE source != 'local-pending'",
+        )
+        .map_err(|error| format!("无法准备认证连接事实清理: {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("无法读取待清理认证连接事实: {error}"))?;
+    let stale = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("认证连接事实清理清单损坏: {error}"))?
+        .into_iter()
+        .filter(|id| !retained.contains(id))
+        .collect::<Vec<_>>();
+    drop(statement);
+    for id in stale {
+        transaction
+            .execute(
+                "DELETE FROM app_authenticated_connection_facts WHERE local_id = ?1",
+                params![id],
+            )
+            .map_err(|error| format!("无法清理认证连接事实: {error}"))?;
+    }
+    let retained_count: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM app_authenticated_connection_facts",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("无法复核认证连接事实上限: {error}"))?;
+    if retained_count > 10_000 {
+        return Err("认证连接事实超过 10000 项硬上限".to_string());
+    }
+    Ok(())
 }
 
 fn queue_command_history_sync_changes(
@@ -1900,6 +2101,134 @@ fn queue_parameter_history_sync_changes(
                     params![entity_id],
                 )
                 .map_err(|error| format!("无法删除参数历史同步状态: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn queue_connection_history_sync_changes(
+    transaction: &Transaction<'_>,
+    previous: Option<&Value>,
+    next: &Value,
+    revision: u64,
+    now: i64,
+) -> Result<(), String> {
+    let previous_history = connection_history_objects(previous)?;
+    let next_history = connection_history_objects(Some(next))?;
+    let facts = load_authenticated_connection_facts(transaction)?;
+    let local_ids = previous_history
+        .keys()
+        .chain(next_history.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let entity_ids = ensure_history_entity_ids(transaction, local_ids)?;
+    let (host_entity_ids, _) = load_host_entity_mappings(transaction)?;
+    let mut changes = Vec::new();
+    for (storage_key, item) in &next_history {
+        let Some(fields) =
+            connection_history_sync_fields(storage_key, item, &facts, &host_entity_ids)
+        else {
+            continue;
+        };
+        let fact_id = storage_key
+            .strip_prefix(CONNECTION_HISTORY_LOCAL_KEY_PREFIX)
+            .ok_or_else(|| "认证连接历史存储键损坏".to_string())?;
+        transaction
+            .execute(
+                "UPDATE app_authenticated_connection_facts SET source = 'local'
+                 WHERE local_id = ?1 AND source = 'local-pending'",
+                params![fact_id],
+            )
+            .map_err(|error| format!("无法确认本地认证连接事实: {error}"))?;
+        let entity_id = &entity_ids[storage_key];
+        let content_hash = sync_fields_hash(&fields)?;
+        let queued_hash: Option<String> = transaction
+            .query_row(
+                "SELECT content_hash FROM app_sync_history_state WHERE entity_id = ?1",
+                params![entity_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取连接历史同步状态: {error}"))?;
+        if queued_hash.as_deref() == Some(content_hash.as_str()) {
+            continue;
+        }
+        changes.push((
+            entity_id.clone(),
+            "patch",
+            Some(
+                serde_json::to_string(&fields)
+                    .map_err(|error| format!("无法编码认证连接历史变更: {error}"))?,
+            ),
+            Some(content_hash),
+        ));
+    }
+    for (storage_key, item) in &previous_history {
+        let entity_id = &entity_ids[storage_key];
+        let was_synced: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM app_sync_history_state WHERE entity_id = ?1)",
+                params![entity_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("无法读取连接历史删除状态: {error}"))?;
+        let remains_syncable = next_history
+            .get(storage_key)
+            .and_then(|next| {
+                connection_history_sync_fields(storage_key, next, &facts, &host_entity_ids)
+            })
+            .is_some();
+        let was_syncable =
+            connection_history_sync_fields(storage_key, item, &facts, &host_entity_ids).is_some();
+        if was_synced && was_syncable && !remains_syncable {
+            changes.push((entity_id.clone(), "delete", None, None));
+        }
+    }
+    let pending: i64 = transaction
+        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+        .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
+    let available = MAX_PENDING_SYNC_CHANGES.saturating_sub(pending).max(0) as usize;
+    if changes.len() > available {
+        if previous.is_some() {
+            return Err("AppState 同步 changefeed 已达到 10000 项上限；请先完成同步".to_string());
+        }
+        changes.truncate(available);
+    }
+    let revision = i64::try_from(revision)
+        .map_err(|_| "AppState 同步 revision 超过 SQLite INTEGER".to_string())?;
+    for (entity_id, kind, fields_json, content_hash) in changes {
+        transaction
+            .execute(
+                "INSERT INTO app_sync_changes(
+                    operation_id, entity_id, mutation_kind, fields_json, state_revision,
+                    created_at_ms, entity_kind
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'history')",
+                params![
+                    Uuid::new_v4().to_string(),
+                    entity_id,
+                    kind,
+                    fields_json,
+                    revision,
+                    now
+                ],
+            )
+            .map_err(|error| format!("无法写入 AppState 连接历史同步 changefeed: {error}"))?;
+        if let Some(content_hash) = content_hash {
+            transaction
+                .execute(
+                    "INSERT INTO app_sync_history_state(entity_id, content_hash)
+                     VALUES (?1, ?2)
+                     ON CONFLICT(entity_id) DO UPDATE SET content_hash = excluded.content_hash",
+                    params![entity_id, content_hash],
+                )
+                .map_err(|error| format!("无法记录连接历史同步状态: {error}"))?;
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM app_sync_history_state WHERE entity_id = ?1",
+                    params![entity_id],
+                )
+                .map_err(|error| format!("无法删除连接历史同步状态: {error}"))?;
         }
     }
     Ok(())
@@ -2314,6 +2643,22 @@ fn validate_parameter_history_projection_fields(
     Ok(())
 }
 
+fn validate_connection_history_projection_fields(
+    fields: &BTreeMap<String, FieldValue>,
+) -> Result<(), String> {
+    let matches_shape = fields.len() == 4
+        && fields.keys().all(|field| {
+            matches!(field.as_str(), "kind" | "hostId" | "remotePath" | "createdAt")
+        });
+    let kind_matches =
+        matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "connection");
+    if !matches_shape || !kind_matches || !entity_fields_are_syncable(&EntityKind::History, fields)
+    {
+        return Err("远端连接历史同步投影字段未通过协议验证".to_string());
+    }
+    Ok(())
+}
+
 fn validate_history_projection_fields(fields: &BTreeMap<String, FieldValue>) -> Result<(), String> {
     match fields.get("kind") {
         Some(FieldValue::Text(value)) if value == "command" => {
@@ -2324,6 +2669,9 @@ fn validate_history_projection_fields(fields: &BTreeMap<String, FieldValue>) -> 
         }
         Some(FieldValue::Text(value)) if value == "argument" => {
             validate_parameter_history_projection_fields(fields)
+        }
+        Some(FieldValue::Text(value)) if value == "connection" => {
+            validate_connection_history_projection_fields(fields)
         }
         _ => Err("远端历史同步投影 kind 无效".to_string()),
     }
@@ -2701,6 +3049,7 @@ impl AppStore {
         queue_command_history_sync_changes(&transaction, None, &state, 1, now)?;
         queue_path_history_sync_changes(&transaction, None, &state, 1, now)?;
         queue_parameter_history_sync_changes(&transaction, None, &state, 1, now)?;
+        queue_connection_history_sync_changes(&transaction, None, &state, 1, now)?;
         insert_event(
             &transaction,
             "legacy-local-storage-imported",
@@ -2748,6 +3097,129 @@ impl AppStore {
             state_json,
             migrated_legacy: false,
             recovery_note: self.inner.recovery_note.clone(),
+        })
+    }
+
+    pub(crate) fn record_authenticated_connection(
+        &self,
+        host_id: &str,
+        address: &str,
+        port: u16,
+        username: &str,
+        remote_path: &str,
+    ) -> Result<AuthenticatedConnectionRecord, String> {
+        if host_id.is_empty()
+            || host_id.len() > 128
+            || host_id.chars().any(char::is_control)
+            || address.is_empty()
+            || address.len() > 255
+            || address.chars().any(char::is_control)
+            || username.is_empty()
+            || username.len() > 128
+            || username.chars().any(char::is_control)
+        {
+            return Err("认证连接记录包含无效主机标识".to_string());
+        }
+        let path_fields = BTreeMap::from([
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2000-01-01T00:00:00.000Z".to_string()),
+            ),
+            (
+                "hostId".to_string(),
+                FieldValue::Text("00000000-0000-4000-8000-000000000000".to_string()),
+            ),
+            (
+                "kind".to_string(),
+                FieldValue::Text("connection".to_string()),
+            ),
+            (
+                "remotePath".to_string(),
+                FieldValue::Text(remote_path.to_string()),
+            ),
+        ]);
+        if !entity_fields_are_syncable(&EntityKind::History, &path_fields) {
+            return Err("认证连接记录远端路径无效".to_string());
+        }
+        let _guard = self
+            .inner
+            .lock
+            .lock()
+            .map_err(|_| "本地事件库锁不可用".to_string())?;
+        let mut connection = open_connection(&self.inner.database_path)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("无法开始认证连接记录事务: {error}"))?;
+        let state_json: Option<String> = transaction
+            .query_row(
+                "SELECT state_json FROM app_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取认证连接对应的 AppState: {error}"))?;
+        let state = validate_state_json(
+            state_json
+                .as_deref()
+                .ok_or_else(|| "认证连接前 AppState 尚未初始化".to_string())?,
+        )?;
+        let root = ensure_object(&state, "root")?;
+        let hosts = ensure_array(
+            root.get("hosts")
+                .ok_or_else(|| "本地状态缺少 hosts".to_string())?,
+            "hosts",
+            MAX_SYNCED_HOSTS,
+        )?;
+        let host_matches = hosts.iter().filter_map(Value::as_object).any(|host| {
+            host.get("id").and_then(Value::as_str) == Some(host_id)
+                && host.get("host").and_then(Value::as_str) == Some(address)
+                && host.get("port").and_then(Value::as_u64) == Some(u64::from(port))
+                && host.get("username").and_then(Value::as_str) == Some(username)
+        });
+        if !host_matches {
+            return Err("认证目标与当前 AppState 主机不匹配".to_string());
+        }
+        let fact_count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM app_authenticated_connection_facts",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("无法统计认证连接事实: {error}"))?;
+        if fact_count >= 10_000 {
+            return Err("认证连接事实已达到 10000 项上限；请先清理连接历史".to_string());
+        }
+        let connected_at: String = transaction
+            .query_row(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("无法生成认证连接时间: {error}"))?;
+        let id = Uuid::new_v4().to_string();
+        transaction
+            .execute(
+                "INSERT INTO app_authenticated_connection_facts(
+                    local_id, host_id, connected_at, remote_path, source
+                 ) VALUES (?1, ?2, ?3, ?4, 'local-pending')",
+                params![id, host_id, connected_at, remote_path],
+            )
+            .map_err(|error| format!("无法写入认证连接事实: {error}"))?;
+        insert_event(
+            &transaction,
+            "connection-authenticated",
+            &["connectionHistory".to_string()],
+            epoch_ms(),
+        )?;
+        prune_events(&transaction, epoch_ms())?;
+        transaction
+            .commit()
+            .map_err(|error| format!("无法提交认证连接记录事务: {error}"))?;
+        Ok(AuthenticatedConnectionRecord {
+            id,
+            host_id: host_id.to_string(),
+            connected_at,
+            path: remote_path.to_string(),
         })
     }
 
@@ -2844,6 +3316,14 @@ impl AppStore {
             next_revision,
             now,
         )?;
+        queue_connection_history_sync_changes(
+            &transaction,
+            previous_value.as_ref(),
+            &next_value,
+            next_revision,
+            now,
+        )?;
+        prune_authenticated_connection_facts(&transaction, &next_value)?;
         insert_event(&transaction, "state-replaced", &domains, now)?;
         let retained_events = prune_events(&transaction, now)?;
         transaction
@@ -3861,8 +4341,38 @@ impl AppStore {
             .cloned()
             .map(Value::Object)
             .collect::<Vec<_>>();
+        let authenticated_connection_facts =
+            load_authenticated_connection_facts(&transaction)?;
+        let local_connections = connection_history_objects(Some(&current_value))?;
+        let preserved_connection_ids = local_connections
+            .iter()
+            .filter(|(storage_key, item)| {
+                connection_history_sync_fields(
+                    storage_key,
+                    item,
+                    &authenticated_connection_facts,
+                    &host_entity_by_local,
+                )
+                .is_none()
+            })
+            .map(|(storage_key, _)| storage_key.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut preserved_connections = local_connections
+            .iter()
+            .filter(|(storage_key, item)| {
+                connection_history_sync_fields(
+                    storage_key,
+                    item,
+                    &authenticated_connection_facts,
+                    &host_entity_by_local,
+                )
+                .is_none()
+            })
+            .map(|(_, item)| Value::Object(item.clone()))
+            .collect::<Vec<_>>();
         let mut projected_commands = Vec::new();
         let mut projected_parameters = Vec::new();
+        let mut projected_connections = Vec::new();
         let mut projected_hashes = Vec::new();
         for item in projection {
             let Some(fields) = &item.fields else {
@@ -3874,7 +4384,7 @@ impl AppStore {
                 Some(FieldValue::Text(value)) => value.as_str(),
                 _ => return Err("远端历史同步投影缺少 kind".to_string()),
             };
-            let local_host_id = if history_kind == "command" || history_kind == "path" {
+            let local_host_id = if matches!(history_kind, "command" | "path" | "connection") {
                 let host_entity_id = match fields.get("hostId") {
                     Some(FieldValue::Text(value)) => value,
                     _ => return Err("远端命令或路径历史同步投影缺少 hostId".to_string()),
@@ -3899,6 +4409,8 @@ impl AppStore {
                     )
                 } else if history_kind == "argument" {
                     format!("{PARAMETER_HISTORY_LOCAL_KEY_PREFIX}{}", item.entity_id)
+                } else if history_kind == "connection" {
+                    format!("{CONNECTION_HISTORY_LOCAL_KEY_PREFIX}{}", item.entity_id)
                 } else {
                     item.entity_id.clone()
                 };
@@ -3911,10 +4423,6 @@ impl AppStore {
                 history_local_by_entity.insert(item.entity_id.clone(), local_id.clone());
                 local_id
             };
-            let value = match fields.get("value") {
-                Some(FieldValue::Text(value)) => value.clone(),
-                _ => return Err("远端历史同步投影缺少 value".to_string()),
-            };
             let created_at = match fields.get("createdAt") {
                 Some(FieldValue::Text(value)) => value.clone(),
                 _ => return Err("远端历史同步投影缺少 createdAt".to_string()),
@@ -3923,6 +4431,7 @@ impl AppStore {
                 let local_host_id = local_host_id.expect("command history resolved host");
                 if local_id.starts_with(PATH_HISTORY_LOCAL_KEY_PREFIX)
                     || local_id.starts_with(PARAMETER_HISTORY_LOCAL_KEY_PREFIX)
+                    || local_id.starts_with(CONNECTION_HISTORY_LOCAL_KEY_PREFIX)
                 {
                     return Err("远端命令历史身份映射 kind 不匹配".to_string());
                 }
@@ -3932,6 +4441,10 @@ impl AppStore {
                 let path = match fields.get("remotePath") {
                     Some(FieldValue::Text(value)) => value.clone(),
                     _ => return Err("远端命令历史同步投影缺少 remotePath".to_string()),
+                };
+                let value = match fields.get("value") {
+                    Some(FieldValue::Text(value)) => value.clone(),
+                    _ => return Err("远端命令历史同步投影缺少 value".to_string()),
                 };
                 projected_commands.push(serde_json::json!({
                     "id": local_id,
@@ -3949,6 +4462,10 @@ impl AppStore {
                 let path_local_id = local_id
                     .strip_prefix(&prefix)
                     .ok_or_else(|| "远端路径历史身份映射与主机不匹配".to_string())?;
+                let value = match fields.get("value") {
+                    Some(FieldValue::Text(value)) => value.clone(),
+                    _ => return Err("远端路径历史同步投影缺少 value".to_string()),
+                };
                 projected_paths
                     .entry(local_host_id.clone())
                     .or_default()
@@ -3972,6 +4489,10 @@ impl AppStore {
                     Some(FieldValue::Text(value)) => value,
                     _ => return Err("远端参数历史同步投影缺少 parameterName".to_string()),
                 };
+                let value = match fields.get("value") {
+                    Some(FieldValue::Text(value)) => value.clone(),
+                    _ => return Err("远端参数历史同步投影缺少 value".to_string()),
+                };
                 if parameter_definitions
                     .get(&(command_id.clone(), parameter_name.clone()))
                     .is_none_or(|sensitive| *sensitive)
@@ -3984,6 +4505,37 @@ impl AppStore {
                     "parameterName": parameter_name,
                     "value": value,
                     "createdAt": created_at,
+                }));
+            } else if history_kind == "connection" {
+                let local_host_id = local_host_id.expect("connection history resolved host");
+                if preserved_connection_ids.contains(local_id.as_str()) {
+                    continue;
+                }
+                let connection_local_id = local_id
+                    .strip_prefix(CONNECTION_HISTORY_LOCAL_KEY_PREFIX)
+                    .ok_or_else(|| "远端连接历史身份映射 kind 不匹配".to_string())?;
+                let path = match fields.get("remotePath") {
+                    Some(FieldValue::Text(value)) => value.clone(),
+                    _ => return Err("远端连接历史同步投影缺少 remotePath".to_string()),
+                };
+                transaction
+                    .execute(
+                        "INSERT INTO app_authenticated_connection_facts(
+                            local_id, host_id, connected_at, remote_path, source
+                         ) VALUES (?1, ?2, ?3, ?4, 'remote')
+                         ON CONFLICT(local_id) DO UPDATE SET
+                            host_id = excluded.host_id,
+                            connected_at = excluded.connected_at,
+                            remote_path = excluded.remote_path,
+                            source = 'remote'",
+                        params![connection_local_id, local_host_id, created_at, path],
+                    )
+                    .map_err(|error| format!("无法记录远端认证连接事实: {error}"))?;
+                projected_connections.push(serde_json::json!({
+                    "id": connection_local_id,
+                    "hostId": local_host_id,
+                    "connectedAt": created_at,
+                    "path": path,
                 }));
             } else {
                 return Err("远端历史同步投影 kind 无效".to_string());
@@ -4000,6 +4552,12 @@ impl AppStore {
         projected_parameters.append(&mut preserved_parameters);
         if projected_parameters.len() > 10_000 {
             return Err("远端参数历史同步投影超过 10000 项".to_string());
+        }
+        projected_connections
+            .sort_by(|left, right| right["connectedAt"].as_str().cmp(&left["connectedAt"].as_str()));
+        projected_connections.append(&mut preserved_connections);
+        if projected_connections.len() > 10_000 {
+            return Err("远端连接历史同步投影超过 10000 项".to_string());
         }
         let mut path_history = serde_json::Map::new();
         for (host_id, mut entries) in projected_paths {
@@ -4021,7 +4579,12 @@ impl AppStore {
             "parameterHistory".to_string(),
             Value::Array(projected_parameters),
         );
+        root.insert(
+            "connectionHistory".to_string(),
+            Value::Array(projected_connections),
+        );
         root.insert("pathHistory".to_string(), Value::Object(path_history));
+        prune_authenticated_connection_facts(&transaction, &next_value)?;
         validate_state_json(
             &serde_json::to_string(&next_value)
                 .map_err(|error| format!("无法编码 AppState 历史同步投影结果: {error}"))?,
@@ -4236,6 +4799,13 @@ impl AppStore {
                 now,
             )?;
             queue_parameter_history_sync_changes(
+                &transaction,
+                None,
+                &state,
+                revision.max(1) as u64,
+                now,
+            )?;
+            queue_connection_history_sync_changes(
                 &transaction,
                 None,
                 &state,
@@ -5436,6 +6006,124 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.snapshot().unwrap().revision, before_invalid.revision);
+    }
+
+    #[test]
+    fn connection_history_requires_rust_authentication_fact_and_projects_tombstones() {
+        let root = TempDir::new("connection-history-sync");
+        let store = AppStore::load(root.0.clone()).unwrap();
+        store
+            .save(SaveAppStateRequest {
+                state_json: fixture(),
+                expected_revision: 0,
+            })
+            .unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        acknowledge_initial_host(&store, &vault_id);
+
+        let mut forged: Value = serde_json::from_str(&fixture()).unwrap();
+        forged["connectionHistory"] = serde_json::json!([{
+            "id": "frontend-forged",
+            "hostId": "host-1",
+            "connectedAt": "2026-08-19T01:00:00.000Z",
+            "path": "/srv/forged"
+        }]);
+        store
+            .save(SaveAppStateRequest {
+                state_json: forged.to_string(),
+                expected_revision: 1,
+            })
+            .unwrap();
+        assert!(store.pending_entity_sync_changes(128).unwrap().is_empty());
+        assert!(
+            store
+                .record_authenticated_connection(
+                    "host-1",
+                    "different.example",
+                    22,
+                    "dev",
+                    "/srv/app",
+                )
+                .is_err()
+        );
+
+        let authenticated = store
+            .record_authenticated_connection(
+                "host-1",
+                "192.0.2.1",
+                22,
+                "dev",
+                "/srv/app",
+            )
+            .unwrap();
+        assert_eq!(authenticated.host_id, "host-1");
+        assert_eq!(authenticated.path, "/srv/app");
+        assert!(authenticated.connected_at.ends_with('Z'));
+        forged["connectionHistory"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, serde_json::to_value(&authenticated).unwrap());
+        store
+            .save(SaveAppStateRequest {
+                state_json: forged.to_string(),
+                expected_revision: 2,
+            })
+            .unwrap();
+        let changes = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].entity_kind, EntityKind::History);
+        let history_entity_id = changes[0].entity_id.clone();
+        let LocalEntityMutation::Patch(fields) = &changes[0].mutation else {
+            panic!("authenticated connection must be patch");
+        };
+        assert_eq!(fields["kind"], FieldValue::Text("connection".into()));
+        assert_eq!(fields["remotePath"], FieldValue::Text("/srv/app".into()));
+        let mut remote_fields = fields.clone();
+        remote_fields.insert(
+            "remotePath".to_string(),
+            FieldValue::Text("/srv/remote".into()),
+        );
+        store
+            .acknowledge_entity_sync_change(&vault_id, &changes[0].operation_id)
+            .unwrap();
+        assert_eq!(
+            store
+                .apply_remote_history_projection(
+                    &vault_id,
+                    1,
+                    &[MergedEntityProjection {
+                        entity_id: history_entity_id.clone(),
+                        fields: Some(remote_fields),
+                    }],
+                    20_000,
+                )
+                .unwrap(),
+            ProjectionOutcome::Applied
+        );
+        let snapshot = store.snapshot().unwrap();
+        let mut projected: Value =
+            serde_json::from_str(snapshot.state_json.as_deref().unwrap()).unwrap();
+        let connections = projected["connectionHistory"].as_array().unwrap();
+        assert_eq!(connections.len(), 2);
+        assert!(connections.iter().any(|item| item["path"] == "/srv/remote"));
+        assert!(connections.iter().any(|item| item["id"] == "frontend-forged"));
+
+        projected["connectionHistory"] = serde_json::json!([{
+            "id": "frontend-forged",
+            "hostId": "host-1",
+            "connectedAt": "2026-08-19T01:00:00.000Z",
+            "path": "/srv/forged"
+        }]);
+        store
+            .save(SaveAppStateRequest {
+                state_json: projected.to_string(),
+                expected_revision: snapshot.revision,
+            })
+            .unwrap();
+        let deletion = store.pending_entity_sync_changes(128).unwrap();
+        assert_eq!(deletion.len(), 1);
+        assert_eq!(deletion[0].entity_id, history_entity_id);
+        assert_eq!(deletion[0].mutation, LocalEntityMutation::Delete);
     }
 
     #[test]
