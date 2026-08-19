@@ -184,6 +184,19 @@ impl DeviceSigningKey {
         let signing_key = SigningKey::from_bytes(&self.0);
         signing_key.sign(&signature_message(device_id, operation_bytes))
     }
+
+    pub(crate) fn sign_bytes(&self, message: &[u8]) -> Signature {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        SigningKey::from_bytes(&self.0).sign(message)
+    }
+}
+
+pub(crate) fn decode_trusted_signed_operation(
+    encoded: &[u8],
+    registry: &DeviceRegistry,
+) -> Result<MergeOperation, String> {
+    SignedOperationEnvelope::decode(encoded)?.verify(registry)
 }
 
 pub(crate) fn decode_signed_or_legacy_operation(encoded: &[u8]) -> Result<MergeOperation, String> {

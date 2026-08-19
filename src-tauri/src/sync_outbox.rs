@@ -20,11 +20,12 @@ use crate::{
         build_local_conflict_resolution_operation, build_local_entity_operation,
         load_persisted_state, local_entity_operation_matches,
     },
-    sync_operation_signature::DeviceSigningKey,
+    sync_operation_signature::{DeviceSigningKey, decode_trusted_signed_operation},
     sync_provider::validate_key,
+    sync_recovery::DeviceRegistry,
 };
 
-const JOURNAL_SCHEMA_VERSION: i64 = 3;
+const JOURNAL_SCHEMA_VERSION: i64 = 4;
 const MAX_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PENDING_OBJECTS: i64 = 10_000;
 const MAX_STORED_OBJECTS: i64 = 50_000;
@@ -233,6 +234,14 @@ pub(crate) struct BlobGcFrontierSnapshot {
     pub(crate) has_pending_objects: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TrustedDeviceRegistrySnapshot {
+    pub(crate) vault_id: String,
+    pub(crate) revision: u64,
+    pub(crate) envelope_hash: String,
+    pub(crate) signed_envelope: Vec<u8>,
+}
+
 fn map_merge_error(error: MergeError) -> JournalError {
     let code = match error.code {
         MergeErrorCode::Replay => JournalErrorCode::Replay,
@@ -422,6 +431,24 @@ fn migrate_schema(connection: &mut Connection) -> JournalResult<()> {
                 JournalError::new(
                     JournalErrorCode::Storage,
                     "无法创建同步 blob GC 候选 schema",
+                )
+            })?;
+    }
+    if version < 4 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_device_registry_trust (
+                    vault_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    envelope_hash TEXT NOT NULL,
+                    signed_envelope BLOB NOT NULL,
+                    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+                );",
+            )
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::Storage,
+                    "无法创建设备 registry 信任水位 schema",
                 )
             })?;
     }
@@ -810,6 +837,169 @@ impl SyncJournal {
                     |row| row.get(0),
                 )
                 .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份"))
+        })
+    }
+
+    pub(crate) fn trusted_device_registry(
+        &self,
+        vault_id: &str,
+    ) -> JournalResult<Option<TrustedDeviceRegistrySnapshot>> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "vault ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            transaction
+                .query_row(
+                    "SELECT revision, envelope_hash, signed_envelope
+                     FROM sync_device_registry_trust WHERE vault_id = ?1",
+                    params![vault_id],
+                    |row| {
+                        let revision: i64 = row.get(0)?;
+                        Ok((revision, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
+                    },
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法读取设备 registry 信任水位",
+                    )
+                })?
+                .map(|(revision, envelope_hash, signed_envelope)| {
+                    let revision = u64::try_from(revision).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Storage,
+                            "设备 registry revision 已损坏",
+                        )
+                    })?;
+                    if revision == 0
+                        || !is_lowercase_hash(&envelope_hash)
+                        || signed_envelope.is_empty()
+                        || signed_envelope.len() > 96 * 1024
+                    {
+                        return Err(JournalError::new(
+                            JournalErrorCode::Storage,
+                            "设备 registry 信任水位已损坏",
+                        ));
+                    }
+                    Ok(TrustedDeviceRegistrySnapshot {
+                        vault_id: vault_id.clone(),
+                        revision,
+                        envelope_hash,
+                        signed_envelope,
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    pub(crate) fn advance_trusted_device_registry(
+        &self,
+        vault_id: &str,
+        expected: Option<(u64, &str)>,
+        revision: u64,
+        envelope_hash: &str,
+        signed_envelope: &[u8],
+        now_ms: i64,
+    ) -> JournalResult<TrustedDeviceRegistrySnapshot> {
+        validate_now(now_ms)?;
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "vault ID 无效"))?
+            .to_string();
+        if revision == 0
+            || revision > i64::MAX as u64
+            || !is_lowercase_hash(envelope_hash)
+            || signed_envelope.is_empty()
+            || signed_envelope.len() > 96 * 1024
+            || expected.is_some_and(|(expected_revision, expected_hash)| {
+                expected_revision == 0 || !is_lowercase_hash(expected_hash)
+            })
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "设备 registry 信任水位输入无效",
+            ));
+        }
+        self.transaction(|transaction| {
+            let current: Option<(i64, String, Vec<u8>)> = transaction
+                .query_row(
+                    "SELECT revision, envelope_hash, signed_envelope
+                     FROM sync_device_registry_trust WHERE vault_id = ?1",
+                    params![vault_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法核对设备 registry 信任水位",
+                    )
+                })?;
+            match (current.as_ref(), expected) {
+                (None, None) if revision == 1 => {}
+                (Some((current_revision, current_hash, current_envelope)), _)
+                    if *current_revision == revision as i64
+                        && current_hash == envelope_hash
+                        && current_envelope == signed_envelope =>
+                {
+                    return Ok(TrustedDeviceRegistrySnapshot {
+                        vault_id: vault_id.clone(),
+                        revision,
+                        envelope_hash: envelope_hash.to_string(),
+                        signed_envelope: signed_envelope.to_vec(),
+                    });
+                }
+                (
+                    Some((current_revision, current_hash, _)),
+                    Some((expected_revision, expected_hash)),
+                )
+                    if *current_revision == expected_revision as i64
+                        && current_hash == expected_hash
+                        && revision == expected_revision.saturating_add(1) =>
+                {}
+                (Some((current_revision, _, _)), _) if *current_revision >= revision as i64 => {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Replay,
+                        "设备 registry revision 回退或同 revision 分叉",
+                    ));
+                }
+                _ => {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Conflict,
+                        "设备 registry 信任水位发生并发冲突",
+                    ));
+                }
+            }
+            transaction
+                .execute(
+                    "INSERT INTO sync_device_registry_trust(
+                        vault_id, revision, envelope_hash, signed_envelope, updated_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(vault_id) DO UPDATE SET
+                        revision = excluded.revision,
+                        envelope_hash = excluded.envelope_hash,
+                        signed_envelope = excluded.signed_envelope,
+                        updated_at_ms = excluded.updated_at_ms",
+                    params![
+                        vault_id,
+                        revision as i64,
+                        envelope_hash,
+                        signed_envelope,
+                        now_ms
+                    ],
+                )
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法保存设备 registry 信任水位",
+                    )
+                })?;
+            Ok(TrustedDeviceRegistrySnapshot {
+                vault_id,
+                revision,
+                envelope_hash: envelope_hash.to_string(),
+                signed_envelope: signed_envelope.to_vec(),
+            })
         })
     }
 
@@ -1966,6 +2156,65 @@ impl SyncJournal {
         })
     }
 
+    pub(crate) fn apply_remote_merge_trusted(
+        &self,
+        object_key: &str,
+        encoded: &[u8],
+        vault_key: &VaultKey,
+        registry: &DeviceRegistry,
+        now_ms: i64,
+    ) -> JournalResult<RemoteMergeResult> {
+        let object = validate_envelope(encoded)?;
+        if object.object_kind() != &SyncObjectKind::Event
+            || object.vault_id() != registry.vault_id()
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "可信远端 merge 对象身份无效",
+            ));
+        }
+        let outer_device_id = object
+            .device_id()
+            .ok_or_else(|| {
+                JournalError::new(
+                    JournalErrorCode::InvalidInput,
+                    "可信远端 merge 缺少设备身份",
+                )
+            })?
+            .to_string();
+        let outcome = self.apply_remote(
+            object_key,
+            encoded,
+            vault_key,
+            now_ms,
+            |transaction, plaintext| {
+                let operation = decode_trusted_signed_operation(plaintext, registry).map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Authentication,
+                        "远端同步 operation 未通过活动 registry 验签",
+                    )
+                })?;
+                if operation.device_id() != outer_device_id {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Authentication,
+                        "远端同步 operation 内外设备身份不匹配",
+                    ));
+                }
+                let operation = operation.encode().map_err(map_merge_error)?;
+                let (revision, _) = load_persisted_state(transaction).map_err(map_merge_error)?;
+                apply_persisted_operation(transaction, &operation, revision, now_ms)
+                    .map_err(map_merge_error)?;
+                Ok(())
+            },
+        )?;
+        let status = self.merge_status()?;
+        Ok(RemoteMergeResult {
+            outcome,
+            revision: status.revision,
+            open_conflicts: status.open_conflicts,
+        })
+    }
+
     pub(crate) fn prune(&self, now_ms: i64) -> JournalResult<()> {
         validate_now(now_ms)?;
         self.transaction(|transaction| {
@@ -2758,6 +3007,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(Uuid::parse_str(&device_id).unwrap().to_string(), device_id);
+    }
+
+    #[test]
+    fn registry_trust_watermark_persists_and_rejects_rollback_or_fork() {
+        let root = TempDir::new("registry-trust");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let hash_one = "a".repeat(64);
+        let hash_two = "b".repeat(64);
+        let first = b"signed-registry-one";
+        let second = b"signed-registry-two";
+        journal
+            .advance_trusted_device_registry(VAULT_ID, None, 1, &hash_one, first, 1)
+            .unwrap();
+        assert_eq!(
+            journal
+                .advance_trusted_device_registry(VAULT_ID, None, 1, &hash_one, first, 2)
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(
+            journal
+                .advance_trusted_device_registry(
+                    VAULT_ID,
+                    Some((1, &hash_one)),
+                    1,
+                    &hash_two,
+                    second,
+                    2,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Replay
+        );
+        journal
+            .advance_trusted_device_registry(
+                VAULT_ID,
+                Some((1, &hash_one)),
+                2,
+                &hash_two,
+                second,
+                3,
+            )
+            .unwrap();
+        drop(journal);
+
+        let reopened = SyncJournal::open(root.0.clone()).unwrap();
+        let trusted = reopened.trusted_device_registry(VAULT_ID).unwrap().unwrap();
+        assert_eq!(trusted.vault_id, VAULT_ID);
+        assert_eq!(trusted.revision, 2);
+        assert_eq!(trusted.envelope_hash, hash_two);
+        assert_eq!(trusted.signed_envelope, second);
+        assert_eq!(
+            reopened
+                .advance_trusted_device_registry(VAULT_ID, None, 1, &hash_one, first, 4)
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Replay
+        );
     }
 
     #[test]

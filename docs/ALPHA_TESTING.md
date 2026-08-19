@@ -130,6 +130,7 @@
 - merge 夹具必须把同一组 host/script/setting/background/history operation 以不同顺序应用并比较完整状态；覆盖 observed update 不误报、未观察 edit/delete 冲突、删除保持/明确恢复、并发冲突解决、风险降低、旧 history event 并集、命令 history 实体 tombstone、revision 冲突、损坏/未知 schema，以及 password/Token/private key/credentialRef/trust pin/本机路径拒绝。当前桌面冲突中心已有 Rust-owned 候选解决 UI，但源码测试仍不能替代多设备人工可用性验收。
 - 恢复密钥夹具必须覆盖可打印格式往返（包括 base64url 正文含 `-`）、校验码、错误密钥、独立 keyslot 域、篡改和未知字段；恢复密钥、VMK 和解密明文不得出现在导出 JSON、日志或前端事件中。
 - device registry 夹具必须覆盖 revision 冲突、公钥身份不可替换、最后活动设备保护、撤销不可逆、撤销后标签不可变、不同合并顺序和已撤销发布者拒绝。撤销后的报告必须要求 VMK 轮换，不能声称远程擦除。
+- 远端 registry 夹具还必须覆盖 genesis/连续 successor 签名、前序 hash 篡改、持久水位跨重启、同 revision 分叉、远端删除已见 revision、revision 断层、外层发布者不一致，以及已登记/未知/撤销设备 event 的真实协调器验签。Android 只能观察 revision、本机授权和轮换状态，不能因此开放 Sync capability。
 - 加密导出夹具必须覆盖 manifest/对象篡改、截断、重复 key/hash、跨 vault、数量/大小、恰好一个 registry、错误恢复密钥、无覆盖原子写、Unix `0600` 与符号链接拒绝；演练必须认证每个对象并解析 event/registry。当前没有同步 UI、真实多设备签名或 restore-to-journal，不能做产品级恢复声明。
 - 凭据 vault 夹具必须确认默认关闭、revision 冲突、仅活动且已授权设备可访问、最后授权设备保护、撤销不可重新授权和轮换提示；错误 CVK、AAD 身份搬移、类型/大小、未知字段和跨 vault 必须拒绝。
 - 对 SSH 密码、私钥口令、OpenSSH 私钥和 access token 逐类往返，扫描 keyslot/信封/object key/稳定错误，确保不含 secret 或本机 credential reference。静态安全测试必须持续禁止该模块新增 Tauri command/event/日志；当前没有 UI 或钥匙串写回，不能用源码测试宣称凭据同步可用。

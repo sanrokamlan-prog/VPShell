@@ -15,13 +15,16 @@ use crate::{
         EncryptedSyncObject, PasswordKeyslot, RecoveryKey, RecoveryKeyslot, SyncObjectKind,
         VaultKey, decrypt_sync_object, encrypt_sync_object, open_recovery_keyslot,
     },
-    sync_operation_signature::decode_signed_or_legacy_operation,
+    sync_operation_signature::{DeviceSigningKey, decode_signed_or_legacy_operation},
     sync_provider::validate_key,
 };
 
 const REGISTRY_FORMAT_VERSION: u32 = 1;
+const REGISTRY_SIGNATURE_FORMAT_VERSION: u32 = 1;
+const REGISTRY_SIGNATURE_DOMAIN: &[u8] = b"VPSHELL-SYNC-DEVICE-REGISTRY-V1";
 const EXPORT_FORMAT_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: usize = 64 * 1024;
+const MAX_SIGNED_REGISTRY_BYTES: usize = 96 * 1024;
 const MAX_DEVICES: usize = 32;
 const MAX_DEVICE_LABEL_BYTES: usize = 128;
 const MAX_KEYSLOTS: usize = 8;
@@ -351,6 +354,10 @@ impl DeviceRegistry {
         &self.vault_id
     }
 
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub(crate) fn requires_key_rotation(&self) -> bool {
         self.devices
             .values()
@@ -370,6 +377,276 @@ impl DeviceRegistry {
             Ok(())
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SignedDeviceRegistryEnvelope {
+    format_version: u32,
+    registry: String,
+    publisher_device_id: String,
+    previous_registry_hash: Option<String>,
+    signature: String,
+}
+
+impl SignedDeviceRegistryEnvelope {
+    pub(crate) fn sign(
+        registry: &DeviceRegistry,
+        previous_registry_hash: Option<&str>,
+        publisher_device_id: &str,
+        signing_key: &DeviceSigningKey,
+    ) -> RecoveryResult<Self> {
+        validate_registry(registry)?;
+        validate_uuid(publisher_device_id, "registry publisher")?;
+        if !registry.is_authorized(publisher_device_id)
+            || registry.public_signing_key(publisher_device_id)? != signing_key.public_key()
+        {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Authentication,
+                "registry 发布者不是匹配签名密钥的活动设备",
+            ));
+        }
+        match (registry.revision, previous_registry_hash) {
+            (1, None) => {}
+            (revision, Some(hash)) if revision > 1 && is_lowercase_hash(hash) => {}
+            _ => {
+                return Err(RecoveryError::new(
+                    RecoveryErrorCode::InvalidInput,
+                    "registry revision 与前序哈希不匹配",
+                ));
+            }
+        }
+        let registry_bytes = registry.encode()?;
+        let message = registry_signature_message(
+            publisher_device_id,
+            previous_registry_hash,
+            &registry_bytes,
+        );
+        let signature = signing_key.sign_bytes(&message);
+        let envelope = Self {
+            format_version: REGISTRY_SIGNATURE_FORMAT_VERSION,
+            registry: URL_SAFE_NO_PAD.encode(registry_bytes),
+            publisher_device_id: publisher_device_id.to_string(),
+            previous_registry_hash: previous_registry_hash.map(str::to_string),
+            signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+        };
+        envelope.validate_shape()?;
+        Ok(envelope)
+    }
+
+    pub(crate) fn encode(&self) -> RecoveryResult<Vec<u8>> {
+        self.validate_shape()?;
+        let encoded = serde_json::to_vec(self).map_err(|_| {
+            RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "无法序列化签名 device registry",
+            )
+        })?;
+        if encoded.len() > MAX_SIGNED_REGISTRY_BYTES {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::LimitExceeded,
+                "签名 device registry 超过 96 KiB",
+            ));
+        }
+        Ok(encoded)
+    }
+
+    pub(crate) fn decode(encoded: &[u8]) -> RecoveryResult<Self> {
+        if encoded.is_empty() || encoded.len() > MAX_SIGNED_REGISTRY_BYTES {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::LimitExceeded,
+                "签名 device registry 必须为 1 字节至 96 KiB",
+            ));
+        }
+        let envelope: Self = serde_json::from_slice(encoded).map_err(|_| {
+            RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "签名 device registry JSON 损坏或字段不受支持",
+            )
+        })?;
+        envelope.validate_shape()?;
+        Ok(envelope)
+    }
+
+    pub(crate) fn verify_genesis(&self) -> RecoveryResult<DeviceRegistry> {
+        let registry = self.decode_registry()?;
+        if registry.revision != 1 || self.previous_registry_hash.is_some() {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Integrity,
+                "device registry genesis revision 或前序哈希无效",
+            ));
+        }
+        self.verify_signature(&registry, &registry)?;
+        Ok(registry)
+    }
+
+    pub(crate) fn verify_successor(
+        &self,
+        previous: &DeviceRegistry,
+        previous_registry_hash: &str,
+    ) -> RecoveryResult<DeviceRegistry> {
+        validate_registry(previous)?;
+        if !is_lowercase_hash(previous_registry_hash)
+            || self.previous_registry_hash.as_deref() != Some(previous_registry_hash)
+        {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Integrity,
+                "device registry 前序哈希不匹配",
+            ));
+        }
+        let registry = self.decode_registry()?;
+        if registry.vault_id != previous.vault_id
+            || registry.revision != previous.revision.checked_add(1).ok_or_else(|| {
+                RecoveryError::new(
+                    RecoveryErrorCode::LimitExceeded,
+                    "device registry revision 已耗尽",
+                )
+            })?
+        {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Integrity,
+                "device registry successor vault 或 revision 不连续",
+            ));
+        }
+        validate_registry_successor(previous, &registry)?;
+        self.verify_signature(previous, &registry)?;
+        if !registry.is_authorized(&self.publisher_device_id) {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Conflict,
+                "被本次更新撤销的设备不能发布 device registry",
+            ));
+        }
+        Ok(registry)
+    }
+
+    pub(crate) fn hash(&self) -> RecoveryResult<String> {
+        Ok(sha256_hex(&self.encode()?))
+    }
+
+    pub(crate) fn publisher_device_id(&self) -> &str {
+        &self.publisher_device_id
+    }
+
+    pub(crate) fn registry(&self) -> RecoveryResult<DeviceRegistry> {
+        self.decode_registry()
+    }
+
+    fn decode_registry(&self) -> RecoveryResult<DeviceRegistry> {
+        let bytes = decode_canonical(&self.registry, MAX_REGISTRY_BYTES, "device registry")?;
+        DeviceRegistry::decode(&bytes)
+    }
+
+    fn verify_signature(
+        &self,
+        trusted_registry: &DeviceRegistry,
+        signed_registry: &DeviceRegistry,
+    ) -> RecoveryResult<()> {
+        use ed25519_dalek::{Signature, VerifyingKey};
+
+        let key = trusted_registry.public_signing_key(&self.publisher_device_id)?;
+        let signature = decode_exact_64(&self.signature, "device registry 签名")?;
+        let signature = Signature::from_bytes(&signature);
+        let verifying_key = VerifyingKey::from_bytes(&key).map_err(|_| {
+            RecoveryError::new(RecoveryErrorCode::Authentication, "device registry 公钥无效")
+        })?;
+        let registry_bytes = signed_registry.encode()?;
+        let message = registry_signature_message(
+            &self.publisher_device_id,
+            self.previous_registry_hash.as_deref(),
+            &registry_bytes,
+        );
+        verifying_key.verify_strict(&message, &signature).map_err(|_| {
+            RecoveryError::new(
+                RecoveryErrorCode::Authentication,
+                "device registry 签名验证失败",
+            )
+        })
+    }
+
+    fn validate_shape(&self) -> RecoveryResult<()> {
+        if self.format_version != REGISTRY_SIGNATURE_FORMAT_VERSION {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "签名 device registry 版本不受支持",
+            ));
+        }
+        validate_uuid(&self.publisher_device_id, "registry publisher")?;
+        if self
+            .previous_registry_hash
+            .as_deref()
+            .is_some_and(|hash| !is_lowercase_hash(hash))
+        {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::InvalidInput,
+                "device registry 前序哈希不是 lowercase SHA-256",
+            ));
+        }
+        self.decode_registry()?;
+        decode_exact_64(&self.signature, "device registry 签名")?;
+        Ok(())
+    }
+}
+
+fn validate_registry_successor(
+    previous: &DeviceRegistry,
+    successor: &DeviceRegistry,
+) -> RecoveryResult<()> {
+    for (device_id, existing) in &previous.devices {
+        let incoming = successor.devices.get(device_id).ok_or_else(|| {
+            RecoveryError::new(
+                RecoveryErrorCode::Integrity,
+                "device registry successor 删除了既有设备身份",
+            )
+        })?;
+        if incoming.public_signing_key != existing.public_signing_key
+            || incoming.added_at_ms != existing.added_at_ms
+            || incoming.label_updated_at_ms < existing.label_updated_at_ms
+            || (matches!(existing.status, DeviceStatus::Revoked { .. }) && incoming != existing)
+        {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Integrity,
+                "device registry successor 回退或替换了设备身份",
+            ));
+        }
+    }
+    for (device_id, incoming) in &successor.devices {
+        if !previous.devices.contains_key(device_id)
+            && !matches!(incoming.status, DeviceStatus::Active)
+        {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Integrity,
+                "device registry successor 不能新增已撤销设备",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn registry_signature_message(
+    publisher_device_id: &str,
+    previous_registry_hash: Option<&str>,
+    registry_bytes: &[u8],
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        REGISTRY_SIGNATURE_DOMAIN.len()
+            + publisher_device_id.len()
+            + previous_registry_hash.map_or(0, str::len)
+            + registry_bytes.len()
+            + 24,
+    );
+    message.extend_from_slice(REGISTRY_SIGNATURE_DOMAIN);
+    push_signature_field(&mut message, publisher_device_id.as_bytes());
+    push_signature_field(
+        &mut message,
+        previous_registry_hash.unwrap_or("").as_bytes(),
+    );
+    push_signature_field(&mut message, registry_bytes);
+    message
+}
+
+fn push_signature_field(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    output.extend_from_slice(value);
 }
 
 fn device_record(
@@ -512,6 +789,67 @@ pub(crate) fn encrypt_device_registry(
             "无法加密 device registry",
         )
     })
+}
+
+pub(crate) fn encrypt_signed_device_registry(
+    envelope: &SignedDeviceRegistryEnvelope,
+    vault_key: &VaultKey,
+) -> RecoveryResult<EncryptedSyncObject> {
+    let registry = envelope.decode_registry()?;
+    let publisher_device_id = envelope.publisher_device_id();
+    encrypt_sync_object(
+        vault_key,
+        registry.vault_id(),
+        SyncObjectKind::DeviceRegistry,
+        &format!("device-registry-{}", registry.revision()),
+        Some(publisher_device_id),
+        None,
+        &envelope.encode()?,
+    )
+    .map_err(|_| {
+        RecoveryError::new(
+            RecoveryErrorCode::Authentication,
+            "无法加密签名 device registry",
+        )
+    })
+}
+
+pub(crate) fn decrypt_signed_device_registry(
+    encoded: &[u8],
+    vault_key: &VaultKey,
+    expected_vault_id: &str,
+    expected_revision: u64,
+) -> RecoveryResult<SignedDeviceRegistryEnvelope> {
+    let object = EncryptedSyncObject::decode(encoded).map_err(|_| {
+        RecoveryError::new(
+            RecoveryErrorCode::InvalidInput,
+            "加密 device registry 信封无效",
+        )
+    })?;
+    if object.object_kind() != &SyncObjectKind::DeviceRegistry
+        || object.vault_id() != expected_vault_id
+        || object.object_id() != format!("device-registry-{expected_revision}")
+        || object.sequence().is_some()
+    {
+        return Err(RecoveryError::new(
+            RecoveryErrorCode::Integrity,
+            "加密 device registry 身份不匹配",
+        ));
+    }
+    let plaintext = decrypt_sync_object(vault_key, &object).map_err(|_| {
+        RecoveryError::new(
+            RecoveryErrorCode::Authentication,
+            "加密 device registry 认证失败",
+        )
+    })?;
+    let envelope = SignedDeviceRegistryEnvelope::decode(&plaintext)?;
+    if object.device_id() != Some(envelope.publisher_device_id()) {
+        return Err(RecoveryError::new(
+            RecoveryErrorCode::Integrity,
+            "device registry 外层发布者与签名发布者不匹配",
+        ));
+    }
+    Ok(envelope)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -1017,6 +1355,26 @@ fn decode_exact_32(value: &str, label: &str) -> RecoveryResult<[u8; 32]> {
     Ok(output)
 }
 
+fn decode_exact_64(value: &str, label: &str) -> RecoveryResult<[u8; 64]> {
+    let decoded = decode_canonical(value, 64, label)?;
+    if decoded.len() != 64 {
+        return Err(RecoveryError::new(
+            RecoveryErrorCode::InvalidInput,
+            format!("{label} 长度无效"),
+        ));
+    }
+    let mut output = [0u8; 64];
+    output.copy_from_slice(&decoded);
+    Ok(output)
+}
+
+fn is_lowercase_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_label(value: &str) -> RecoveryResult<()> {
     if value.is_empty()
         || value.len() > MAX_DEVICE_LABEL_BYTES
@@ -1216,6 +1574,86 @@ mod tests {
             serde_json::from_slice(&registry.encode().unwrap()).unwrap();
         invalid["devices"][DEVICE_B]["labelUpdatedAtMs"] = serde_json::json!(4);
         assert!(DeviceRegistry::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    }
+
+    #[test]
+    fn signed_registry_chain_is_contiguous_authorized_and_encrypted() {
+        let signer_a = DeviceSigningKey::from_bytes([7; 32]);
+        let signer_b = DeviceSigningKey::from_bytes([8; 32]);
+        let mut registry = DeviceRegistry::new(
+            VAULT_ID,
+            DEVICE_A,
+            "Laptop",
+            &signer_a.public_key(),
+            1,
+        )
+        .unwrap();
+        let genesis =
+            SignedDeviceRegistryEnvelope::sign(&registry, None, DEVICE_A, &signer_a).unwrap();
+        assert_eq!(genesis.verify_genesis().unwrap(), registry);
+        let genesis_hash = genesis.hash().unwrap();
+
+        registry
+            .add_device(1, DEVICE_B, "Phone", &signer_b.public_key(), 2)
+            .unwrap();
+        let successor = SignedDeviceRegistryEnvelope::sign(
+            &registry,
+            Some(&genesis_hash),
+            DEVICE_A,
+            &signer_a,
+        )
+        .unwrap();
+        assert_eq!(
+            successor
+                .verify_successor(&genesis.verify_genesis().unwrap(), &genesis_hash)
+                .unwrap(),
+            registry
+        );
+
+        let vault_key = VaultKey::generate().unwrap();
+        let encrypted = encrypt_signed_device_registry(&successor, &vault_key)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let decrypted =
+            decrypt_signed_device_registry(&encrypted, &vault_key, VAULT_ID, 2).unwrap();
+        assert_eq!(decrypted, successor);
+
+        let mut tampered_signature = successor.clone();
+        tampered_signature.signature = URL_SAFE_NO_PAD.encode([0; 64]);
+        assert_eq!(
+            tampered_signature
+                .verify_successor(&genesis.verify_genesis().unwrap(), &genesis_hash)
+                .unwrap_err()
+                .code,
+            RecoveryErrorCode::Authentication
+        );
+
+        let mut wrong_previous = successor.clone();
+        wrong_previous.previous_registry_hash = Some("f".repeat(64));
+        assert_eq!(
+            wrong_previous
+                .verify_successor(&genesis.verify_genesis().unwrap(), &genesis_hash)
+                .unwrap_err()
+                .code,
+            RecoveryErrorCode::Integrity
+        );
+
+        let mut revoked_publisher = registry;
+        revoked_publisher
+            .revoke_device(2, DEVICE_A, RevocationReason::Compromised, 3)
+            .unwrap();
+        assert_eq!(
+            SignedDeviceRegistryEnvelope::sign(
+                &revoked_publisher,
+                Some(&successor.hash().unwrap()),
+                DEVICE_A,
+                &signer_a,
+            )
+            .unwrap_err()
+            .code,
+            RecoveryErrorCode::Authentication
+        );
     }
 
     #[test]

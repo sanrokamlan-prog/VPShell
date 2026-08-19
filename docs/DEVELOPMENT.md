@@ -229,6 +229,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 
 - 恢复密钥只能由 Rust OS CSPRNG 生成并以不可 Serialize/Debug、释放清零的类型短暂持有。可打印格式从最后一个 `-` 分离校验码，因为 base64url 正文自身允许 `-`；校验码只用于录入错误，keyslot AEAD 才提供认证。
 - device registry 只保存公开签名键与有界非敏感标签；UUID/base64url/时间/数量逐字段验证。设备公钥身份不可原地替换，撤销不可逆，禁止撤销最后活动设备，已撤销设备不能修改或发布 registry。撤销不等于擦除远端设备已有 VMK，疑似泄露必须新 VMK 全量重加密。
+- 配置后的协调器必须在读取业务 changefeed 前验证远端 `registry/{revision}.oreg`：签名 domain、AEAD 身份、前序信封哈希、连续 revision、前后 active 发布者和 SQLite compare-and-swap 水位缺一不可。已信任 revision 缺失/换 hash、断层、未知/撤销设备签名或 event 内外 device ID 不同必须 fail closed；旧裸 operation 不能进入生产配置路径。
 - 加密导出不能包含恢复密钥、密码、私钥、credential ref、Token、provider 凭据、解密内容或 SQLite 文件。对象、keyslot、manifest、数量和字节上限在创建、编码、读取和恢复演练各边界重复验证；写盘必须同目录私有暂存、同步、无覆盖提交，读取拒绝符号链接。
 - 恢复演练必须实际解包 VMK、认证解密每个对象并解析所有已有具名核心格式。错误恢复密钥、篡改、截断、重复 key/hash、跨 vault、撤销 registry 发布者和不受支持版本均失败；在 restore-to-journal、协调器和用户确认接线前，只能称为离线演练，不能称为一键恢复。
 

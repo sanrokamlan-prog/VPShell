@@ -6,9 +6,10 @@
 //! inside Rust.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -24,10 +25,11 @@ use crate::{
     sync_blob_gc::run_blob_gc,
     sync_crypto::{
         Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
-        create_password_keyslot, open_password_keyslot,
+        create_password_keyslot, decrypt_sync_object, open_password_keyslot,
     },
     sync_gateway_provider::ReqwestGatewayAuthenticator,
     sync_merge::{EntityKind, FieldValue, LocalEntityMutation, MergeConflictSnapshot},
+    sync_operation_signature::{DeviceSigningKey, decode_trusted_signed_operation},
     sync_outbox::{AttemptFailure, JournalErrorCode, RemoteApplyOutcome, SyncJournal},
     sync_provider::{
         LocalFolderProvider, ProviderCancellation, ProviderError, ProviderErrorCode,
@@ -46,9 +48,13 @@ use crate::{
     },
     sync_s3_provider::ReqwestS3ObjectTransport,
     sync_sftp_provider::Ssh2SftpObjectTransport,
+    sync_recovery::{
+        DeviceRegistry, SignedDeviceRegistryEnvelope, decrypt_signed_device_registry,
+        encrypt_signed_device_registry,
+    },
 };
 
-const COORDINATOR_SCHEMA_VERSION: u16 = 1;
+const COORDINATOR_SCHEMA_VERSION: u16 = 2;
 const MAX_PUSH_OBJECTS_PER_CYCLE: usize = 128;
 const MAX_PULL_OBJECTS_PER_CYCLE: usize = 1_000;
 const MAX_PULL_BYTES_PER_CYCLE: u64 = 64 * 1024 * 1024;
@@ -57,6 +63,9 @@ const BOOTSTRAP_FORMAT_VERSION: u16 = 1;
 const BOOTSTRAP_OBJECT_KEY: &str = "vpshell/v1/bootstrap.json";
 const MAX_BOOTSTRAP_BYTES: usize = 32 * 1024;
 const MAX_LOCAL_FOLDER_PATH_BYTES: usize = 4096;
+const MAX_REGISTRY_REVISIONS: usize = 256;
+const REGISTRY_LIST_PAGE_SIZE: usize = 64;
+const MAX_ENCRYPTED_REGISTRY_BYTES: u64 = 160 * 1024;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +194,9 @@ pub(crate) struct SyncCoordinatorStatus {
     pub(crate) last_completed_at_ms: Option<i64>,
     pub(crate) last_uploaded_objects: u32,
     pub(crate) last_downloaded_objects: u32,
+    pub(crate) device_registry_revision: u64,
+    pub(crate) local_device_authorized: bool,
+    pub(crate) key_rotation_required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +229,8 @@ struct CoordinatorSession {
     vault_key: Arc<VaultKey>,
     vault_id: String,
     remote_prefix: String,
+    device_registry: Option<DeviceRegistry>,
+    device_registry_hash: Option<String>,
 }
 
 struct CoordinatorRuntime {
@@ -325,7 +339,12 @@ impl SyncCoordinatorManager {
             .journal
             .merge_status()
             .map_err(|_| "无法读取同步冲突状态".to_string())?;
+        let local_device_id = self.journal.local_device_id().map_err(journal_code)?;
         let runtime = self.lock_runtime()?;
+        let device_registry = runtime
+            .session
+            .as_ref()
+            .and_then(|session| session.device_registry.as_ref());
         let recovery_required = journal.safety_blocked;
         let phase = if recovery_required {
             SyncCoordinatorPhase::ReconcileRequired
@@ -350,6 +369,11 @@ impl SyncCoordinatorManager {
             last_completed_at_ms: runtime.last_completed_at_ms,
             last_uploaded_objects: runtime.last_uploaded_objects,
             last_downloaded_objects: runtime.last_downloaded_objects,
+            device_registry_revision: device_registry.map_or(0, DeviceRegistry::revision),
+            local_device_authorized: device_registry
+                .is_some_and(|registry| registry.is_authorized(&local_device_id)),
+            key_rotation_required: device_registry
+                .is_some_and(DeviceRegistry::requires_key_rotation),
         })
     }
 
@@ -466,7 +490,7 @@ impl SyncCoordinatorManager {
         vault_key: VaultKey,
         vault_id: &str,
     ) -> Result<(), String> {
-        self.attach_session_inner(provider, vault_key, vault_id, false)
+        self.attach_session_inner(provider, vault_key, vault_id, None, None, false)
     }
 
     fn attach_session_inner(
@@ -474,6 +498,8 @@ impl SyncCoordinatorManager {
         provider: Arc<dyn SyncObjectProvider>,
         vault_key: VaultKey,
         vault_id: &str,
+        device_registry: Option<DeviceRegistry>,
+        device_registry_hash: Option<String>,
         from_configuration: bool,
     ) -> Result<(), String> {
         let vault_id = uuid::Uuid::parse_str(vault_id)
@@ -491,6 +517,8 @@ impl SyncCoordinatorManager {
             vault_key: Arc::new(vault_key),
             vault_id: vault_id.clone(),
             remote_prefix: format!("vpshell/v1/{vault_id}/segments/"),
+            device_registry,
+            device_registry_hash,
         });
         runtime.phase = SyncCoordinatorPhase::Idle;
         runtime.last_error_code = None;
@@ -776,7 +804,21 @@ impl SyncCoordinatorManager {
                 (bootstrap.vault_id, vault_key)
             }
         };
-        self.attach_session_inner(provider, vault_key, &vault_id, true)?;
+        let (device_registry, device_registry_hash) = self.refresh_device_registry(
+            provider.as_ref(),
+            &vault_key,
+            &vault_id,
+            &cancellation,
+            current_time_ms()?,
+        )?;
+        self.attach_session_inner(
+            provider,
+            vault_key,
+            &vault_id,
+            Some(device_registry),
+            Some(device_registry_hash),
+            true,
+        )?;
         self.status()
     }
 
@@ -788,12 +830,20 @@ impl SyncCoordinatorManager {
         if now_ms < 0 {
             return Err("同步协调器时间不能为负数".to_string());
         }
-        let (generation, provider, vault_key, vault_id, remote_prefix, cancellation) = {
+        let (
+            generation,
+            provider,
+            vault_key,
+            vault_id,
+            remote_prefix,
+            registry_required,
+            cancellation,
+        ) = {
             let mut runtime = self.lock_runtime()?;
             if runtime.running || runtime.configuring {
                 return Err("同一 vault 已有同步配置或 worker 运行".to_string());
             }
-            let (provider, vault_key, vault_id, remote_prefix) = {
+            let (provider, vault_key, vault_id, remote_prefix, registry_required) = {
                 let session = runtime
                     .session
                     .as_ref()
@@ -803,6 +853,7 @@ impl SyncCoordinatorManager {
                     Arc::clone(&session.vault_key),
                     session.vault_id.clone(),
                     session.remote_prefix.clone(),
+                    session.device_registry.is_some(),
                 )
             };
             runtime.running = true;
@@ -818,6 +869,7 @@ impl SyncCoordinatorManager {
                 vault_key,
                 vault_id,
                 remote_prefix,
+                registry_required,
                 runtime.cancellation.clone(),
             )
         };
@@ -828,6 +880,7 @@ impl SyncCoordinatorManager {
             vault_key.as_ref(),
             &vault_id,
             &remote_prefix,
+            registry_required,
             &cancellation,
             generation,
             now_ms,
@@ -858,6 +911,7 @@ impl SyncCoordinatorManager {
         vault_key: &VaultKey,
         vault_id: &str,
         remote_prefix: &str,
+        registry_required: bool,
         cancellation: &ProviderCancellation,
         generation: u64,
         now_ms: i64,
@@ -866,12 +920,31 @@ impl SyncCoordinatorManager {
         if journal_status.safety_blocked {
             return Err("reconcile-required".to_string());
         }
+        let device_registry = if registry_required {
+            let (registry, hash) = self.refresh_device_registry(
+                provider,
+                vault_key,
+                vault_id,
+                cancellation,
+                now_ms,
+            )?;
+            let local_device_id = self.journal.local_device_id().map_err(journal_code)?;
+            let local_device_authorized = registry.is_authorized(&local_device_id);
+            self.update_device_registry(generation, registry.clone(), hash)?;
+            if !local_device_authorized {
+                return Err("device-unauthorized".to_string());
+            }
+            Some(registry)
+        } else {
+            None
+        };
         self.drain_app_state_changes(app_store, vault_key, vault_id, now_ms)?;
         let uploaded = self.push_pending(
             provider,
             vault_key,
             vault_id,
             remote_prefix,
+            device_registry.as_ref(),
             cancellation,
             generation,
             now_ms,
@@ -883,15 +956,23 @@ impl SyncCoordinatorManager {
         let mut downloaded = 0_u32;
         for candidate in candidates {
             self.check_generation(generation, cancellation)?;
-            let result = self
-                .journal
-                .apply_remote_merge(
+            let result = if let Some(registry) = device_registry.as_ref() {
+                self.journal.apply_remote_merge_trusted(
+                    &candidate.metadata.key,
+                    &candidate.encoded,
+                    vault_key,
+                    registry,
+                    now_ms,
+                )
+            } else {
+                self.journal.apply_remote_merge(
                     &candidate.metadata.key,
                     &candidate.encoded,
                     vault_key,
                     now_ms,
                 )
-                .map_err(journal_code)?;
+            }
+            .map_err(journal_code)?;
             if result.outcome == RemoteApplyOutcome::Applied {
                 downloaded = downloaded.saturating_add(1);
             }
@@ -1133,6 +1214,7 @@ impl SyncCoordinatorManager {
         vault_key: &VaultKey,
         vault_id: &str,
         remote_prefix: &str,
+        device_registry: Option<&DeviceRegistry>,
         cancellation: &ProviderCancellation,
         generation: u64,
         now_ms: i64,
@@ -1183,6 +1265,39 @@ impl SyncCoordinatorManager {
                     )
                     .map_err(journal_code)?;
                 return Err("protocol".to_string());
+            }
+            if envelope.object_kind() == &SyncObjectKind::Event {
+                if let Some(registry) = device_registry {
+                    let operation = match decrypt_sync_object(vault_key, &envelope)
+                        .map_err(|_| ())
+                        .and_then(|plaintext| {
+                            decode_trusted_signed_operation(&plaintext, registry).map_err(|_| ())
+                        }) {
+                        Ok(operation) => operation,
+                        Err(()) => {
+                            self.journal
+                                .mark_failed(
+                                    &claim.object_key,
+                                    &claim.lease_id,
+                                    AttemptFailure::Authentication,
+                                    now_ms,
+                                )
+                                .map_err(journal_code)?;
+                            return Err("device-authentication".to_string());
+                        }
+                    };
+                    if envelope.device_id() != Some(operation.device_id()) {
+                        self.journal
+                            .mark_failed(
+                                &claim.object_key,
+                                &claim.lease_id,
+                                AttemptFailure::Authentication,
+                                now_ms,
+                            )
+                            .map_err(journal_code)?;
+                        return Err("device-authentication".to_string());
+                    }
+                }
             }
             match provider.put(&claim.object_key, &claim.encrypted_object, cancellation) {
                 Ok(_) => {
@@ -1335,6 +1450,253 @@ impl SyncCoordinatorManager {
         Ok(candidates)
     }
 
+    fn refresh_device_registry(
+        &self,
+        provider: &dyn SyncObjectProvider,
+        vault_key: &VaultKey,
+        vault_id: &str,
+        cancellation: &ProviderCancellation,
+        now_ms: i64,
+    ) -> Result<(DeviceRegistry, String), String> {
+        let trusted = self
+            .journal
+            .trusted_device_registry(vault_id)
+            .map_err(registry_journal_code)?;
+        let mut remote = self.list_device_registries(provider, vault_id, cancellation)?;
+        if remote.is_empty() {
+            if trusted.is_some() {
+                return Err("registry-rollback".to_string());
+            }
+            let local_device_id = self.journal.local_device_id().map_err(journal_code)?;
+            let signing_key = DeviceSigningKey::load_or_create(&local_device_id)
+                .map_err(|_| "device-key-unavailable".to_string())?;
+            let registry = DeviceRegistry::new(
+                vault_id,
+                &local_device_id,
+                "VPShell desktop",
+                &signing_key.public_key(),
+                now_ms,
+            )
+            .map_err(|_| "registry-integrity".to_string())?;
+            let signed = SignedDeviceRegistryEnvelope::sign(
+                &registry,
+                None,
+                &local_device_id,
+                &signing_key,
+            )
+            .map_err(|_| "registry-integrity".to_string())?;
+            let encrypted = encrypt_signed_device_registry(&signed, vault_key)
+                .map_err(|_| "registry-integrity".to_string())?;
+            let encrypted = encrypted
+                .encode()
+                .map_err(|_| "registry-integrity".to_string())?;
+            let key = registry_object_key(vault_id, 1);
+            match provider.put(&key, &encrypted, cancellation) {
+                Ok(_) => {}
+                Err(error) if error.code == ProviderErrorCode::Conflict => {}
+                Err(error) => return Err(provider_code(error)),
+            }
+            remote = self.list_device_registries(provider, vault_id, cancellation)?;
+            if remote.is_empty() {
+                return Err("registry-rollback".to_string());
+            }
+        }
+
+        let (mut registry, mut registry_hash, mut revision) = if let Some(trusted) = trusted {
+            let signed = SignedDeviceRegistryEnvelope::decode(&trusted.signed_envelope)
+                .map_err(|_| "registry-integrity".to_string())?;
+            if signed.hash().map_err(|_| "registry-integrity".to_string())?
+                != trusted.envelope_hash
+            {
+                return Err("registry-integrity".to_string());
+            }
+            let registry = signed
+                .registry()
+                .map_err(|_| "registry-integrity".to_string())?;
+            if registry.vault_id() != vault_id || registry.revision() != trusted.revision {
+                return Err("registry-integrity".to_string());
+            }
+            let remote_current = remote
+                .get(&trusted.revision)
+                .ok_or_else(|| "registry-rollback".to_string())?;
+            let encoded = provider
+                .get(&remote_current.key, cancellation)
+                .map_err(provider_code)?;
+            if encoded.len() as u64 != remote_current.size {
+                return Err("registry-integrity".to_string());
+            }
+            let remote_signed = decrypt_signed_device_registry(
+                &encoded,
+                vault_key,
+                vault_id,
+                trusted.revision,
+            )
+            .map_err(|_| "registry-integrity".to_string())?;
+            if remote_signed.hash().map_err(|_| "registry-integrity".to_string())?
+                != trusted.envelope_hash
+            {
+                return Err("registry-rollback".to_string());
+            }
+            (registry, trusted.envelope_hash, trusted.revision)
+        } else {
+            if !remote.contains_key(&1) {
+                return Err("registry-rollback".to_string());
+            }
+            let signed = self.fetch_signed_registry(
+                provider,
+                vault_key,
+                vault_id,
+                1,
+                &remote,
+                cancellation,
+            )?;
+            let registry = signed
+                .verify_genesis()
+                .map_err(|_| "registry-integrity".to_string())?;
+            if registry.vault_id() != vault_id {
+                return Err("registry-integrity".to_string());
+            }
+            let hash = signed.hash().map_err(|_| "registry-integrity".to_string())?;
+            let encoded = signed.encode().map_err(|_| "registry-integrity".to_string())?;
+            self.journal
+                .advance_trusted_device_registry(vault_id, None, 1, &hash, &encoded, now_ms)
+                .map_err(registry_journal_code)?;
+            (registry, hash, 1)
+        };
+
+        let highest = *remote.keys().next_back().ok_or_else(|| "registry-rollback".to_string())?;
+        if highest < revision {
+            return Err("registry-rollback".to_string());
+        }
+        while revision < highest {
+            let next_revision = revision
+                .checked_add(1)
+                .ok_or_else(|| "resource-limit".to_string())?;
+            let signed = self.fetch_signed_registry(
+                provider,
+                vault_key,
+                vault_id,
+                next_revision,
+                &remote,
+                cancellation,
+            )?;
+            let next = signed
+                .verify_successor(&registry, &registry_hash)
+                .map_err(|_| "registry-integrity".to_string())?;
+            let next_hash = signed.hash().map_err(|_| "registry-integrity".to_string())?;
+            let encoded = signed.encode().map_err(|_| "registry-integrity".to_string())?;
+            self.journal
+                .advance_trusted_device_registry(
+                    vault_id,
+                    Some((revision, &registry_hash)),
+                    next_revision,
+                    &next_hash,
+                    &encoded,
+                    now_ms,
+                )
+                .map_err(registry_journal_code)?;
+            registry = next;
+            registry_hash = next_hash;
+            revision = next_revision;
+        }
+        Ok((registry, registry_hash))
+    }
+
+    fn list_device_registries(
+        &self,
+        provider: &dyn SyncObjectProvider,
+        vault_id: &str,
+        cancellation: &ProviderCancellation,
+    ) -> Result<BTreeMap<u64, SyncObjectMetadata>, String> {
+        let prefix = format!("vpshell/v1/{vault_id}/registry/");
+        let mut registries = BTreeMap::new();
+        let mut cursor = None;
+        let mut seen_keys = BTreeSet::new();
+        loop {
+            let page = provider
+                .list(
+                    &prefix,
+                    cursor.as_deref(),
+                    REGISTRY_LIST_PAGE_SIZE,
+                    cancellation,
+                )
+                .map_err(provider_code)?;
+            for metadata in page.objects {
+                if !metadata.key.starts_with(&prefix)
+                    || !seen_keys.insert(metadata.key.clone())
+                    || metadata.size == 0
+                    || metadata.size > MAX_ENCRYPTED_REGISTRY_BYTES
+                {
+                    return Err("registry-integrity".to_string());
+                }
+                let revision = metadata
+                    .key
+                    .strip_prefix(&prefix)
+                    .and_then(|name| name.strip_suffix(".oreg"))
+                    .and_then(|revision| revision.parse::<u64>().ok())
+                    .filter(|revision| *revision > 0)
+                    .ok_or_else(|| "registry-integrity".to_string())?;
+                if metadata.key != registry_object_key(vault_id, revision)
+                    || registries.insert(revision, metadata).is_some()
+                    || registries.len() > MAX_REGISTRY_REVISIONS
+                {
+                    return Err("registry-integrity".to_string());
+                }
+            }
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            if cursor.as_ref().is_some_and(|current| next <= *current)
+                || !seen_keys.contains(&next)
+            {
+                return Err("registry-integrity".to_string());
+            }
+            cursor = Some(next);
+        }
+        Ok(registries)
+    }
+
+    fn fetch_signed_registry(
+        &self,
+        provider: &dyn SyncObjectProvider,
+        vault_key: &VaultKey,
+        vault_id: &str,
+        revision: u64,
+        remote: &BTreeMap<u64, SyncObjectMetadata>,
+        cancellation: &ProviderCancellation,
+    ) -> Result<SignedDeviceRegistryEnvelope, String> {
+        let metadata = remote
+            .get(&revision)
+            .ok_or_else(|| "registry-rollback".to_string())?;
+        let encoded = provider
+            .get(&metadata.key, cancellation)
+            .map_err(provider_code)?;
+        if encoded.len() as u64 != metadata.size {
+            return Err("registry-integrity".to_string());
+        }
+        decrypt_signed_device_registry(&encoded, vault_key, vault_id, revision)
+            .map_err(|_| "registry-integrity".to_string())
+    }
+
+    fn update_device_registry(
+        &self,
+        generation: u64,
+        registry: DeviceRegistry,
+        hash: String,
+    ) -> Result<(), String> {
+        let mut runtime = self.lock_runtime()?;
+        if runtime.generation != generation || !runtime.running {
+            return Err("cancelled".to_string());
+        }
+        let session = runtime
+            .session
+            .as_mut()
+            .ok_or_else(|| "cancelled".to_string())?;
+        session.device_registry = Some(registry);
+        session.device_registry_hash = Some(hash);
+        Ok(())
+    }
+
     fn check_generation(
         &self,
         generation: u64,
@@ -1412,6 +1774,25 @@ fn validate_local_folder_path(path: &str) -> Result<(), String> {
         return Err("Local Folder 路径为空、过长或包含控制字符".to_string());
     }
     Ok(())
+}
+
+fn registry_object_key(vault_id: &str, revision: u64) -> String {
+    format!("vpshell/v1/{vault_id}/registry/{revision}.oreg")
+}
+
+fn current_time_ms() -> Result<i64, String> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "系统时间早于 Unix epoch".to_string())?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| "系统时间超过支持范围".to_string())
+}
+
+fn registry_journal_code(error: crate::sync_outbox::JournalError) -> String {
+    match error.code {
+        JournalErrorCode::Replay | JournalErrorCode::Conflict => "registry-rollback".to_string(),
+        _ => journal_code(error),
+    }
 }
 
 fn validate_sync_password(password: &[u8]) -> Result<(), String> {
@@ -1514,6 +1895,7 @@ mod tests {
         app_store::SaveAppStateRequest,
         local_assets::InstallWallpaperRequest,
         sync_crypto::{SyncObjectKind, encrypt_sync_object},
+        sync_operation_signature::SignedOperationEnvelope,
         sync_provider::{
             ProviderError, ProviderErrorCode, ProviderResult, PutObjectOutcome, SyncObjectPage,
         },
@@ -2618,7 +3000,6 @@ mod tests {
         let status = coordinator.run_once(&test_app_store(&root), 2_000).unwrap();
         assert_eq!(status.phase, SyncCoordinatorPhase::Suspended);
         assert_eq!(status.last_error_code.as_deref(), Some("authentication"));
-        assert_eq!(status.merge_revision, 0);
     }
 
     #[test]
@@ -2812,9 +3193,16 @@ mod tests {
             .unwrap();
         assert!(initialized.configured);
         assert_eq!(initialized.phase, SyncCoordinatorPhase::Idle);
+        assert_eq!(initialized.schema_version, 2);
+        assert_eq!(initialized.device_registry_revision, 1);
+        assert!(initialized.local_device_authorized);
+        assert!(!initialized.key_rotation_required);
         let bootstrap = fs::read(remote.join(BOOTSTRAP_OBJECT_KEY)).unwrap();
         assert!(!String::from_utf8_lossy(&bootstrap).contains(password));
-        assert_eq!(decode_bootstrap(&bootstrap).unwrap().format_version, 1);
+        let bootstrap = decode_bootstrap(&bootstrap).unwrap();
+        assert_eq!(bootstrap.format_version, 1);
+        let registry_path = remote.join(registry_object_key(&bootstrap.vault_id, 1));
+        assert!(registry_path.is_file());
 
         coordinator.detach_session().unwrap();
         let wrong_password = coordinator
@@ -2848,6 +3236,70 @@ mod tests {
                 .phase,
             SyncCoordinatorPhase::Idle
         );
+
+        fs::remove_file(registry_path).unwrap();
+        let rollback = coordinator
+            .run_once(&test_app_store(&root), 3_000)
+            .unwrap();
+        assert_eq!(rollback.phase, SyncCoordinatorPhase::Suspended);
+        assert_eq!(rollback.last_error_code.as_deref(), Some("registry-rollback"));
+    }
+
+    #[test]
+    fn configured_cycle_rejects_self_signed_event_from_unregistered_device() {
+        let root = TempDir::new("unregistered-device");
+        let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        coordinator
+            .configure_provider_inner(
+                provider.clone(),
+                Zeroizing::new("fixture-password".to_string()),
+                LocalFolderSetupMode::Initialize,
+                Argon2Parameters::minimum_for_tests(),
+                "Memory",
+            )
+            .unwrap();
+        let (vault_id, vault_key) = {
+            let runtime = coordinator.lock_runtime().unwrap();
+            let session = runtime.session.as_ref().unwrap();
+            (session.vault_id.clone(), Arc::clone(&session.vault_key))
+        };
+        let unknown_device = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        let operation_bytes = operation(unknown_device, 1);
+        let operation_id = serde_json::from_slice::<serde_json::Value>(&operation_bytes).unwrap()
+            ["operationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let operation = crate::sync_merge::MergeOperation::decode(&operation_bytes).unwrap();
+        let signing_key = DeviceSigningKey::from_bytes([19; 32]);
+        let signed = SignedOperationEnvelope::sign(&operation, &signing_key)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let encrypted = encrypt_sync_object(
+            vault_key.as_ref(),
+            &vault_id,
+            SyncObjectKind::Event,
+            &operation_id,
+            Some(unknown_device),
+            Some(1),
+            &signed,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider.insert(
+            &format!("vpshell/v1/{vault_id}/segments/{unknown_device}/1.oseg"),
+            encrypted,
+        );
+
+        let status = coordinator
+            .run_once(&test_app_store(&root), 2_000)
+            .unwrap();
+        assert_eq!(status.phase, SyncCoordinatorPhase::Suspended);
+        assert_eq!(status.last_error_code.as_deref(), Some("authentication"));
+        assert_eq!(status.merge_revision, 0);
     }
 
     #[test]

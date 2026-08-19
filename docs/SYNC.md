@@ -2,7 +2,7 @@
 
 当前实现补充：`onboardingCompleted`、默认监控采样频率与背景可见度已分别作为第三、第四、第五个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；它们分别只含一个布尔字段、一个 5–300 秒整数和一个 5%–65% 整数。通过秘密扫描的命令、远端路径与具名非敏感参数历史，以及 Rust 证明的已认证连接历史，使用独立 `history` 实体、稳定 UUID 和 tombstone 接入同一链路；含明显秘密、敏感/未知参数的记录、没有真实时间的旧路径和没有认证事实的旧/伪造连接条目保持本机。背景使用独立 `background` 实体和加密分块；PNG 由 Rust 解码并规范化，JPEG/WebP 通过结构、RIFF/chunk 或 JPEG 结束标记校验后保留原始编码；原始 URL、引导内容、运行中监控状态及设备本地数据仍不入同步包。
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible/Gateway 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、本机 operation Ed25519 签名封套，以及默认关闭的独立凭据 vault。桌面五种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth、S3 SigV4 与 Gateway 登录密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录；Gateway 可选 TOTP 只进入当次登录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。真实 Gateway 服务、远端 registry 锚定的 operation 授权验签、系统钥匙串恢复写回和密钥轮换流程仍未实现；SFTP/S3/Gateway 没有条件删除能力而保守保留旧密文，真实外部服务器与多设备矩阵也仍需验收。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible/Gateway 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、本机 operation Ed25519 签名封套，以及默认关闭的独立凭据 vault。桌面五种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth、S3 SigV4 与 Gateway 登录密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录；Gateway 可选 TOTP 只进入当次登录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。协调器现在以签名、加密且按 revision 不可变的远端 registry 链作为授权锚，并在 schema-v4 journal 持久化已验证水位；设备管理写操作、系统钥匙串恢复写回和 VMK/CVK 轮换流程仍未实现。SFTP/S3/Gateway 没有条件删除能力而保守保留旧密文，真实 Gateway、外部服务器与多设备矩阵也仍需验收。
 
 ### 当前 v1 密码学边界
 
@@ -10,7 +10,7 @@
 
 业务对象按 event/blob/index/checkpoint/device-registry 五个 HKDF-SHA256 label 派生不同密钥；vault ID 参与 extract salt，对象类型、对象 ID、设备/序号、算法和密文长度进入 AAD。对象明文最多 16 MiB，JSON 信封最多 24 MiB，keyslot 最多 16 KiB；UUID、base64url、类型与序号组合逐字段验证，未知字段和未知版本拒绝。每次生产加密都从 OS CSPRNG 取得随机 nonce；固定 nonce/salt 入口只在单元测试中用于稳定向量。
 
-本机实体 changefeed 与冲突解决 operation 现先进入严格 Ed25519 version-1 签名封套，再由 event AEAD 加密。私钥由 OS CSPRNG 生成、只保存到独立系统凭据条目且 Rust 内存副本清零；签名以固定 domain 和长度前缀绑定 canonical device UUID 与原始 operation 字节。registry API 只为活动设备返回登记公钥；远端协调器 trust anchor 与 registry 防回滚链仍待下一阶段，因此封套自验当前不承担设备授权。
+本机实体 changefeed 与冲突解决 operation 先进入严格 Ed25519 version-1 签名封套，再由 event AEAD 加密。私钥由 OS CSPRNG 生成、只保存到独立系统凭据条目且 Rust 内存副本清零；签名以固定 domain 和长度前缀绑定 canonical device UUID 与原始 operation 字节。生产配置会创建或验证 `registry/{revision}.oreg` 连续链；每个 successor 绑定前序信封 SHA-256，并由前后版本均为 active 的登记设备签名。SQLite 持久水位要求远端仍包含已信任 revision 的同一哈希，缺失、回退、断层、分叉、未知/撤销设备或 event 内外 device ID 不一致均在业务 merge 前停止。旧裸 v1 operation 只由测试/迁移入口接受，配置后的远端周期只接受 registry 授权的签名封套。
 
 该格式能认证对象身份并阻止把密文搬到另一域/vault/设备/序号后解密，但相同完整对象的重放需要后续 outbox/head/sequence 状态机检测。当前没有任何 IPC 返回 VMK、KEK、密码或解密明文；产品流程开放桌面 Local Folder、标准 HTTPS WebDAV、固定 host-key 的 SFTP、SigV4 S3-compatible 和自建 Gateway。
 
@@ -87,13 +87,13 @@ COMMIT;
 
 手动 worker 读取 changefeed 后，在独立 `vpshell-sync.sqlite3` 的一个事务内生成带 observed stamp 的具名 operation、AEAD 加密、更新 merge state、推进设备 seq/HLC 并写 outbox；journal 提交成功后才按 operation ID 从业务库确认 change。若进程在两个提交之间退出，下次运行会解密并核对 journal 中同 ID operation 的实体类型、身份与公开 payload，相同则幂等确认，不同则 fail closed。这样不依赖虚假的跨库事务，也不会出现已保存业务状态永久漏传。changefeed 只含白名单公开字段；本地主机和自建脚本 ID 分别通过持久随机 UUID 映射到协议实体，五组已接线偏好使用不同的固定协议 UUID，以便独立初始化的设备收敛。主机 credentialRef、私钥/路径、host-key pin、Token 和 provider 凭据不会写入其中；脚本只允许 name/body/source/risk/parameters，description/category/内置脚本不进入同步，正文、来源或参数未通过秘密扫描时不入队。原先安全的脚本变为不安全时只发布 tombstone，不上传新内容。终端外观只允许完整的 fontFamily/fontSize/lineHeight，行高以百分之一整数编码；行为偏好只允许完整布尔值 autoUploadEditedFiles/packageTransfersEnabled；背景可见度只允许 5–65 的整数百分比。自定义字体文件、`customFontName`、`externalEditorPath` 和背景图片来源/资产保持本机。
 
-当前 `sync_outbox.rs` 使用独立 `vpshell-sync.sqlite3` schema v2 落实 journal 内原子边界，并持久保存随机本机 device ID 与单调 HLC。调用者只能通过 Rust 内部闭包修改同一个 SQLite transaction；闭包不得执行网络、文件写入或其他不可回滚副作用。`sync_operations` 只保存已通过 v1 严格解析的加密信封，`sync_outbox` 保存状态/次数/租约/稳定错误码，业务明文、密码、私钥、credential ref、Token 和 provider 凭据不进入 journal。未发布最多 10,000 对象/256 MiB，整个 journal 最多 50,000 对象/384 MiB，数据库文件启动硬限制 512 MiB；已发布本地对象保留 30 天，远端 receipt 保留 90 天，但每设备持久高水位不会清理。
+当前 `sync_outbox.rs` 使用独立 `vpshell-sync.sqlite3` schema v4 落实 journal 内原子边界，并持久保存随机本机 device ID、单调 HLC 与每个 vault 的已验证 registry revision/哈希/签名信封。调用者只能通过 Rust 内部闭包修改同一个 SQLite transaction；闭包不得执行网络、文件写入或其他不可回滚副作用。`sync_operations` 只保存已通过 v1 严格解析的加密信封，`sync_outbox` 保存状态/次数/租约/稳定错误码，业务明文、密码、私钥、credential ref、Token 和 provider 凭据不进入 journal。未发布最多 10,000 对象/256 MiB，整个 journal 最多 50,000 对象/384 MiB，数据库文件启动硬限制 512 MiB；已发布本地对象保留 30 天，远端 receipt 保留 90 天，但每设备持久高水位不会清理。
 
 远端 receipt 与 merge state 提交后，协调器从 journal 分别读取完整主机、脚本、setting、background 和 history 投影，再交给 `vpshell-state.sqlite3` schema v11 的独立事务。schema v9 为 history 建立稳定 ID、内容指纹和独立投影水位；schema v10 新增不从旧快照回填的认证连接事实表；schema v11 新增固定 background 实体的内容指纹与独立投影水位。业务库要求 vault 绑定一致、没有尚未交给 journal 的本地 change，并为五个实体域分别以 `(merge_revision, projection_hash)` 拒绝回退或同 revision 换内容。background 投影仅接受固定 UUID 的因果 tombstone（无背景）或完整 `kind=managed-blob/blobId` 字段；协调器必须先恢复并安装被引用的 PNG，才允许投影 AppState。history 投影在主机之后按 `kind` 分流命令、每主机路径、具名参数与已认证连接；连接只接受活动 host、受限路径、严格时间和可信本地/远端事实，旧版或前端自行构造项保持本机。缺少必需字段、额外字段、错误类型、未知主机或超过 AppState 上限时对应事务整体回滚。专用投影不生成回声 changefeed；两个数据库之间以及五个业务投影事务之间崩溃时不伪称原子，下次周期从持久 merge state 重试。
 
 worker claim 使用两分钟租约；进程中断后的过期租约不会立即重放，而是进入 `retry_wait`。网络、超时、限流和远端暂不可用按 2/4/8/16/32 秒退避，最多六次且单次最长五分钟；协议、认证、不可变冲突和完整性错误直接进入 `permanent_failure`。取消进入 `paused`，只能显式恢复且不重置尝试次数；`published` 是不可逆终态。损坏、截断或超过 512 MiB 的 journal 最多保留两个隔离备份，新库写入 `reconcile-required`；协调器会保持停止并只报告状态，远端核对和显式解除流程未接线前不能自动继续上传。
 
-远端对象先做严格信封解析与 AEAD 认证，再在同一事务执行合并回调、写 operation/receipt 并推进设备连续序号。重复 key+hash 幂等忽略；序号回退、缺口、相同密文换 key、或相同 `(vault, kind, object_id)` 出现不同密文均在业务回调前拒绝。90 天后 receipt 可清理以控制容量，此后旧序号仍由设备高水位拒绝，不会重新应用。哈希链、设备签名和见证 head 属于后续协议层，当前水位不能独立证明远端完整历史。
+远端 event 先做严格信封解析与 AEAD 认证，再按已锚定 registry 的活动设备公钥验证 operation 签名和内外 device ID，随后才在同一事务执行合并回调、写 operation/receipt 并推进设备连续序号。重复 key+hash 幂等忽略；序号回退、缺口、相同密文换 key、或相同 `(vault, kind, object_id)` 出现不同密文均在业务回调前拒绝。90 天后 receipt 可清理以控制容量，此后旧序号仍由设备高水位拒绝，不会重新应用。registry 有独立前序哈希链；event segment 的逐设备 ciphertext 链与见证 head 仍属于后续协议层，因此当前实现不能向丢失本地水位的新设备证明远端完整历史。
 
 每台设备维护：
 
@@ -105,7 +105,7 @@ worker claim 使用两分钟租约；进程中断后的过期租约不会立即�
 
 HLC 不是权限或真实性来源，只解决时间漂移下的合并排序。签名、AEAD 和已信任设备记录负责完整性验证。
 
-当前内部 `sync_recovery` device registry 为严格 schema v1，最多 32 台，只保存 canonical device UUID、1–128 byte 非控制字符标签、公开 32-byte 签名键、时间与 active/revoked 状态。更新使用 expected revision；相同设备的公钥和加入身份不可替换，撤销单调且禁止撤销最后活动设备，合并时撤销优先并拒绝身份冲突。registry 作为 `device-registry` 域对象加密，恢复演练要求发布者在该 registry 中仍为 active。本机新 operation 已签名，但 event segment 没有独立签名，协调器也尚未验证远端 registry 的签名/历史链；当前仍不得把封套自带公钥视为授权来源，这些规则不能独立抵抗远端回滚到旧 registry。
+当前内部 `sync_recovery` device registry 为严格 schema v1，最多 32 台，只保存 canonical device UUID、1–128 byte 非控制字符标签、公开 32-byte 签名键、时间与 active/revoked 状态。更新使用 expected revision；相同设备的公钥和加入身份不可替换，撤销单调且禁止撤销最后活动设备，合并时撤销优先并拒绝身份冲突。registry 的签名信封使用独立 domain、前序信封哈希和发布者身份，随后进入 `device-registry` AEAD 域；协调器只信任连续验证并写入本地水位的版本。封套自带公钥不再是生产远端授权来源。设备管理写入 UI、受控新增/重命名/撤销发布和撤销后的 VMK/CVK 轮换仍待实现。
 
 ## 6. Provider 抽象
 
