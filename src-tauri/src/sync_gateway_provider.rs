@@ -173,7 +173,7 @@ impl ReqwestGatewayObjectTransport {
     }
 
     fn object_url(&self, key: &str) -> ProviderResult<Url> {
-        let mut url = endpoint_url(&self.endpoint, "objects/")?;
+        let mut url = endpoint_url(&self.endpoint, "objects")?;
         url.path_segments_mut()
             .map_err(|_| {
                 provider_error(ProviderErrorCode::InvalidInput, "Gateway endpoint 路径无效")
