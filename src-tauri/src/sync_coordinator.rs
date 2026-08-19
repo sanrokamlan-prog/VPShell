@@ -718,16 +718,16 @@ impl SyncCoordinatorManager {
             .and_then(|snapshot| {
                 let snapshot =
                     serde_json::to_value(snapshot).map_err(|_| "app-state-handoff".to_string())?;
-                let state_json = snapshot["stateJson"]
-                    .as_str()
-                    .ok_or_else(|| "app-state-handoff".to_string())?;
+                let Some(state_json) = snapshot["stateJson"].as_str() else {
+                    return Ok(None);
+                };
                 let state: serde_json::Value = serde_json::from_str(state_json)
                     .map_err(|_| "app-state-handoff".to_string())?;
                 Ok(state["wallpaper"]["managedBlobId"]
                     .as_str()
                     .map(str::to_string))
             })?;
-        let gc = run_blob_gc(
+        run_blob_gc(
             provider,
             &self.journal,
             cancellation,
@@ -737,7 +737,7 @@ impl SyncCoordinatorManager {
             now_ms,
         )?;
         Ok(CycleCounts {
-            uploaded: uploaded.saturating_add(gc.published_objects),
+            uploaded,
             downloaded,
         })
     }
