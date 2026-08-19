@@ -423,6 +423,10 @@ export const initialState: AppState = {
     endpoint: "",
     remotePath: "/vpshell",
     username: "",
+    s3Region: "us-east-1",
+    s3Bucket: "",
+    s3Prefix: "vpshell",
+    s3PathStyle: true,
     totpEnabled: false,
     syncSecrets: false,
   },
@@ -493,6 +497,10 @@ export function migratePersistedAppState(value: AppState): AppState {
     ...initialState.wallpaper,
     ...(value.wallpaper ?? {}),
   };
+  const sync = {
+    ...initialState.sync,
+    ...(value.sync ?? {}),
+  };
   if ((wallpaper.source !== "local" && wallpaper.source !== "url")
     || !/^[0-9a-f]{64}$/.test(wallpaper.managedBlobId ?? "")) {
     delete wallpaper.managedBlobId;
@@ -507,6 +515,7 @@ export function migratePersistedAppState(value: AppState): AppState {
     parameterHistory: normalizeParameterHistoryEntries(value.parameterHistory),
     connectionHistory: (value.connectionHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
     pathHistory,
+    sync,
     wallpaper,
     settings,
     onboardingCompleted: value.onboardingCompleted ?? false,

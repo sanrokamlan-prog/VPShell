@@ -23,15 +23,18 @@ VPShell uses `argon2` 0.5.3, `chacha20poly1305` 0.10.1 and `hkdf` 0.12.4 from Ru
 Apache-2.0. Argon2's pure-Rust `blake2` and `password-hash` dependencies retain the same upstream
 dual-license boundary. Default features are disabled and only the alloc/zeroize features recorded
 in `docs/DEVELOPMENT.md` are enabled. The self-hosted Relay reference also uses the already locked
-`hmac` 0.12.1 crate through its public API for challenge-bound HMAC-SHA256 proofs; it does not
-terminate SSH or add a TLS/transport implementation. No third-party source was copied into VPShell;
+`hmac` 0.12.1 crate through its public API for challenge-bound HMAC-SHA256 proofs and S3 SigV4
+signing; it does not terminate SSH or add a TLS/transport implementation. The S3 client also reuses
+the already locked `sha2`, `reqwest` and `quick-xml` public APIs; no AWS SDK or new dependency was
+added. No third-party source was copied into VPShell;
 the crates are used through their public APIs and remain independently replaceable through the
 versioned v1 format and fixed compatibility vectors.
 
 ## Sync provider parsing
 
 VPShell directly uses `quick-xml` 0.41.0 and `percent-encoding` 2.3.2, both distributed under the
-MIT license, for bounded WebDAV multistatus parsing and validated href decoding. Both packages
+MIT license, for bounded WebDAV multistatus and S3 ListObjectsV2 XML parsing plus validated href
+decoding. Both packages
 were already present as transitive dependencies of the locked Tauri/reqwest graph; their default
 features remain disabled. No third-party WebDAV implementation or source code was copied.
 

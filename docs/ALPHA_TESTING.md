@@ -134,7 +134,7 @@
 - 凭据 vault 夹具必须确认默认关闭、revision 冲突、仅活动且已授权设备可访问、最后授权设备保护、撤销不可重新授权和轮换提示；错误 CVK、AAD 身份搬移、类型/大小、未知字段和跨 vault 必须拒绝。
 - 对 SSH 密码、私钥口令、OpenSSH 私钥和 access token 逐类往返，扫描 keyslot/信封/object key/稳定错误，确保不含 secret 或本机 credential reference。静态安全测试必须持续禁止该模块新增 Tauri command/event/日志；当前没有 UI 或钥匙串写回，不能用源码测试宣称凭据同步可用。
 - 扩展 provider adapter 夹具必须对 SFTP/S3/Gateway 复用同一不可变测试：首次创建、相同内容幂等、不同内容冲突、提交后回读、分页、非法/重复/越界 list、24 MiB 上限和取消。SFTP 另测 host-key/root/symlink/special，S3 另测 HTTPS/region/bucket/prefix，Gateway 另测六位 TOTP 只在登录消费及底层含秘密错误净化。
-- B8 必须补真实 OpenSSH SFTP（不同服务器/权限/host-key 变化）、MinIO 或其他 S3-compatible（SigV4/path-style/延迟 list/条件写）及自建 Gateway HTTP 的断网、超时、限流、认证、重复请求和篡改测试；当前 trait fake 不能替代这些结果。
+- Linux Actions 已用单一 OpenSSH fixture 覆盖 SFTP 产品路径，并用独立重算 SigV4 的自建 HTTPS fixture 覆盖 S3 path-style、ListObjectsV2 continuation、GET、`If-None-Match: *` 条件写、回读和冲突。B8 外部矩阵仍必须补不同 OpenSSH 服务器/权限/host-key 变化、AWS/MinIO/其他 S3-compatible（virtual-hosted/延迟 list/409-412/时钟偏差）及自建 Gateway HTTP 的断网、超时、限流、认证、重复请求和篡改测试；当前 trait fake 和单一自建 fixture 都不能替代这些结果。
 - `sync_protocol_regression` 源码夹具应在每次协议改动后运行并记录：未知版本拒绝、AEAD/对象身份错误、journal replay 与 published finality、merge order convergence、截断状态和取消诊断。它不访问网络，也不替代真实 provider、两台设备或 Windows/macOS/Android 验收。
 
 ### L. Android Preview 共享契约（Linux 可验证部分）

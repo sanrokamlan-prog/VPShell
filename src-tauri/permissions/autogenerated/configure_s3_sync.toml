@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-configure-s3-sync"
+description = "Enables the configure_s3_sync command without any pre-configured scope."
+commands.allow = ["configure_s3_sync"]
+
+[[permission]]
+identifier = "deny-configure-s3-sync"
+description = "Denies the configure_s3_sync command without any pre-configured scope."
+commands.deny = ["configure_s3_sync"]

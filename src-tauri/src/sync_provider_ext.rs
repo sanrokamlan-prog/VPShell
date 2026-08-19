@@ -269,7 +269,13 @@ pub(crate) struct S3ProviderConfig {
 
 impl S3ProviderConfig {
     pub(crate) fn validate(&self) -> ProviderResult<()> {
-        validate_https_endpoint(&self.endpoint, "S3")?;
+        let endpoint = validate_https_endpoint(&self.endpoint, "S3")?;
+        if endpoint.path() != "/" {
+            return Err(ProviderError::new(
+                ProviderErrorCode::InvalidInput,
+                "S3 endpoint 不能包含基础路径",
+            ));
+        }
         if self.region.is_empty()
             || self.region.len() > 128
             || !self
@@ -500,7 +506,7 @@ fn valid_sha256_fingerprint(value: &str) -> bool {
     })
 }
 
-fn validate_https_endpoint(endpoint: &str, label: &str) -> ProviderResult<()> {
+fn validate_https_endpoint(endpoint: &str, label: &str) -> ProviderResult<Url> {
     if endpoint.is_empty() || endpoint.len() > MAX_ENDPOINT_BYTES {
         return Err(ProviderError::new(
             ProviderErrorCode::InvalidInput,
@@ -525,7 +531,7 @@ fn validate_https_endpoint(endpoint: &str, label: &str) -> ProviderResult<()> {
             format!("{label} endpoint 必须是无凭据/query/fragment 的 HTTPS URL"),
         ));
     }
-    Ok(())
+    Ok(url)
 }
 
 fn valid_bucket(bucket: &str) -> bool {
@@ -720,6 +726,9 @@ mod tests {
         exercise_provider(&provider);
         let mut invalid = s3_config();
         invalid.endpoint = "http://access:secret@example.com/?x=1".into();
+        assert!(S3SyncProvider::connect(invalid, FakeTransport::default()).is_err());
+        let mut invalid = s3_config();
+        invalid.endpoint = "https://s3.example.com/base/".into();
         assert!(S3SyncProvider::connect(invalid, FakeTransport::default()).is_err());
         let mut invalid = s3_config();
         invalid.bucket = "UPPER".into();

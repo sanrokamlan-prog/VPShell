@@ -881,7 +881,9 @@ fn inspect_json(
             if key == Some("credentialRef") {
                 crate::file_transfer::validate_optional_reference(Some(value), "ssh-")?;
             } else if key == Some("providerCredentialRef") {
-                crate::sync_provider_credentials::validate_webdav_credential_reference(value)?;
+                crate::sync_provider_credentials::validate_sync_provider_credential_reference(
+                    value,
+                )?;
             } else if key == Some("providerCaRef") {
                 crate::sync_provider_ca::validate_webdav_ca_reference(value)?;
             } else if key == Some("passphraseRef") {
@@ -912,8 +914,11 @@ fn inspect_json(
             }
         }
         _ => {
+            if key == Some("providerCredentialRef") {
+                return Err("本地状态同步 provider 凭据引用必须是字符串".to_string());
+            }
             if key == Some("providerCaRef") {
-                return Err("本地状态 WebDAV CA 引用必须是字符串".to_string());
+                return Err("本地状态同步 provider CA 引用必须是字符串".to_string());
             }
         }
     }
@@ -5577,7 +5582,7 @@ mod tests {
     }
 
     #[test]
-    fn webdav_provider_references_are_local_only_and_never_enter_changefeed() {
+    fn sync_provider_references_are_local_only_and_never_enter_changefeed() {
         let root = TempDir::new("webdav-provider-reference");
         let store = AppStore::load(root.0.clone()).expect("load store");
         store
@@ -5614,6 +5619,27 @@ mod tests {
         assert_eq!(metadata, "[\"sync\"]");
         assert!(!metadata.contains(&reference));
         assert!(!metadata.contains(&ca_reference));
+
+        let s3_reference = format!("sync-s3-{}", Uuid::new_v4());
+        state["sync"]["provider"] = Value::String("s3".to_string());
+        state["sync"]["username"] = Value::String(String::new());
+        state["sync"]["providerCredentialRef"] = Value::String(s3_reference.clone());
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 2,
+            })
+            .expect("save local S3 provider reference");
+        assert_eq!(store.pending_entity_sync_changes(128).unwrap(), initial);
+        let s3_metadata: String = connection
+            .query_row(
+                "SELECT domains_json FROM app_events ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(s3_metadata, "[\"sync\"]");
+        assert!(!s3_metadata.contains(&s3_reference));
     }
 
     #[test]
@@ -8042,6 +8068,15 @@ mod tests {
         android_refs["sync"]["providerCaRef"] =
             Value::String("sync-webdav-ca-not-a-uuid".to_string());
         assert!(validate_state_json(&android_refs.to_string()).is_err());
+        android_refs["sync"]["providerCredentialRef"] =
+            Value::String(format!("sync-s3-{}", Uuid::new_v4()));
+        android_refs["sync"]["providerCaRef"] =
+            Value::String(format!("sync-webdav-ca-{}", Uuid::new_v4()));
+        assert!(validate_state_json(&android_refs.to_string()).is_ok());
+        android_refs["sync"]["providerCredentialRef"] = Value::Number(1.into());
+        assert!(validate_state_json(&android_refs.to_string()).is_err());
+        android_refs["sync"]["providerCredentialRef"] =
+            Value::String(format!("sync-s3-{}", Uuid::new_v4()));
         android_refs["sync"]["providerCaRef"] = Value::Number(1.into());
         assert!(validate_state_json(&android_refs.to_string()).is_err());
 

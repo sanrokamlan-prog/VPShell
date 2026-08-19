@@ -211,6 +211,35 @@ jobs:
           done
           echo "VPSHELL_WEBDAV_CA_TEST_ENDPOINT=https://127.0.0.1:24443/" >> "$GITHUB_ENV"
           echo "VPSHELL_WEBDAV_CA_TEST_PEM=$TLS_DIR/ca.pem" >> "$GITHUB_ENV"
+      - name: Set up ephemeral S3-compatible SigV4 fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TLS_DIR="$RUNNER_TEMP/vpshell-webdav-tls"
+          export VPSHELL_S3_FIXTURE_ACCESS_KEY_ID='VPSHELLCIFIXTURE'
+          export VPSHELL_S3_FIXTURE_SECRET_ACCESS_KEY='vpshell-ci-fixture-secret-key'
+          nohup python3 .github/scripts/s3_sigv4_fixture.py \
+            --cert "$TLS_DIR/server.pem" \
+            --key "$TLS_DIR/server.key" \
+            --port 24444 >"$RUNNER_TEMP/vpshell-s3-fixture.log" 2>&1 &
+          echo "$!" > "$TLS_DIR/s3-server.pid"
+          for attempt in {1..20}; do
+            if curl --silent --show-error \
+              --cacert "$TLS_DIR/ca.pem" \
+              --output /dev/null \
+              https://127.0.0.1:24444/vpshell-ci/; then
+              break
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "VPSHELL_S3_TEST_ENDPOINT=https://127.0.0.1:24444/" >> "$GITHUB_ENV"
+          echo "VPSHELL_S3_TEST_CA=$TLS_DIR/ca.pem" >> "$GITHUB_ENV"
+          echo "VPSHELL_S3_TEST_ACCESS_KEY_ID=$VPSHELL_S3_FIXTURE_ACCESS_KEY_ID" >> "$GITHUB_ENV"
+          echo "VPSHELL_S3_TEST_SECRET_ACCESS_KEY=$VPSHELL_S3_FIXTURE_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

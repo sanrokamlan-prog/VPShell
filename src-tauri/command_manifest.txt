@@ -25,6 +25,7 @@ resize_terminal
 stop_terminal
 delete_credential
 store_webdav_credential
+store_s3_credential
 install_webdav_ca
 delete_webdav_ca
 import_finalshell
@@ -35,6 +36,7 @@ list_sync_conflicts
 configure_local_folder_sync
 configure_webdav_sync
 configure_sftp_sync
+configure_s3_sync
 run_sync_once
 resolve_sync_conflict
 cancel_sync

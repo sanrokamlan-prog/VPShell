@@ -63,6 +63,7 @@ mod sync_provider_ext;
 #[allow(dead_code)] // The coordinator/UI phases consume recovery and encrypted export APIs.
 mod sync_recovery;
 mod sync_scheduler;
+mod sync_s3_provider;
 mod sync_sftp_provider;
 mod transfer_manager;
 
@@ -1655,6 +1656,39 @@ async fn configure_sftp_sync(
     Ok(status)
 }
 
+#[tauri::command]
+async fn configure_s3_sync(
+    app: tauri::AppHandle,
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    ca_manager: State<'_, sync_provider_ca::SyncProviderCaManager>,
+    scheduler: State<'_, sync_scheduler::AutomaticSyncScheduler>,
+    store: State<'_, app_store::AppStore>,
+    request: sync_coordinator::ConfigureS3SyncRequest,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    sync_scheduler::AutomaticSyncScheduler::ensure_supported()?;
+    let coordinator = coordinator.inner().clone();
+    let ca_manager = ca_manager.inner().clone();
+    let store = store.inner().clone();
+    let worker_coordinator = coordinator.clone();
+    let worker_store = store.clone();
+    let provider_ca_ref = request.provider_ca_reference().map(str::to_string);
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let trusted_ca_pem = provider_ca_ref
+            .as_deref()
+            .map(|reference| ca_manager.read(reference))
+            .transpose()?;
+        worker_coordinator.configure_s3(request, trusted_ca_pem)?;
+        worker_coordinator.status_with_app_store(&worker_store)
+    })
+    .await
+    .map_err(|error| format!("S3 同步配置任务异常结束: {error}"))??;
+    if let Err(error) = scheduler.start(app, coordinator.clone(), store) {
+        let _ = coordinator.detach_session();
+        return Err(error);
+    }
+    Ok(status)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunSyncOnceResult {
@@ -1863,7 +1897,7 @@ fn stop_terminal(manager: State<'_, TerminalManager>, session_id: String) -> Res
 #[tauri::command]
 fn delete_credential(reference: String) -> Result<(), String> {
     if file_transfer::validate_optional_reference(Some(&reference), "ssh-").is_err() {
-        sync_provider_credentials::validate_webdav_credential_reference(&reference)?;
+        sync_provider_credentials::validate_sync_provider_credential_reference(&reference)?;
     }
     let mut deleted = false;
     let mut last_error = None;
@@ -1893,6 +1927,17 @@ async fn store_webdav_credential(
     })
     .await
     .map_err(|error| format!("WebDAV 凭据保存任务异常结束: {error}"))?
+}
+
+#[tauri::command]
+async fn store_s3_credential(
+    request: sync_provider_credentials::StoreS3CredentialRequest,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sync_provider_credentials::store_s3_credential(request)
+    })
+    .await
+    .map_err(|error| format!("S3 凭据保存任务异常结束: {error}"))?
 }
 
 #[tauri::command]
@@ -2003,6 +2048,7 @@ pub fn run() {
             stop_terminal,
             delete_credential,
             store_webdav_credential,
+            store_s3_credential,
             install_webdav_ca,
             delete_webdav_ca,
             import_finalshell,
@@ -2013,6 +2059,7 @@ pub fn run() {
             configure_local_folder_sync,
             configure_webdav_sync,
             configure_sftp_sync,
+            configure_s3_sync,
             run_sync_once,
             resolve_sync_conflict,
             cancel_sync,

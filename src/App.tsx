@@ -626,6 +626,9 @@ function App() {
   const [webDavCaPath, setWebDavCaPath] = useState("");
   const [webDavCaLabel, setWebDavCaLabel] = useState("");
   const [webDavUseSystemCa, setWebDavUseSystemCa] = useState(false);
+  const [s3AccessKeyId, setS3AccessKeyId] = useState("");
+  const [s3SecretAccessKey, setS3SecretAccessKey] = useState("");
+  const [s3SessionToken, setS3SessionToken] = useState("");
   const [syncSetupMode, setSyncSetupMode] = useState<"unlock" | "initialize">("unlock");
   const [desktopSyncStatus, setDesktopSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
   const [desktopSyncError, setDesktopSyncError] = useState<string | null>(null);
@@ -2230,12 +2233,12 @@ function App() {
   }
 
   async function configureDesktopSync() {
-    if (appState.sync.provider !== "local" && appState.sync.provider !== "webdav" && appState.sync.provider !== "sftp") {
-      showToast("当前只开放 Local Folder、WebDAV 与 SFTP 同步");
+    if (appState.sync.provider === "gateway") {
+      showToast("自建 Gateway 尚未开放");
       return;
     }
     if (appState.sync.provider !== "sftp" && !appState.sync.endpoint.trim()) {
-      showToast(appState.sync.provider === "local" ? "请输入已存在的同步目录" : "请输入 WebDAV HTTPS endpoint");
+      showToast(appState.sync.provider === "local" ? "请输入已存在的同步目录" : "请输入 HTTPS endpoint");
       return;
     }
     const sftpHost = appState.sync.provider === "sftp"
@@ -2251,6 +2254,10 @@ function App() {
     }
     if (appState.sync.provider === "sftp" && !appState.sync.remotePath.trim()) {
       showToast("请输入已存在的 SFTP 同步根目录");
+      return;
+    }
+    if (appState.sync.provider === "s3" && (!appState.sync.s3Region.trim() || !appState.sync.s3Bucket.trim())) {
+      showToast("请输入 S3 region 与 bucket");
       return;
     }
     if (!syncPassword) {
@@ -2271,19 +2278,42 @@ function App() {
           request: { password: webDavPassword },
         });
       }
-      if (provider === "webdav" && webDavCaPath) {
+      const hasNewS3Credential = Boolean(s3AccessKeyId || s3SecretAccessKey || s3SessionToken);
+      if (provider === "s3" && hasNewS3Credential && (!s3AccessKeyId || !s3SecretAccessKey)) {
+        throw new Error("S3 Access Key ID 与 Secret Access Key 必须同时填写");
+      }
+      if (provider === "s3" && hasNewS3Credential) {
+        createdCredentialRef = await invoke<string>("store_s3_credential", {
+          request: {
+            accessKeyId: s3AccessKeyId,
+            secretAccessKey: s3SecretAccessKey,
+            sessionToken: s3SessionToken || undefined,
+          },
+        });
+      }
+      if ((provider === "webdav" || provider === "s3") && webDavCaPath) {
         createdCaRef = await invoke<string>("install_webdav_ca", {
           request: { path: webDavCaPath },
         });
       }
-      const providerCredentialRef = provider === "webdav" && username
-        ? createdCredentialRef ?? appState.sync.providerCredentialRef
-        : undefined;
-      const providerCaRef = provider === "webdav"
+      const savedProviderCredentialRef = provider === "webdav"
+        ? (appState.sync.providerCredentialRef?.startsWith("sync-webdav-") ? appState.sync.providerCredentialRef : undefined)
+        : provider === "s3"
+          ? (appState.sync.providerCredentialRef?.startsWith("sync-s3-") ? appState.sync.providerCredentialRef : undefined)
+          : undefined;
+      const providerCredentialRef = provider === "webdav"
+        ? (username ? createdCredentialRef ?? savedProviderCredentialRef : undefined)
+        : provider === "s3"
+          ? createdCredentialRef ?? savedProviderCredentialRef
+          : undefined;
+      const providerCaRef = provider === "webdav" || provider === "s3"
         ? createdCaRef ?? (webDavUseSystemCa ? undefined : appState.sync.providerCaRef)
         : undefined;
       if (provider === "webdav" && Boolean(username) !== Boolean(providerCredentialRef)) {
         throw new Error("WebDAV 用户名需要对应的已保存密码");
+      }
+      if (provider === "s3" && !providerCredentialRef) {
+        throw new Error("S3 配置需要系统凭据管理器中的访问密钥");
       }
       const status = provider === "local"
         ? await invoke<SyncCoordinatorStatus>("configure_local_folder_sync", {
@@ -2304,14 +2334,28 @@ function App() {
             mode: syncSetupMode,
           },
           })
-          : await invoke<SyncCoordinatorStatus>("configure_sftp_sync", {
-            request: {
-              hostId: sftpHost?.id,
-              rootPath: appState.sync.remotePath.trim(),
-              password: syncPassword,
-              mode: syncSetupMode,
-            },
-          });
+          : provider === "sftp"
+            ? await invoke<SyncCoordinatorStatus>("configure_sftp_sync", {
+              request: {
+                hostId: sftpHost?.id,
+                rootPath: appState.sync.remotePath.trim(),
+                password: syncPassword,
+                mode: syncSetupMode,
+              },
+            })
+            : await invoke<SyncCoordinatorStatus>("configure_s3_sync", {
+              request: {
+                endpoint: appState.sync.endpoint.trim(),
+                region: appState.sync.s3Region.trim(),
+                bucket: appState.sync.s3Bucket.trim(),
+                prefix: appState.sync.s3Prefix.trim(),
+                pathStyle: appState.sync.s3PathStyle,
+                providerCredentialRef,
+                providerCaRef,
+                password: syncPassword,
+                mode: syncSetupMode,
+              },
+            });
       setDesktopSyncStatus(status);
       setDesktopSyncError(null);
       setAppState((current) => ({
@@ -2322,10 +2366,12 @@ function App() {
           provider,
           username,
           providerHostId: provider === "sftp" ? sftpHost?.id : current.sync.providerHostId,
-          providerCredentialRef: provider === "webdav"
-            ? providerCredentialRef ?? current.sync.providerCredentialRef
+          providerCredentialRef: provider === "webdav" || provider === "s3"
+            ? providerCredentialRef
             : current.sync.providerCredentialRef,
-          providerCaRef: provider === "webdav" ? providerCaRef : current.sync.providerCaRef,
+          providerCaRef: provider === "webdav" || provider === "s3"
+            ? providerCaRef
+            : current.sync.providerCaRef,
         },
       }));
       createdCredentialRef = undefined;
@@ -2335,6 +2381,9 @@ function App() {
       setWebDavCaPath("");
       setWebDavCaLabel("");
       setWebDavUseSystemCa(false);
+      setS3AccessKeyId("");
+      setS3SecretAccessKey("");
+      setS3SessionToken("");
       showToast(syncSetupMode === "initialize" ? "同步 vault 已初始化并解锁" : "同步 vault 已解锁");
     } catch (error) {
       if (createdCredentialRef) {
@@ -3403,7 +3452,7 @@ function App() {
           {!desktopSyncStatus?.configured ? <>
           <div className="provider-grid">
             {(Object.keys(providerLabels) as SyncProviderKind[]).map((provider) => (
-              <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} disabled={provider === "s3" || provider === "gateway"} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
+              <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} disabled={provider === "gateway"} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
                 {provider === "local" ? <HardDrive size={18} /> : provider === "webdav" ? <Globe2 size={18} /> : provider === "sftp" ? <SquareTerminal size={18} /> : provider === "s3" ? <Database size={18} /> : <Cloud size={18} />}
                 <span>{providerLabels[provider]}</span>
               </button>
@@ -3414,13 +3463,23 @@ function App() {
             <button type="button" className={syncSetupMode === "initialize" ? "active" : ""} onClick={() => setSyncSetupMode("initialize")}>初始化新 vault</button>
           </div>
           <div className="form-grid sync-form">
-            {appState.sync.provider !== "sftp" ? <label className="field span-2"><span>{appState.sync.provider === "local" ? "同步目录" : "WebDAV endpoint"}</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder={appState.sync.provider === "local" ? "D:\\VPShellSync" : "https://dav.example.com/vpshell/"} /></label> : <>
+            {appState.sync.provider !== "sftp" ? <label className="field span-2"><span>{appState.sync.provider === "local" ? "同步目录" : appState.sync.provider === "s3" ? "S3 endpoint" : "WebDAV endpoint"}</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder={appState.sync.provider === "local" ? "D:\\VPShellSync" : appState.sync.provider === "s3" ? "https://s3.example.com/" : "https://dav.example.com/vpshell/"} /></label> : <>
               <label className="field span-2"><span>SFTP 主机</span><select value={appState.sync.providerHostId ?? ""} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, providerHostId: event.target.value || undefined } }))}><option value="">选择已保存主机</option>{appState.hosts.map((host) => <option key={host.id} value={host.id} disabled={!host.hostKeySha256}>{host.name} · {host.username}@{host.host}:{host.port}{host.hostKeySha256 ? "" : " · 未核验指纹"}</option>)}</select></label>
               <label className="field span-2"><span>远端同步根目录</span><input value={appState.sync.remotePath} maxLength={1024} spellCheck={false} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, remotePath: event.target.value } }))} placeholder="/home/user/vpshell-sync" /></label>
             </>}
             {appState.sync.provider === "webdav" ? <>
               <label className="field"><span>WebDAV 用户名</span><input maxLength={256} value={appState.sync.username} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, username: event.target.value } }))} autoComplete="username" placeholder="可留空使用无认证存储" /></label>
               <label className="field"><span>WebDAV 密码</span><input type="password" maxLength={1024} value={webDavPassword} onChange={(event) => setWebDavPassword(event.target.value)} autoComplete="current-password" placeholder={appState.sync.providerCredentialRef ? "留空使用系统已保存密码" : "仅保存到系统凭据管理器"} /></label>
+              <label className="field span-2"><span>TLS 信任根</span><div className="path-picker"><input readOnly value={webDavCaLabel || (!webDavUseSystemCa && appState.sync.providerCaRef ? "已保存自定义 CA" : "系统 CA")} /><button className="secondary-button" type="button" onClick={() => void chooseWebDavCa()}><Upload size={14} /> 选择 PEM</button>{(webDavCaPath || appState.sync.providerCaRef) && !webDavUseSystemCa ? <button className="icon-button" type="button" title="改用系统 CA" aria-label="改用系统 CA" onClick={() => { setWebDavCaPath(""); setWebDavCaLabel(""); setWebDavUseSystemCa(true); }}><X size={15} /></button> : null}</div></label>
+            </> : null}
+            {appState.sync.provider === "s3" ? <>
+              <label className="field"><span>Region</span><input maxLength={128} spellCheck={false} value={appState.sync.s3Region} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, s3Region: event.target.value } }))} placeholder="us-east-1" /></label>
+              <label className="field"><span>Bucket</span><input maxLength={63} spellCheck={false} value={appState.sync.s3Bucket} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, s3Bucket: event.target.value } }))} placeholder="vpshell-sync" /></label>
+              <label className="field span-2"><span>对象前缀</span><input maxLength={512} spellCheck={false} value={appState.sync.s3Prefix} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, s3Prefix: event.target.value } }))} placeholder="vpshell" /></label>
+              <label className="credential-option span-2"><input type="checkbox" checked={appState.sync.s3PathStyle} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, s3PathStyle: event.target.checked } }))} /><span>Path-style bucket URL</span></label>
+              <label className="field"><span>Access Key ID</span><input type="password" maxLength={128} value={s3AccessKeyId} onChange={(event) => setS3AccessKeyId(event.target.value)} autoComplete="off" placeholder={appState.sync.providerCredentialRef?.startsWith("sync-s3-") ? "留空使用系统已保存凭据" : "仅保存到系统凭据管理器"} /></label>
+              <label className="field"><span>Secret Access Key</span><input type="password" maxLength={1024} value={s3SecretAccessKey} onChange={(event) => setS3SecretAccessKey(event.target.value)} autoComplete="off" placeholder={appState.sync.providerCredentialRef?.startsWith("sync-s3-") ? "留空使用系统已保存凭据" : "仅保存到系统凭据管理器"} /></label>
+              <label className="field span-2"><span>Session token</span><input type="password" maxLength={4096} value={s3SessionToken} onChange={(event) => setS3SessionToken(event.target.value)} autoComplete="off" placeholder="长期密钥可留空" /></label>
               <label className="field span-2"><span>TLS 信任根</span><div className="path-picker"><input readOnly value={webDavCaLabel || (!webDavUseSystemCa && appState.sync.providerCaRef ? "已保存自定义 CA" : "系统 CA")} /><button className="secondary-button" type="button" onClick={() => void chooseWebDavCa()}><Upload size={14} /> 选择 PEM</button>{(webDavCaPath || appState.sync.providerCaRef) && !webDavUseSystemCa ? <button className="icon-button" type="button" title="改用系统 CA" aria-label="改用系统 CA" onClick={() => { setWebDavCaPath(""); setWebDavCaLabel(""); setWebDavUseSystemCa(true); }}><X size={15} /></button> : null}</div></label>
             </> : null}
             <label className="field span-2"><span>二级同步密码</span><input type="password" minLength={8} maxLength={1024} value={syncPassword} onChange={(event) => setSyncPassword(event.target.value)} autoComplete="new-password" placeholder="用于端到端加密" /></label>

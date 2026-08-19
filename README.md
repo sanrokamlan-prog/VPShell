@@ -38,7 +38,7 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 
 | 运维痛点 | VPShell 方向 | `v0.1.0-alpha.7` |
 | --- | --- | :---: |
-| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **部分接线**：密码学、恢复/导出、设备 registry、Local/WebDAV/SFTP provider、持久 outbox/replay、确定性 merge 与 Rust 协调器内核已实现；桌面三种 provider 可显式初始化/解锁并运行手动或自动单周期，WebDAV 密码及 SFTP 认证材料只从本机系统凭据/已保存主机读取；主机公开字段、安全自建脚本、五个固定设置实体、公开命令/路径/非敏感参数/已认证连接历史、PNG/JPEG/WebP 背景 blob、活动设备确认式 blob GC 及桌面冲突中心已接入双向事务交接，SFTP 不支持可靠条件删除而保守保留旧密文，Android 只读同步状态已接通但运行能力保持禁用；S3/Gateway 产品入口与真实多设备矩阵仍未完成 |
+| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **部分接线**：密码学、恢复/导出、设备 registry、Local/WebDAV/SFTP/S3 provider、持久 outbox/replay、确定性 merge 与 Rust 协调器内核已实现；桌面四种 provider 可显式初始化/解锁并运行手动或自动单周期，WebDAV/S3 凭据及 SFTP 认证材料只从本机系统凭据/已保存主机读取；主机公开字段、安全自建脚本、五个固定设置实体、公开命令/路径/非敏感参数/已认证连接历史、PNG/JPEG/WebP 背景 blob、活动设备确认式 blob GC 及桌面冲突中心已接入双向事务交接，SFTP/S3 不支持条件删除而保守保留旧密文，Android 只读同步状态已接通但运行能力保持禁用；Gateway 产品入口与真实多设备矩阵仍未完成 |
 | 大量小文件/目录传输缓慢 | 自动探测 `tar + zstd`，缺少远端能力时回退 SFTP | **已实现**：直连后端 |
 | 命令、路径和参数反复复制 | 不设产品条数上限的事件历史、快速检索和参数模板 | **部分实现**：公开命令、每主机最近路径、模板非敏感参数和 Rust 证明的已认证连接历史已具备加密同步与删除；旧版或前端自行构造的连接尝试只留本机 |
 | 操作时忘记当前主机 | 常驻配置 IP、环境标记、Shell Integration 上报 hostname/cwd | **v0.2 工作区**：显式 bash/zsh 探针与 8 层自报上下文栈 |
@@ -268,14 +268,14 @@ Alpha 发布后的重点验证：
 ### v0.3 - 用户自控的加密同步
 
 - Rust 密码学基础层已实现版本化 keyslot/对象信封、Argon2id、XChaCha20-Poly1305、HKDF 域分离、严格有界解析和固定向量测试；
-- Rust `list/get/put` provider 边界与 Local Folder/WebDAV/SFTP 不可变对象实现已经具备有界 I/O、无覆盖提交、超时、取消和协议测试；SFTP 复用已保存主机的本机凭据/私钥、known_hosts 与精确 SHA256 pin，拒绝观察到的符号链接/特殊文件，并在私有暂存目录完整持久化后以无覆盖 rename 发布；
+- Rust `list/get/put` provider 边界与 Local Folder/WebDAV/SFTP/S3-compatible 不可变对象实现已经具备有界 I/O、无覆盖提交、超时、取消和协议测试；SFTP 复用已保存主机的本机凭据/私钥、known_hosts 与精确 SHA256 pin，拒绝观察到的符号链接/特殊文件，并在私有暂存目录完整持久化后以无覆盖 rename 发布；S3 使用 HTTPS/no redirect、SigV4 签名、ListObjectsV2、GET 与 `If-None-Match: *` 条件 PUT，访问密钥只保存到系统凭据管理器；
 - schema v1 SQLite 同步 journal 已实现 operation/outbox 原子事务、租约恢复、暂停、最多六次有界退避、发布终态、AEAD 后幂等应用和设备序号/对象身份重放保护；桌面 Local Folder 使用不可变 bootstrap 显式初始化或解锁 Argon2id keyslot，并可由 Rust 调度器或手动调用协调器的有界单周期 push/pull 与 merge；
 - 主机、公开命令/参数/远端路径历史、脚本、白名单设置和受管背景引用已有 Rust 确定性字段合并、tombstone 因果与持久冲突中心；敏感历史、凭据引用、主机 trust pin 和本机路径拒绝进入 operation；
 - 独立 256-bit 恢复密钥使用带校验码的可打印格式和独立 HKDF/XChaCha recovery keyslot；加密导出包只包含 keyslot、认证密文和校验清单，最多 10,000 对象/256 MiB 密文，以无覆盖原子文件写入，并可离线解密、解析全部 event/device registry 完成恢复演练；
 - 设备 registry 最多 32 台，只记录公开签名键和非敏感标签；撤销单调、最后活动设备不可撤销、已撤销设备不能发布 registry。撤销不能抹除已复制的 VMK，疑似泄露时仍必须轮换主密钥并全量重加密；设备 operation 签名、registry 验证和管理 UI 尚未接线；
 - 独立凭据 vault 策略默认关闭，需活动设备显式启用并逐设备授权；CVK 与业务 VMK 分离，使用 `credentials` keyslot/AAD/HKDF 域。SSH 密码、私钥口令、OpenSSH 私钥和 access token 只进入 Rust 内存中的清零载荷与认证密文，本机 credential reference 不进入对象、错误、日志或事件；系统钥匙串写回、CVK 恢复/轮换和 UI 尚未接线；
-- SFTP、S3-compatible 与自建 Gateway 通过专用 Rust transport trait 复用同一不可变 provider 契约。桌面 SFTP 已接入真实 `ssh2` 会话、已保存主机选择、认证前 known_hosts/精确 SHA256 双重校验、逐级 `lstat`、有界读/列举，以及暂存 `EXCLUSIVE` 创建、`fsync`、无覆盖 rename 与提交后回读；Linux Actions 使用一次性 OpenSSH/SFTP fixture。S3 SigV4、Gateway HTTP 客户端、SFTP 条件删除及真实外部兼容矩阵仍未接线；Gateway 密码/TOTP 仍只允许传入一次登录调用；
-- AppState 主机公开字段、安全自建脚本、五个固定设置实体和通过严格验证的命令/路径/非敏感参数/已认证连接历史已接入 operation/outbox 事务入队与合并结果回写；四类历史使用稳定实体 ID 与 tombstone，清空会同步删除。连接记录只由 Rust 在原生/Android SSH 完成 host-key 与认证后签发；系统 OpenSSH/Mosh 先运行同策略有界认证检查，进程仅启动不再算成功。含明显密码/Token/私钥/credential reference 的记录、敏感或未知参数、没有真实时间的旧路径以及没有 Rust 事实的旧/伪造连接只留本机。背景可见度同步 5%–65% 的数值；Rust 会对 PNG 解码、限制像素、重新编码，并对 JPEG/WebP 做结构校验，再以随机 ID、256 KiB 独立 AEAD 分块和 manifest 同步缓存位图，远端完整认证安装后才写回引用。原始 URL 不上传；活动设备确认式 GC 已接线，SFTP 因缺少可靠条件删除继续保守保留。桌面解锁期间的启动/变更防抖/周期/失败复查调度及持久冲突解决 UI 已接线；WebDAV HTTPS/basic-auth 与 SFTP 产品入口复用同一协调器，provider 凭据、本机 pin/私钥路径和 PEM CA 都不进入同步包；编辑器路径、自定义字体资产/名称、S3/Gateway 产品入口和真实多设备矩阵仍待实现；
+- SFTP、S3-compatible 与自建 Gateway 通过专用 Rust transport trait 复用同一不可变 provider 契约。桌面 SFTP 已接入真实 `ssh2` 会话、已保存主机选择、认证前 known_hosts/精确 SHA256 双重校验、逐级 `lstat`、有界读/列举，以及暂存 `EXCLUSIVE` 创建、`fsync`、无覆盖 rename 与提交后回读；Linux Actions 使用一次性 OpenSSH/SFTP fixture。桌面 S3 已接入受限 SigV4 HTTP transport、系统凭据引用、path-style/virtual-hosted URL 和同一协调器，Linux Actions 使用独立验签的自建 HTTPS 协议 fixture；AWS/MinIO/其他兼容实现矩阵仍需外部验收。Gateway HTTP 客户端、SFTP/S3 条件删除及真实外部兼容矩阵仍未接线；Gateway 密码/TOTP 仍只允许传入一次登录调用；
+- AppState 主机公开字段、安全自建脚本、五个固定设置实体和通过严格验证的命令/路径/非敏感参数/已认证连接历史已接入 operation/outbox 事务入队与合并结果回写；四类历史使用稳定实体 ID 与 tombstone，清空会同步删除。连接记录只由 Rust 在原生/Android SSH 完成 host-key 与认证后签发；系统 OpenSSH/Mosh 先运行同策略有界认证检查，进程仅启动不再算成功。含明显密码/Token/私钥/credential reference 的记录、敏感或未知参数、没有真实时间的旧路径以及没有 Rust 事实的旧/伪造连接只留本机。背景可见度同步 5%–65% 的数值；Rust 会对 PNG 解码、限制像素、重新编码，并对 JPEG/WebP 做结构校验，再以随机 ID、256 KiB 独立 AEAD 分块和 manifest 同步缓存位图，远端完整认证安装后才写回引用。原始 URL 不上传；活动设备确认式 GC 已接线，SFTP/S3 因未提供条件删除继续保守保留。桌面解锁期间的启动/变更防抖/周期/失败复查调度及持久冲突解决 UI 已接线；WebDAV HTTPS/basic-auth、SFTP 与 S3 产品入口复用同一协调器，provider 凭据、本机 pin/私钥路径和 PEM CA 都不进入同步包；编辑器路径和自定义字体资产/名称保持本机，Gateway 产品入口和真实多设备矩阵仍待实现；
 - TOTP 只保护 Gateway 登录，不替代二级同步密码、恢复密钥或 E2EE 数据密钥。
 
 ### Android Preview - 移动端

@@ -132,6 +132,10 @@ export interface SyncSettings {
   providerHostId?: string;
   providerCredentialRef?: string;
   providerCaRef?: string;
+  s3Region: string;
+  s3Bucket: string;
+  s3Prefix: string;
+  s3PathStyle: boolean;
   lastSyncedAt?: string;
   totpEnabled: boolean;
   syncSecrets: boolean;

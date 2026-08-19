@@ -2,7 +2,7 @@
 
 当前实现补充：`onboardingCompleted`、默认监控采样频率与背景可见度已分别作为第三、第四、第五个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；它们分别只含一个布尔字段、一个 5–300 秒整数和一个 5%–65% 整数。通过秘密扫描的命令、远端路径与具名非敏感参数历史，以及 Rust 证明的已认证连接历史，使用独立 `history` 实体、稳定 UUID 和 tombstone 接入同一链路；含明显秘密、敏感/未知参数的记录、没有真实时间的旧路径和没有认证事实的旧/伪造连接条目保持本机。背景使用独立 `background` 实体和加密分块；PNG 由 Rust 解码并规范化，JPEG/WebP 通过结构、RIFF/chunk 或 JPEG 结束标记校验后保留原始编码；原始 URL、引导内容、运行中监控状态及设备本地数据仍不入同步包。
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 S3/Gateway 结构化 adapter。桌面三种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth 密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。其他尚未建模设置、S3/Gateway 产品入口、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现；SFTP 没有可靠条件删除能力而保守保留旧密文，真实外部服务器与多设备矩阵也仍需验收。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、默认关闭的独立凭据 vault，以及 Gateway 结构化 adapter。桌面四种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth 与 S3 SigV4 凭据只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。Gateway 产品入口、真实 Gateway TOTP 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现；SFTP/S3 没有条件删除能力而保守保留旧密文，真实外部服务器与多设备矩阵也仍需验收。
 
 ### 当前 v1 密码学边界
 
@@ -10,7 +10,7 @@
 
 业务对象按 event/blob/index/checkpoint/device-registry 五个 HKDF-SHA256 label 派生不同密钥；vault ID 参与 extract salt，对象类型、对象 ID、设备/序号、算法和密文长度进入 AAD。对象明文最多 16 MiB，JSON 信封最多 24 MiB，keyslot 最多 16 KiB；UUID、base64url、类型与序号组合逐字段验证，未知字段和未知版本拒绝。每次生产加密都从 OS CSPRNG 取得随机 nonce；固定 nonce/salt 入口只在单元测试中用于稳定向量。
 
-该格式能认证对象身份并阻止把密文搬到另一域/vault/设备/序号后解密，但相同完整对象的重放需要后续 outbox/head/sequence 状态机检测。当前没有任何 IPC 返回 VMK、KEK、密码或解密明文；产品流程开放桌面 Local Folder、标准 HTTPS WebDAV 和固定 host-key 的 SFTP，S3/Gateway 尚未开放。
+该格式能认证对象身份并阻止把密文搬到另一域/vault/设备/序号后解密，但相同完整对象的重放需要后续 outbox/head/sequence 状态机检测。当前没有任何 IPC 返回 VMK、KEK、密码或解密明文；产品流程开放桌面 Local Folder、标准 HTTPS WebDAV、固定 host-key 的 SFTP 和 SigV4 S3-compatible，Gateway 尚未开放。
 
 ## 1. 目标
 
@@ -21,7 +21,7 @@
 - 所有自建脚本、参数模板、图标和附件；
 - 终端主题、背景配置及需要同步的本机背景图片；
 - 可选的主机凭据和私钥 vault，默认关闭；
-- Local Folder、WebDAV、SFTP，以及后续 S3 兼容存储和自建 Gateway；
+- Local Folder、WebDAV、SFTP、S3 兼容存储，以及后续自建 Gateway；
 - 离线写入、自动增量同步、确定性合并、冲突可见和恢复演练。
 
 同步不是远程桌面，也不传输正在运行的 PTY 缓冲区、临时密码输入或会话内存。
@@ -53,7 +53,7 @@ TLS 仍然必须启用，但 TLS 只保护传输链路，不能替代客户端�
 | 能力 | v0.1.0 | 目标 |
 | --- | --- | --- |
 | 本地业务存储 | WebView `localStorage` 明文 JSON（legacy） | Rust 管理的 SQLite schema v1 快照 + 有界事件域；同步前再做 E2EE 对象化 |
-| Provider | 桌面 Local Folder、HTTPS WebDAV 与固定 host-key SFTP 已接入；S3/Gateway 仍只有内部 adapter | 可由用户配置、解锁和自动调度的 provider |
+| Provider | 桌面 Local Folder、HTTPS WebDAV、固定 host-key SFTP 与 SigV4 S3-compatible 已接入；Gateway 仍只有内部 adapter | 可由用户配置、解锁和自动调度的 provider |
 | 二级密码 | Local Folder bootstrap 已用 Argon2id keyslot 包裹随机 VMK，密码不持久化；轮换/恢复 UI 未接线 | Argon2id 派生 KEK，包裹随机 Vault Master Key |
 | 同步动作 | 桌面可显式运行单周期，并在解锁期间由 Rust 执行启动/业务变化防抖/周期/失败复查；Android 只读状态可见；主机公开字段、安全自建脚本、终端字体族/字号/行高及两个应用行为偏好已接入本地入队与远端事务投影 | 补齐其他业务域、系统网络事件直连触发与完整冲突处理；应用关闭后不伪装为后台服务 |
 | 冲突 | 无 | 事件并集、字段级 LWW、tombstone、冲突中心 |
@@ -126,7 +126,7 @@ Local Folder 要求现有非符号链接目录，逐级拒绝符号链接/特殊
 | Local Folder | MVP | 写入用户选择的目录，可由 OneDrive、Dropbox、坚果云等桌面客户端继续同步 |
 | WebDAV | MVP | 使用 PROPFIND/GET/PUT；要求 HTTPS，允许用户显式信任自签 CA |
 | SFTP | Desktop preview | 选择已保存主机；认证前核对 known_hosts 与精确 SHA-256 pin，逐级 lstat、无跟随有界读取、暂存 exclusive create 与无覆盖提交后回读；无可靠条件删除 |
-| S3 compatible | Internal adapter | 专用 transport trait；HTTPS endpoint、region/bucket/prefix 严格验证，实际 transport 负责 SigV4、ListObjectsV2/GetObject/条件 PutObject |
+| S3 compatible | Desktop preview | HTTPS/no redirect；SigV4 完整 payload hash、ListObjectsV2 continuation、GET、`If-None-Match: *` 条件 PUT 和提交后回读；系统凭据引用与可选受管 PEM CA；无条件删除 |
 | VPShell Gateway | Internal adapter | 专用认证/session trait；密码和可选 TOTP 只交给登录，session 只处理密文对象；实际 HTTP 协议客户端仍待接线 |
 | rclone | Roadmap | 优先通过 Local Folder/mount 兼容；若增加命令适配器，必须显式配置可执行文件和参数，不能接受任意远端下发命令 |
 
@@ -402,8 +402,8 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心、分页详情和 Rust-owned 候选解决 operation 已接入协调器事务；仍需多进程/真实设备演练。
 5. **恢复与设备层**：内部可打印恢复密钥、独立 recovery keyslot、单调设备撤销、加密导出和离线恢复演练已实现；仍需设备签名、轮换、协调器/UI 与真实多设备演练。
 6. **大对象**：PNG 背景的规范化分块、JPEG/WebP 的结构校验分块、限额和安全图片处理已接线；活动设备确认式垃圾回收已接线，仍需自建脚本附件和真实多设备/外部 provider 删除验收。
-7. **Provider 扩展**：SFTP 已接通桌面产品入口、真实 `ssh2` transport、协调器与 Linux OpenSSH fixture；S3-compatible、Gateway 仍只有结构化不可变适配层，需真实 transport、协调器、协议兼容与故障矩阵，再评估 rclone 适配。
+7. **Provider 扩展**：SFTP 已接通桌面产品入口、真实 `ssh2` transport、协调器与 Linux OpenSSH fixture；S3-compatible 已接入 SigV4 transport、系统凭据、协调器和独立验签的 HTTPS Actions fixture，但真实 AWS/MinIO/其他实现及故障矩阵仍需外部验收；Gateway 仍只有结构化不可变适配层，再评估 rclone 适配。
 8. **凭据 vault**：默认关闭、独立 CVK/keyslot/对象域和逐设备授权原语已完成；仍需系统钥匙串接线、轮换、恢复演练、协调器/UI 与真实设备验证。
 9. **Gateway TOTP**：只在 Gateway 的账户/设备认证完成后增加，不与 E2EE 解锁混在一起。
 
-当前源码回归夹具已覆盖未知格式/AEAD 篡改/对象身份搬移、journal replay/发布终态、merge 到达顺序/截断、Local Folder 取消与截断字节、三个扩展 adapter 的条件创建/回读/边界，以及单一 Linux OpenSSH SFTP fixture。上线前仍必须覆盖：两设备同时离线编辑、三设备删除复活、HLC 时钟倒退、上传中断、重复 list、S3 延迟可见、WebDAV 非原子行为、错误密码、旧 keyslot、恶意压缩载荷、对象篡改、segment 缺失、链分叉、远端整体回滚、恢复密钥导入、多版本真实 SFTP 服务器、真实 S3/Gateway 服务和多设备 CVK 轮换。
+当前源码回归夹具已覆盖未知格式/AEAD 篡改/对象身份搬移、journal replay/发布终态、merge 到达顺序/截断、Local Folder 取消与截断字节、三个扩展 adapter 的条件创建/回读/边界、单一 Linux OpenSSH SFTP fixture，以及独立验签的 HTTPS S3 fixture。上线前仍必须覆盖：两设备同时离线编辑、三设备删除复活、HLC 时钟倒退、上传中断、重复 list、S3 延迟可见、WebDAV 非原子行为、错误密码、旧 keyslot、恶意压缩载荷、对象篡改、segment 缺失、链分叉、远端整体回滚、恢复密钥导入、多版本真实 SFTP 服务器、真实 AWS/MinIO/其他 S3-compatible 与 Gateway 服务和多设备 CVK 轮换。

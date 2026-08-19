@@ -34,8 +34,12 @@ use crate::{
         WebDavProvider,
     },
     sync_provider_ca::validate_webdav_ca_reference,
-    sync_provider_credentials::{read_webdav_credential, validate_webdav_credential_reference},
-    sync_provider_ext::{SftpProviderConfig, SftpSyncProvider},
+    sync_provider_credentials::{
+        read_s3_credential, read_webdav_credential, validate_s3_credential_reference,
+        validate_webdav_credential_reference,
+    },
+    sync_provider_ext::{S3ProviderConfig, S3SyncProvider, SftpProviderConfig, SftpSyncProvider},
+    sync_s3_provider::ReqwestS3ObjectTransport,
     sync_sftp_provider::Ssh2SftpObjectTransport,
 };
 
@@ -82,6 +86,26 @@ pub(crate) struct ConfigureSftpSyncRequest {
     root_path: String,
     password: String,
     mode: LocalFolderSetupMode,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfigureS3SyncRequest {
+    endpoint: String,
+    region: String,
+    bucket: String,
+    prefix: String,
+    path_style: bool,
+    provider_credential_ref: String,
+    provider_ca_ref: Option<String>,
+    password: String,
+    mode: LocalFolderSetupMode,
+}
+
+impl ConfigureS3SyncRequest {
+    pub(crate) fn provider_ca_reference(&self) -> Option<&str> {
+        self.provider_ca_ref.as_deref()
+    }
 }
 
 impl ConfigureWebDavSyncRequest {
@@ -573,6 +597,54 @@ impl SyncCoordinatorManager {
             request.mode,
             Argon2Parameters::default(),
             "SFTP",
+        )
+    }
+
+    pub(crate) fn configure_s3(
+        &self,
+        request: ConfigureS3SyncRequest,
+        trusted_ca_pem: Option<Vec<u8>>,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        let _guard = self.begin_configuration()?;
+        let password = Zeroizing::new(request.password);
+        validate_sync_password(password.as_bytes())?;
+        let trusted_ca_pem = match (request.provider_ca_ref.as_deref(), trusted_ca_pem) {
+            (None, None) => None,
+            (Some(reference), Some(pem)) => {
+                validate_webdav_ca_reference(reference)?;
+                Some(pem)
+            }
+            _ => return Err("S3 CA 引用和受管证书必须同时提供，或同时留空".to_string()),
+        };
+        let config = S3ProviderConfig {
+            endpoint: request.endpoint,
+            region: request.region,
+            bucket: request.bucket,
+            prefix: request.prefix,
+            path_style: request.path_style,
+            timeout_seconds: 30,
+        };
+        config
+            .validate()
+            .map_err(|error| provider_setup_error(&error, "S3-compatible"))?;
+        validate_s3_credential_reference(&request.provider_credential_ref)?;
+        let credentials = read_s3_credential(&request.provider_credential_ref)?;
+        let transport = ReqwestS3ObjectTransport::connect(
+            config.clone(),
+            credentials,
+            trusted_ca_pem.as_deref(),
+        )
+        .map_err(|error| provider_setup_error(&error, "S3-compatible"))?;
+        let provider: Arc<dyn SyncObjectProvider> = Arc::new(
+            S3SyncProvider::connect(config, transport)
+                .map_err(|error| provider_setup_error(&error, "S3-compatible"))?,
+        );
+        self.configure_provider_inner(
+            provider,
+            password,
+            request.mode,
+            Argon2Parameters::default(),
+            "S3-compatible",
         )
     }
 
@@ -2818,6 +2890,30 @@ mod tests {
             .configure_webdav(invalid_ca, Some(b"invalid".to_vec()))
             .unwrap_err();
         assert!(invalid_ca_error.contains("CA 引用无效"));
+        assert!(!coordinator.status().unwrap().configured);
+    }
+
+    #[test]
+    fn s3_configuration_rejects_invalid_config_before_keyring_or_network() {
+        let root = TempDir::new("s3-config-validation");
+        let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();
+        let request = ConfigureS3SyncRequest {
+            endpoint: "https://s3.example.com/base/".to_string(),
+            region: "us-east-1".to_string(),
+            bucket: "vpshell-sync".to_string(),
+            prefix: "vpshell".to_string(),
+            path_style: true,
+            provider_credential_ref: format!(
+                "{}{}",
+                crate::sync_provider_credentials::S3_CREDENTIAL_PREFIX,
+                Uuid::new_v4()
+            ),
+            provider_ca_ref: None,
+            password: "fixture-password".to_string(),
+            mode: LocalFolderSetupMode::Unlock,
+        };
+        let error = coordinator.configure_s3(request, None).unwrap_err();
+        assert!(error.contains("S3-compatible 配置无效"));
         assert!(!coordinator.status().unwrap().configured);
     }
 
