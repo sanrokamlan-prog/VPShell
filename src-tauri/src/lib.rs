@@ -1247,25 +1247,20 @@ fn spawn_system_terminal(
         },
     );
 
-    let connection = match store.record_authenticated_connection(
-        host_id,
-        host,
-        port,
-        username,
-        initial_path,
-    ) {
-        Ok(connection) => connection,
-        Err(error) => {
-            if let Some(session) = lock_sessions(&manager)?.remove(&session_id) {
-                if let TerminalTransport::SystemPty { mut killer, .. } = session.transport {
-                    killer.kill().map_err(|kill_error| {
-                        format!("{error}；同时无法停止未记录终端: {kill_error}")
-                    })?;
+    let connection =
+        match store.record_authenticated_connection(host_id, host, port, username, initial_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                if let Some(session) = lock_sessions(&manager)?.remove(&session_id) {
+                    if let TerminalTransport::SystemPty { mut killer, .. } = session.transport {
+                        killer.kill().map_err(|kill_error| {
+                            format!("{error}；同时无法停止未记录终端: {kill_error}")
+                        })?;
+                    }
                 }
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
 
     let output_app = app.clone();
     let output_session_id = session_id.clone();

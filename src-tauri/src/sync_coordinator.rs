@@ -1966,13 +1966,7 @@ mod tests {
             })
             .unwrap();
         let connection = store
-            .record_authenticated_connection(
-                "host-local",
-                "192.0.2.1",
-                22,
-                "dev",
-                "/srv/app",
-            )
+            .record_authenticated_connection("host-local", "192.0.2.1", 22, "dev", "/srv/app")
             .unwrap();
         let mut state: serde_json::Value = serde_json::from_str(&app_state_fixture()).unwrap();
         state["commandHistory"] = serde_json::json!([{

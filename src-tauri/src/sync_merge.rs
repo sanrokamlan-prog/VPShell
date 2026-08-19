@@ -1318,7 +1318,10 @@ pub(crate) fn entity_fields_are_syncable(
         Some(FieldValue::Text(kind)) if kind == "connection" => {
             fields.len() == 4
                 && fields.keys().all(|field| {
-                    matches!(field.as_str(), "kind" | "hostId" | "remotePath" | "createdAt")
+                    matches!(
+                        field.as_str(),
+                        "kind" | "hostId" | "remotePath" | "createdAt"
+                    )
                 })
         }
         _ => false,
@@ -2489,10 +2492,7 @@ mod tests {
             &with_value,
         ));
         let mut relative_path = fields.clone();
-        relative_path.insert(
-            "remotePath".to_string(),
-            FieldValue::Text("srv/app".into()),
-        );
+        relative_path.insert("remotePath".to_string(), FieldValue::Text("srv/app".into()));
         assert!(!entity_fields_are_syncable(
             &EntityKind::History,
             &relative_path,

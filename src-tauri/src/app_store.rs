@@ -1661,7 +1661,13 @@ fn connection_history_sync_fields(
     let connected_at = text("connectedAt")?;
     let remote_path = text("path")?;
     let fact = facts.get(storage_key)?;
-    if fact != &(host_id.to_string(), connected_at.to_string(), remote_path.to_string()) {
+    if fact
+        != &(
+            host_id.to_string(),
+            connected_at.to_string(),
+            remote_path.to_string(),
+        )
+    {
         return None;
     }
     let fields = BTreeMap::from([
@@ -2185,7 +2191,9 @@ fn queue_connection_history_sync_changes(
         }
     }
     let pending: i64 = transaction
-        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM app_sync_changes", [], |row| {
+            row.get(0)
+        })
         .map_err(|error| format!("无法统计 AppState 同步 changefeed: {error}"))?;
     let available = MAX_PENDING_SYNC_CHANGES.saturating_sub(pending).max(0) as usize;
     if changes.len() > available {
@@ -2648,7 +2656,10 @@ fn validate_connection_history_projection_fields(
 ) -> Result<(), String> {
     let matches_shape = fields.len() == 4
         && fields.keys().all(|field| {
-            matches!(field.as_str(), "kind" | "hostId" | "remotePath" | "createdAt")
+            matches!(
+                field.as_str(),
+                "kind" | "hostId" | "remotePath" | "createdAt"
+            )
         });
     let kind_matches =
         matches!(fields.get("kind"), Some(FieldValue::Text(value)) if value == "connection");
@@ -3190,11 +3201,9 @@ impl AppStore {
             return Err("认证连接事实已达到 10000 项上限；请先清理连接历史".to_string());
         }
         let connected_at: String = transaction
-            .query_row(
-                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |row| {
+                row.get(0)
+            })
             .map_err(|error| format!("无法生成认证连接时间: {error}"))?;
         let id = Uuid::new_v4().to_string();
         transaction
@@ -4341,8 +4350,7 @@ impl AppStore {
             .cloned()
             .map(Value::Object)
             .collect::<Vec<_>>();
-        let authenticated_connection_facts =
-            load_authenticated_connection_facts(&transaction)?;
+        let authenticated_connection_facts = load_authenticated_connection_facts(&transaction)?;
         let local_connections = connection_history_objects(Some(&current_value))?;
         let preserved_connection_ids = local_connections
             .iter()
@@ -4553,8 +4561,11 @@ impl AppStore {
         if projected_parameters.len() > 10_000 {
             return Err("远端参数历史同步投影超过 10000 项".to_string());
         }
-        projected_connections
-            .sort_by(|left, right| right["connectedAt"].as_str().cmp(&left["connectedAt"].as_str()));
+        projected_connections.sort_by(|left, right| {
+            right["connectedAt"]
+                .as_str()
+                .cmp(&left["connectedAt"].as_str())
+        });
         projected_connections.append(&mut preserved_connections);
         if projected_connections.len() > 10_000 {
             return Err("远端连接历史同步投影超过 10000 项".to_string());
@@ -6048,13 +6059,7 @@ mod tests {
         );
 
         let authenticated = store
-            .record_authenticated_connection(
-                "host-1",
-                "192.0.2.1",
-                22,
-                "dev",
-                "/srv/app",
-            )
+            .record_authenticated_connection("host-1", "192.0.2.1", 22, "dev", "/srv/app")
             .unwrap();
         assert_eq!(authenticated.host_id, "host-1");
         assert_eq!(authenticated.path, "/srv/app");
@@ -6106,7 +6111,11 @@ mod tests {
         let connections = projected["connectionHistory"].as_array().unwrap();
         assert_eq!(connections.len(), 2);
         assert!(connections.iter().any(|item| item["path"] == "/srv/remote"));
-        assert!(connections.iter().any(|item| item["id"] == "frontend-forged"));
+        assert!(
+            connections
+                .iter()
+                .any(|item| item["id"] == "frontend-forged")
+        );
 
         projected["connectionHistory"] = serde_json::json!([{
             "id": "frontend-forged",
