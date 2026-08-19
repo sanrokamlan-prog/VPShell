@@ -800,6 +800,20 @@ where
 }
 
 impl SyncJournal {
+    pub(crate) fn local_device_id(&self) -> JournalResult<String> {
+        self.transaction(|transaction| {
+            transaction
+                .query_row(
+                    "SELECT device_id FROM sync_local_identity WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份")
+                })
+        })
+    }
+
     pub(crate) fn open(app_data_directory: PathBuf) -> JournalResult<Self> {
         fs::create_dir_all(&app_data_directory).map_err(|_| {
             JournalError::new(JournalErrorCode::Storage, "无法创建同步 journal 目录")

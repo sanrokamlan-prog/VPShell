@@ -236,17 +236,17 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - 凭据同步策略必须默认关闭；启用、授权、撤销和停用均使用 expected revision，并同时验证 business device registry。撤销身份永久留在策略中，不能重新授权；任何已复制 CVK 的设备撤销后都必须显示轮换要求。
 - CVK 必须由 OS CSPRNG 独立生成，不能从业务 VMK 派生，也不能复用 business/recovery keyslot AAD。CVK 和 secret 类型不得实现 Serialize/Debug；所有密码、口令、Token、私钥和解密缓冲尽早进入清零容器。
 - 本机 credential reference 是 Rust 内存中的系统钥匙串查找参数，不是同步 ID。远端对象使用新随机 item UUID；reference、secret 或 provider 原始错误不得进入 object key、信封头、稳定错误、日志、Tauri event 或前端。
-- WebDAV 与 S3 凭据通过桌面专用 IPC 写入系统凭据管理器，并只以本机随机 reference 交给 Rust provider；模块没有读取秘密的 IPC、日志或事件。写回系统钥匙串需生成新的本机 reference，不能把其他设备的本地 reference 当作可用身份。
+- WebDAV、S3 与 Gateway 凭据通过桌面专用 IPC 写入系统凭据管理器，并只以本机随机 reference 交给 Rust provider；模块没有读取秘密的 IPC、日志或事件。写回系统钥匙串需生成新的本机 reference，不能把其他设备的本地 reference 当作可用身份。
 
 ### 10.8 扩展 provider transport 规则（v0.3 工作树）
 
 - SFTP/S3/Gateway transport 实现必须满足 `ObjectTransport` 的严格契约：list 只返回作用域内对象，get 有界，create 为服务端原子/条件无覆盖；`AlreadyExists` 不能自行视为成功，公共 adapter 会回读逐字节核对。
 - SFTP transport 建立会话前必须验证配置的 SHA-256 host key，逐级 lstat 根与对象路径并拒绝 symlink/special；不能复用未经独立凭据绑定和 host-key 验证的业务 shell 会话。
 - S3 transport 必须使用 SigV4、HTTPS/no redirect、有界超时、ListObjectsV2 continuation token 和 `If-None-Match: *` 或等价条件创建；不能假设 list 立即一致，提交以条件 put 和 get 回读为边界。
-- Gateway transport 必须实现版本化登录/session/object 协议、TLS、限流与重放保护。密码/TOTP 只借给 login，session 类型不得保存 TOTP；TOTP 只验证 Gateway 账户，不能解锁或派生 VMK/CVK。所有底层认证错误映射为无秘密稳定诊断。
-- 公共 fake transport 只验证 adapter 契约；桌面 SFTP 另有真实 `ssh2` transport 和 Linux 一次性 OpenSSH fixture。S3 另有真实 SigV4 HTTPS transport 和独立重算签名、强制 continuation/条件写的 Actions 协议 fixture。单一自建 fixture 不替代 AWS/MinIO/其他实现、多服务端、权限、断网、限流和长时间兼容矩阵；Gateway 没有真实 transport 前不得标为用户可用。
+- Gateway transport 必须实现版本化登录/session/object 协议和 TLS；客户端已固定 v1、无重定向、短期 bearer token、有界 list/get 与条件 PUT。密码/TOTP 只借给 login，session 类型不得保存 TOTP；TOTP 只验证 Gateway 账户，不能解锁或派生 VMK/CVK。所有底层认证错误映射为无秘密稳定诊断。服务端限流、登录重放保护、恢复码和审计仍是自建服务的必选边界，不能由客户端 fixture 冒充。
+- 公共 fake transport 只验证 adapter 契约；桌面 SFTP 另有真实 `ssh2` transport 和 Linux 一次性 OpenSSH fixture。S3 另有真实 SigV4 HTTPS transport 和独立重算签名、强制 continuation/条件写的 Actions 协议 fixture。Gateway 另有真实 reqwest HTTPS transport 和验证 login/session/list/get/条件写的 Actions 协议 fixture。单一自建 fixture 不替代 AWS/MinIO/其他实现、多服务端、权限、断网、限流和长时间兼容矩阵。
 
-### 10.9 Local Folder/WebDAV/SFTP/S3 产品入口（v0.3 工作树）
+### 10.9 Local Folder/WebDAV/SFTP/S3/Gateway 产品入口（v0.3 工作树）
 
 - 桌面 Local Folder 只接受已存在、非符号链接的专用目录。用户必须明确选择“初始化新 vault”或“解锁已有 vault”；解锁缺失 bootstrap 时不得隐式创建，初始化已有 bootstrap 时不得覆盖。
 - 桌面 WebDAV 只接受无 URL 凭据/query/fragment 的 HTTPS endpoint 和固定 30 秒上限。basic-auth 密码经独立 command 写入系统凭据管理器，返回值仅为 `sync-webdav-<UUID>` 引用；AppState 可保存该本机引用，但 operation/outbox/event/status 不得包含引用、username 或密码。用户名与引用必须成对，空用户名/空引用明确表示无认证。用户可显式选择最多 64 KiB 的 PEM CA；Rust 拒绝相对路径、控制字符、符号链接、特殊文件和无效证书，复制到权限受限的应用目录并只返回 `sync-webdav-ca-<UUID>`。AppState 只保存 CA 引用，源路径/PEM 不持久化、不进入 changefeed；配置失败删除本次新资产，已替换旧资产在 AppState 异步保存得到明确确认前不得自动删除。真实服务兼容矩阵仍是后续项。
@@ -254,7 +254,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 - `vpshell/v1/bootstrap.json` 是不可变 schema-v1 对象，只包含 canonical vault UUID 和 Argon2id 认证 keyslot。二级密码进入 Rust 后立即由清零容器拥有，不得持久化、序列化、调试、记录或返回前端；状态响应只包含阶段、计数、代际和稳定错误码。
 - 配置与 Argon2id 解锁、手动及自动单周期均在 blocking worker 执行；取消使当前 provider token 与 generation 同时失效，锁定先使 `AutomaticSyncScheduler` 代际失效，再清除运行时 provider/VMK。桌面同步、provider 凭据与 CA 资产命令只能进入 `capabilities/default.json`，自动调度不能新增 WebView 启动命令，Android capability 必须持续排除。
 - 自动调度只在桌面 vault 解锁期间存在：2 秒启动/业务 changefeed 防抖、5 分钟远端周期检查、仍有 pending 或可重试失败时 30 秒复查。永久错误、取消与 `reconcile-required` 保持暂停，手动成功可恢复调度；协调器的配置/worker 单飞门仍是最终仲裁。worker 只发送 `desktop-sync-cycle` 具名事件，其中只有 value-free 状态和 Rust AppStore snapshot。前端持久状态 hook 必须拒绝 revision 回退及本地脏代际期间的快照，不能静默覆盖未提交编辑。
-- 当前入口不会把 AppState 快照直接上传。主机公开字段、通过秘密扫描的 `custom=true` 脚本、五个固定设置实体、规范化 PNG/结构校验 JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史会经业务库 changefeed、具名 operation、加密 outbox 与独立远端投影交接。PNG 安装必须经过 Rust 解码、16777216 像素/64 MiB 解码/8 MiB 编码上限和重新编码；JPEG 必须以 SOI/EOI 封闭，WebP 必须通过 RIFF/chunk 边界；三种格式都由 Rust 生成随机 256-bit blob ID，使用 256 KiB 块、每块独立 nonce/AAD、加密 manifest 与完整哈希，全部块验证并安全安装后才写回 AppState 引用。schema-v3 journal 还记录活动设备确认式 GC 摘要；只有 frontier 不落后、30 天保留满足且所有 manifest/块重新认证后才尝试条件删除，不支持该能力的 provider 保守保留。命令完整实体只含 `kind/value/hostId/remotePath/createdAt`，路径只含 `kind/value/hostId/createdAt`，参数只含 `kind/value/commandId/parameterName/createdAt`，连接只含 `kind/hostId/remotePath/createdAt`。连接记录必须匹配 schema v10 中由 Rust 在 host-key 校验与认证完成后签发的事实；系统 OpenSSH/Mosh 先执行固定参数、20 秒硬截止的非交互认证检查。前端 UUID/时间、进程启动、旧快照或连接尝试都不能制造同步成功事实。各类本地 ID 映射为稳定 UUID，清空和主机移除发 tombstone；密码、Token、私钥、credential reference、未知 host、非法路径/时间或不完整字段 fail closed。新增 WebDAV/SFTP/S3 配置与凭据命令只允许 desktop capability，Android Sync 继续只读/禁用。自定义字体资产/名称与设备本地编辑器路径保持本机；Gateway 产品入口和真实多设备矩阵必须作为后续独立项完成。
+- 当前入口不会把 AppState 快照直接上传。主机公开字段、通过秘密扫描的 `custom=true` 脚本、五个固定设置实体、规范化 PNG/结构校验 JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史会经业务库 changefeed、具名 operation、加密 outbox 与独立远端投影交接。PNG 安装必须经过 Rust 解码、16777216 像素/64 MiB 解码/8 MiB 编码上限和重新编码；JPEG 必须以 SOI/EOI 封闭，WebP 必须通过 RIFF/chunk 边界；三种格式都由 Rust 生成随机 256-bit blob ID，使用 256 KiB 块、每块独立 nonce/AAD、加密 manifest 与完整哈希，全部块验证并安全安装后才写回 AppState 引用。schema-v3 journal 还记录活动设备确认式 GC 摘要；只有 frontier 不落后、30 天保留满足且所有 manifest/块重新认证后才尝试条件删除，不支持该能力的 provider 保守保留。命令完整实体只含 `kind/value/hostId/remotePath/createdAt`，路径只含 `kind/value/hostId/createdAt`，参数只含 `kind/value/commandId/parameterName/createdAt`，连接只含 `kind/hostId/remotePath/createdAt`。连接记录必须匹配 schema v10 中由 Rust 在 host-key 校验与认证完成后签发的事实；系统 OpenSSH/Mosh 先执行固定参数、20 秒硬截止的非交互认证检查。前端 UUID/时间、进程启动、旧快照或连接尝试都不能制造同步成功事实。各类本地 ID 映射为稳定 UUID，清空和主机移除发 tombstone；密码、Token、私钥、credential reference、未知 host、非法路径/时间或不完整字段 fail closed。WebDAV/SFTP/S3/Gateway 配置与凭据命令只允许 desktop capability，Android Sync 继续只读/禁用。自定义字体资产/名称与设备本地编辑器路径保持本机；真实 Gateway 服务和多设备矩阵必须作为后续或外部项完成。
 
 ### 10.10 Android Preview 共享契约（Phase C）
 
@@ -305,7 +305,7 @@ WiX/MSI 不接受带字母的 SemVer prerelease 作为安装包版本。应用�
 ### 10.9 B8 协议回归矩阵（v0.3 工作树）
 
 - `sync_protocol_regression` 在跨模块边界验证：未知 v1 envelope、AEAD 错误密钥/篡改、对象身份搬移、journal 同 key/同身份 replay、已发布终态、merge 两种到达顺序和截断状态、Local Folder 截断字节与取消。每个失败都返回稳定错误码，不能把部分提交标为成功。
-- 已完成的 fake transport 结果只证明 Rust 适配器契约；Linux Actions 的单一临时 OpenSSH fixture 另覆盖 SFTP 精确 pin、错误 pin 拒绝、无覆盖写入、回读、列举与同名冲突，自建 HTTPS S3 fixture 覆盖 SigV4 验签、path-style、continuation、GET、条件 PUT、回读与同名冲突。B8 外部矩阵仍需多版本真实 OpenSSH SFTP（host-key 变化、权限、symlink、断线）、AWS/MinIO/其他 S3-compatible（virtual-hosted、迟延列举、409/412 重试、时钟偏差）、Gateway HTTPS（版本协商、TOTP、限流、重放、断网）和两台以上真实设备的恢复/轮换演练。
+- 已完成的 fake transport 结果只证明 Rust 适配器契约；Linux Actions 的单一临时 OpenSSH fixture 另覆盖 SFTP 精确 pin、错误 pin 拒绝、无覆盖写入、回读、列举与同名冲突，自建 HTTPS S3 fixture 覆盖 SigV4 验签、path-style、continuation、GET、条件 PUT、回读与同名冲突，自建 HTTPS Gateway fixture 覆盖版本协商、密码/TOTP 登录、bearer session、list/get、条件 PUT、回读与冲突。B8 外部矩阵仍需多版本真实 OpenSSH SFTP（host-key 变化、权限、symlink、断线）、AWS/MinIO/其他 S3-compatible（virtual-hosted、迟延列举、409/412 重试、时钟偏差）、真实 Gateway HTTPS（限流、重放、撤销、审计、断网）和两台以上真实设备的恢复/轮换演练。
 - 真实 provider 测试不得使用生产 endpoint 或真实密码/Token/私钥；fixture secret 必须是合成值，日志与报告只保留稳定错误码、时间和计数。
 
 ## 11. PR 与发布清单

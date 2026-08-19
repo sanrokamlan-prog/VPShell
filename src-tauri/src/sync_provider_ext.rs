@@ -374,6 +374,7 @@ impl GatewayLoginSecrets {
             || username.chars().any(char::is_control)
             || password.is_empty()
             || password.len() > 1_024
+            || password.contains('\0')
             || totp.as_deref().is_some_and(|value| {
                 value.len() != 6 || !value.bytes().all(|byte| byte.is_ascii_digit())
             })

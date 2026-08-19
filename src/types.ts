@@ -136,6 +136,7 @@ export interface SyncSettings {
   s3Bucket: string;
   s3Prefix: string;
   s3PathStyle: boolean;
+  gatewayVaultId: string;
   lastSyncedAt?: string;
   totpEnabled: boolean;
   syncSecrets: boolean;

@@ -240,6 +240,31 @@ jobs:
           echo "VPSHELL_S3_TEST_CA=$TLS_DIR/ca.pem" >> "$GITHUB_ENV"
           echo "VPSHELL_S3_TEST_ACCESS_KEY_ID=$VPSHELL_S3_FIXTURE_ACCESS_KEY_ID" >> "$GITHUB_ENV"
           echo "VPSHELL_S3_TEST_SECRET_ACCESS_KEY=$VPSHELL_S3_FIXTURE_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
+      - name: Set up ephemeral Gateway protocol fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TLS_DIR="$RUNNER_TEMP/vpshell-webdav-tls"
+          nohup python3 .github/scripts/gateway_fixture.py \
+            --cert "$TLS_DIR/server.pem" \
+            --key "$TLS_DIR/server.key" \
+            --port 24445 >"$RUNNER_TEMP/vpshell-gateway-fixture.log" 2>&1 &
+          echo "$!" > "$TLS_DIR/gateway-server.pid"
+          for attempt in {1..20}; do
+            if curl --silent --show-error \
+              --cacert "$TLS_DIR/ca.pem" \
+              --output /dev/null \
+              https://127.0.0.1:24445/api/v1/health; then
+              break
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "VPSHELL_GATEWAY_TEST_ENDPOINT=https://127.0.0.1:24445/api/v1/" >> "$GITHUB_ENV"
+          echo "VPSHELL_GATEWAY_TEST_CA=$TLS_DIR/ca.pem" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

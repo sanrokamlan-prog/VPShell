@@ -26,6 +26,7 @@ use crate::{
         Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
         create_password_keyslot, open_password_keyslot,
     },
+    sync_gateway_provider::ReqwestGatewayAuthenticator,
     sync_merge::{EntityKind, FieldValue, LocalEntityMutation, MergeConflictSnapshot},
     sync_outbox::{AttemptFailure, JournalErrorCode, RemoteApplyOutcome, SyncJournal},
     sync_provider::{
@@ -35,10 +36,14 @@ use crate::{
     },
     sync_provider_ca::validate_webdav_ca_reference,
     sync_provider_credentials::{
-        read_s3_credential, read_webdav_credential, validate_s3_credential_reference,
+        read_gateway_credential, read_s3_credential, read_webdav_credential,
+        validate_gateway_credential_reference, validate_s3_credential_reference,
         validate_webdav_credential_reference,
     },
-    sync_provider_ext::{S3ProviderConfig, S3SyncProvider, SftpProviderConfig, SftpSyncProvider},
+    sync_provider_ext::{
+        GatewayLoginSecrets, GatewayProviderConfig, GatewaySyncProvider, S3ProviderConfig,
+        S3SyncProvider, SftpProviderConfig, SftpSyncProvider,
+    },
     sync_s3_provider::ReqwestS3ObjectTransport,
     sync_sftp_provider::Ssh2SftpObjectTransport,
 };
@@ -102,7 +107,26 @@ pub(crate) struct ConfigureS3SyncRequest {
     mode: LocalFolderSetupMode,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfigureGatewaySyncRequest {
+    endpoint: String,
+    gateway_vault_id: String,
+    username: String,
+    provider_credential_ref: String,
+    provider_ca_ref: Option<String>,
+    totp: Option<String>,
+    password: String,
+    mode: LocalFolderSetupMode,
+}
+
 impl ConfigureS3SyncRequest {
+    pub(crate) fn provider_ca_reference(&self) -> Option<&str> {
+        self.provider_ca_ref.as_deref()
+    }
+}
+
+impl ConfigureGatewaySyncRequest {
     pub(crate) fn provider_ca_reference(&self) -> Option<&str> {
         self.provider_ca_ref.as_deref()
     }
@@ -645,6 +669,56 @@ impl SyncCoordinatorManager {
             request.mode,
             Argon2Parameters::default(),
             "S3-compatible",
+        )
+    }
+
+    pub(crate) fn configure_gateway(
+        &self,
+        request: ConfigureGatewaySyncRequest,
+        trusted_ca_pem: Option<Vec<u8>>,
+    ) -> Result<SyncCoordinatorStatus, String> {
+        let _guard = self.begin_configuration()?;
+        let password = Zeroizing::new(request.password);
+        validate_sync_password(password.as_bytes())?;
+        let trusted_ca_pem = match (request.provider_ca_ref.as_deref(), trusted_ca_pem) {
+            (None, None) => None,
+            (Some(reference), Some(pem)) => {
+                validate_webdav_ca_reference(reference)?;
+                Some(pem)
+            }
+            _ => return Err("Gateway CA 引用和受管证书必须同时提供，或同时留空".to_string()),
+        };
+        let config = GatewayProviderConfig {
+            endpoint: request.endpoint,
+            vault_id: request.gateway_vault_id,
+            device_id: self.journal.local_device_id().map_err(journal_code)?,
+            timeout_seconds: 30,
+        };
+        config
+            .validate()
+            .map_err(|error| provider_setup_error(&error, "Gateway"))?;
+        validate_gateway_credential_reference(&request.provider_credential_ref)?;
+        let login_password = read_gateway_credential(&request.provider_credential_ref)?;
+        let secrets = GatewayLoginSecrets::new(
+            request.username,
+            login_password.as_str().to_string(),
+            request.totp.filter(|value| !value.is_empty()),
+        )
+        .map_err(|error| provider_setup_error(&error, "Gateway"))?;
+        let authenticator =
+            ReqwestGatewayAuthenticator::connect(&config, trusted_ca_pem.as_deref())
+                .map_err(|error| provider_setup_error(&error, "Gateway"))?;
+        let cancellation = ProviderCancellation::default();
+        let provider: Arc<dyn SyncObjectProvider> = Arc::new(
+            GatewaySyncProvider::login(config, secrets, &authenticator, &cancellation)
+                .map_err(|error| provider_setup_error(&error, "Gateway"))?,
+        );
+        self.configure_provider_inner(
+            provider,
+            password,
+            request.mode,
+            Argon2Parameters::default(),
+            "Gateway",
         )
     }
 
@@ -2914,6 +2988,29 @@ mod tests {
         };
         let error = coordinator.configure_s3(request, None).unwrap_err();
         assert!(error.contains("S3-compatible 配置无效"));
+        assert!(!coordinator.status().unwrap().configured);
+    }
+
+    #[test]
+    fn gateway_configuration_rejects_invalid_config_before_keyring_or_network() {
+        let root = TempDir::new("gateway-config-validation");
+        let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();
+        let request = ConfigureGatewaySyncRequest {
+            endpoint: "http://gateway.example.com/api/v1/".to_string(),
+            gateway_vault_id: Uuid::new_v4().to_string(),
+            username: "fixture-user".to_string(),
+            provider_credential_ref: format!(
+                "{}{}",
+                crate::sync_provider_credentials::GATEWAY_CREDENTIAL_PREFIX,
+                Uuid::new_v4()
+            ),
+            provider_ca_ref: None,
+            totp: Some("123456".to_string()),
+            password: "fixture-password".to_string(),
+            mode: LocalFolderSetupMode::Unlock,
+        };
+        let error = coordinator.configure_gateway(request, None).unwrap_err();
+        assert!(error.contains("Gateway 配置无效"));
         assert!(!coordinator.status().unwrap().configured);
     }
 

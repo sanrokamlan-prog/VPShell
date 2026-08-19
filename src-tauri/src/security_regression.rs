@@ -95,7 +95,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(
             commands.len(),
-            100,
+            102,
             "command manifest contains duplicates or changed count"
         );
 
@@ -165,8 +165,10 @@ mod tests {
             "allow-configure-webdav-sync",
             "allow-configure-sftp-sync",
             "allow-configure-s3-sync",
+            "allow-configure-gateway-sync",
             "allow-store-webdav-credential",
             "allow-store-s3-credential",
+            "allow-store-gateway-credential",
             "allow-install-webdav-ca",
             "allow-delete-webdav-ca",
             "allow-run-sync-once",
@@ -238,10 +240,12 @@ mod tests {
         let provider_ca = include_str!("sync_provider_ca.rs");
         let sftp_provider = include_str!("sync_sftp_provider.rs");
         let s3_provider = include_str!("sync_s3_provider.rs");
+        let gateway_provider = include_str!("sync_gateway_provider.rs");
         assert!(coordinator.contains("pub(crate) struct ConfigureLocalFolderSyncRequest"));
         assert!(coordinator.contains("pub(crate) struct ConfigureWebDavSyncRequest"));
         assert!(coordinator.contains("pub(crate) struct ConfigureSftpSyncRequest"));
         assert!(coordinator.contains("pub(crate) struct ConfigureS3SyncRequest"));
+        assert!(coordinator.contains("pub(crate) struct ConfigureGatewaySyncRequest"));
         assert!(coordinator.contains("let password = Zeroizing::new(request.password)"));
         assert!(
             coordinator
@@ -253,6 +257,7 @@ mod tests {
             assert!(!provider_ca.contains(forbidden));
             assert!(!sftp_provider.contains(forbidden));
             assert!(!s3_provider.contains(forbidden));
+            assert!(!gateway_provider.contains(forbidden));
         }
 
         let frontend = include_str!("../../src/App.tsx");
@@ -263,8 +268,10 @@ mod tests {
             "configure_webdav_sync",
             "configure_sftp_sync",
             "configure_s3_sync",
+            "configure_gateway_sync",
             "store_webdav_credential",
             "store_s3_credential",
+            "store_gateway_credential",
             "install_webdav_ca",
             "delete_webdav_ca",
             "run_sync_once",
@@ -276,6 +283,7 @@ mod tests {
         }
         assert!(frontend.contains("provider === \"sftp\""));
         assert!(frontend.contains("provider === \"s3\""));
+        assert!(frontend.contains("provider === \"gateway\""));
         assert!(frontend.contains("Android Preview 中禁用"));
         let types = include_str!("../../src/types.ts");
         assert!(types.contains("providerCredentialRef?: string"));

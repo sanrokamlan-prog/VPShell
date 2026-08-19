@@ -5640,6 +5640,27 @@ mod tests {
             .unwrap();
         assert_eq!(s3_metadata, "[\"sync\"]");
         assert!(!s3_metadata.contains(&s3_reference));
+
+        let gateway_reference = format!("sync-gateway-{}", Uuid::new_v4());
+        state["sync"]["provider"] = Value::String("gateway".to_string());
+        state["sync"]["username"] = Value::String("gateway-user".to_string());
+        state["sync"]["providerCredentialRef"] = Value::String(gateway_reference.clone());
+        store
+            .save(SaveAppStateRequest {
+                state_json: state.to_string(),
+                expected_revision: 3,
+            })
+            .expect("save local Gateway provider reference");
+        assert_eq!(store.pending_entity_sync_changes(128).unwrap(), initial);
+        let gateway_metadata: String = connection
+            .query_row(
+                "SELECT domains_json FROM app_events ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(gateway_metadata, "[\"sync\"]");
+        assert!(!gateway_metadata.contains(&gateway_reference));
     }
 
     #[test]
@@ -8072,6 +8093,9 @@ mod tests {
             Value::String(format!("sync-s3-{}", Uuid::new_v4()));
         android_refs["sync"]["providerCaRef"] =
             Value::String(format!("sync-webdav-ca-{}", Uuid::new_v4()));
+        assert!(validate_state_json(&android_refs.to_string()).is_ok());
+        android_refs["sync"]["providerCredentialRef"] =
+            Value::String(format!("sync-gateway-{}", Uuid::new_v4()));
         assert!(validate_state_json(&android_refs.to_string()).is_ok());
         android_refs["sync"]["providerCredentialRef"] = Value::Number(1.into());
         assert!(validate_state_json(&android_refs.to_string()).is_err());

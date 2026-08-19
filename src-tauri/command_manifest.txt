@@ -26,6 +26,7 @@ stop_terminal
 delete_credential
 store_webdav_credential
 store_s3_credential
+store_gateway_credential
 install_webdav_ca
 delete_webdav_ca
 import_finalshell
@@ -37,6 +38,7 @@ configure_local_folder_sync
 configure_webdav_sync
 configure_sftp_sync
 configure_s3_sync
+configure_gateway_sync
 run_sync_once
 resolve_sync_conflict
 cancel_sync

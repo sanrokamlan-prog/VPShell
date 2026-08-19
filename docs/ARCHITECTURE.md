@@ -36,7 +36,7 @@ v0.1.0 是进入实机验收的桌面 Alpha。当前真实实现如下。
 | 文件面板 | 真实 SFTP 列表、递归上传下载、拖放、进度、暂存校验与原子提交；`tar + zstd` 回退；后端任务恢复/取消；v0.2 工作区的目录、重命名、跨目录移动、递归权限和批量删除操作 | 已发布 Alpha 尚无文件变更操作；暂无字节级断点续传；移动覆盖策略不适用于普通上传；SFTP 不支持 ProxyJump |
 | 外部编辑 | SFTP 下载受管临时副本，Rust 适配 Notepad++、VS Code/VSCodium、自定义/系统编辑器，检测保存并比较远端哈希后回传；v0.2 工作树提供重启恢复与冲突中心 | 仅普通文件且不超过 64 MiB；ProxyJump 尚未实现，Windows/macOS 编辑器仍需实机验收 |
 | 配置迁移 | FinalShell 可选密码进入 OS keyring；v0.2 工作树提供 OpenSSH、PuTTY、Xshell、SecureCRT、MobaXterm、Tabby、Termius 非敏感字段预览/导入 | 厂商版本差异需真实客户端导出验收；不导入其他应用 vault、Token、私钥内容或隐式主机信任 |
-| 同步 | Local Folder/WebDAV/SFTP/S3-compatible 显式初始化/解锁、E2EE 手动单周期与 Rust-owned 解锁期自动调度、WebDAV/S3 本机 PEM CA、SFTP 已保存主机与精确 host-key pin、S3 SigV4 与系统凭据引用、主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG/WebP 背景分块、四类公开历史双向合并、活动设备确认式 blob GC 及持久冲突解决；Android 只读状态 | 自定义字体资产、Gateway 产品入口或真实多设备矩阵；GC 对 SFTP/S3 等不支持条件删除的 provider 保守保留，自动调度不是应用关闭后的系统服务 |
+| 同步 | Local Folder/WebDAV/SFTP/S3-compatible/Gateway 显式初始化/解锁、E2EE 手动单周期与 Rust-owned 解锁期自动调度、HTTPS provider 本机 PEM CA、SFTP 已保存主机与精确 host-key pin、S3 SigV4、Gateway 版本化 login/session 与系统凭据引用、主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG/WebP 背景分块、四类公开历史双向合并、活动设备确认式 blob GC 及持久冲突解决；Android 只读状态 | 自定义字体资产、真实 Gateway 服务或真实多设备矩阵；GC 对 SFTP/S3/Gateway 等不支持条件删除的 provider 保守保留，自动调度不是应用关闭后的系统服务 |
 
 当前工作树已将 CSP 设为显式指令集，`object/frame/form` 禁止，脚本只允许 bundled self；capability 只绑定 `main` 窗口和实际使用的自定义命令/插件动作。SQLite 快照、资产缓存和事件元数据由 Rust 管理，但本地数据库未加密，不能把 v0.1.0 当作生产密码管理器。
 
@@ -327,9 +327,9 @@ attachments / changelog
 
 `sync_credential_vault` 是与业务 VMK 分离的 Rust-only 可选层。策略默认关闭，expected revision 与 business device registry 共同控制最多 32 个活动/撤销授权，撤销单调且要求 CVK 轮换。独立随机 CVK 不可序列化/调试并清零，以 `credentials` 密码 keyslot 包裹；SSH 密码、私钥口令、OpenSSH 私钥和 access token 分别进入独立 HKDF/AAD 域的严格认证信封。本机 credential reference 只用于一次性 Rust 读取且不写入信封/object key/诊断。静态回归禁止该模块出现 Tauri command、事件或日志宏；系统钥匙串写回、provider/outbox、CVK 恢复/轮换、协调器与 UI 仍未实现。
 
-后续 provider 包括 S3 兼容存储和自建 Gateway；SFTP 已作为第三个桌面产品入口接通。网盘可通过已实现的 Local Folder 基础层或后续 rclone 适配。事件段先 zstd 压缩，再进入已实现的认证加密信封；二级密码用 Argon2id 包裹随机 Vault Master Key。
+桌面 Local Folder、WebDAV、SFTP、S3 兼容存储和自建 Gateway 均已接通产品入口。网盘可通过已实现的 Local Folder 基础层或后续 rclone 适配。事件段先 zstd 压缩，再进入已实现的认证加密信封；二级密码用 Argon2id 包裹随机 Vault Master Key。
 
-`sync_provider_ext` 已把 SFTP、S3-compatible 与 Gateway 作为三个专用 Rust transport trait 接入 `SyncObjectProvider`。公共适配层重新验证最多 10,000 项的 list 响应、key/游标/前缀/ETag/24 MiB 大小，拒绝 SFTP 符号链接/特殊对象，执行取消、条件无覆盖创建和提交后无取消回读。SFTP 无秘密配置要求绝对非根路径与固定 host-key SHA-256，真实 `ssh2` transport 已通过单一 Linux OpenSSH fixture。S3 要求无 URL 凭据/query/fragment/base path 的 HTTPS endpoint，使用完整 payload hash 的 SigV4、ListObjectsV2 continuation、GET 与 `If-None-Match: *` 条件 PUT；签名凭据整体保存在系统 keyring，派生密钥用后清零。Linux Actions 的自建 HTTPS fixture 独立重算签名并强制分页/条件写，但不替代 AWS、MinIO 或其他实现。Gateway 登录 secret 使用清零容器，只在 authentication call 中借用，session 不保存 TOTP且底层错误净化。Gateway HTTP 尚未接入，SFTP/S3 也仍缺广泛服务版本、故障注入和真实多设备矩阵，因此不能宣称广泛外部服务兼容。
+`sync_provider_ext` 已把 SFTP、S3-compatible 与 Gateway 作为三个专用 Rust transport trait 接入 `SyncObjectProvider`。公共适配层重新验证最多 10,000 项的 list 响应、key/游标/前缀/ETag/24 MiB 大小，拒绝 SFTP 符号链接/特殊对象，执行取消、条件无覆盖创建和提交后无取消回读。SFTP 无秘密配置要求绝对非根路径与固定 host-key SHA-256，真实 `ssh2` transport 已通过单一 Linux OpenSSH fixture。S3 要求无 URL 凭据/query/fragment/base path 的 HTTPS endpoint，使用完整 payload hash 的 SigV4、ListObjectsV2 continuation、GET 与 `If-None-Match: *` 条件 PUT；签名凭据整体保存在系统 keyring，派生密钥用后清零。Linux Actions 的自建 HTTPS fixture 独立重算签名并强制分页/条件写，但不替代 AWS、MinIO 或其他实现。Gateway 使用版本化 HTTPS login/session/list/get/条件 PUT；登录 secret 使用清零容器，只在 authentication call 中借用，session 不保存 TOTP且底层错误净化，Linux Actions 的 HTTPS fixture 验证协议字段和对象路径。SFTP/S3/Gateway 仍缺广泛服务版本、故障注入和真实多设备矩阵，因此不能宣称广泛外部服务兼容。
 
 同步的对象、密钥层级、冲突规则、TOTP 边界和恢复流程见 [SYNC.md](./SYNC.md)。当前桌面页面把 Local Folder bootstrap、手动单周期和解锁期 Rust 自动调度接到这些机制，但这不代表完整多设备业务同步已经交付。
 

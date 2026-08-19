@@ -5,6 +5,7 @@ use crate::CREDENTIAL_SERVICE;
 
 pub(crate) const WEBDAV_CREDENTIAL_PREFIX: &str = "sync-webdav-";
 pub(crate) const S3_CREDENTIAL_PREFIX: &str = "sync-s3-";
+pub(crate) const GATEWAY_CREDENTIAL_PREFIX: &str = "sync-gateway-";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -18,6 +19,12 @@ pub(crate) struct StoreS3CredentialRequest {
     access_key_id: String,
     secret_access_key: String,
     session_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoreGatewayCredentialRequest {
+    password: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -110,6 +117,18 @@ pub(crate) fn store_s3_credential(request: StoreS3CredentialRequest) -> Result<S
     Ok(reference)
 }
 
+pub(crate) fn store_gateway_credential(
+    request: StoreGatewayCredentialRequest,
+) -> Result<String, String> {
+    let password = Zeroizing::new(request.password);
+    validate_gateway_password(password.as_bytes())?;
+    let reference = format!("{GATEWAY_CREDENTIAL_PREFIX}{}", uuid::Uuid::new_v4());
+    keyring::Entry::new(CREDENTIAL_SERVICE, &reference)
+        .and_then(|entry| entry.set_password(password.as_str()))
+        .map_err(|_| "无法把 Gateway 密码保存到系统凭据管理器".to_string())?;
+    Ok(reference)
+}
+
 pub(crate) fn read_webdav_credential(reference: &str) -> Result<Zeroizing<String>, String> {
     validate_webdav_credential_reference(reference)?;
     let secret = keyring::Entry::new(CREDENTIAL_SERVICE, reference)
@@ -146,6 +165,17 @@ pub(crate) fn read_s3_credential(reference: &str) -> Result<S3Credentials, Strin
     )
 }
 
+pub(crate) fn read_gateway_credential(reference: &str) -> Result<Zeroizing<String>, String> {
+    validate_gateway_credential_reference(reference)?;
+    let secret = keyring::Entry::new(CREDENTIAL_SERVICE, reference)
+        .map_err(|_| "无法访问系统凭据管理器".to_string())?
+        .get_password()
+        .map_err(|_| "未找到已保存的 Gateway 凭据".to_string())?;
+    let secret = Zeroizing::new(secret);
+    validate_gateway_password(secret.as_bytes())?;
+    Ok(secret)
+}
+
 pub(crate) fn validate_webdav_credential_reference(reference: &str) -> Result<(), String> {
     if reference.len() > 128
         || !reference.starts_with(WEBDAV_CREDENTIAL_PREFIX)
@@ -166,9 +196,15 @@ pub(crate) fn validate_s3_credential_reference(reference: &str) -> Result<(), St
     validate_reference(reference, S3_CREDENTIAL_PREFIX, "S3")
 }
 
+pub(crate) fn validate_gateway_credential_reference(reference: &str) -> Result<(), String> {
+    validate_reference(reference, GATEWAY_CREDENTIAL_PREFIX, "Gateway")
+}
+
 pub(crate) fn validate_sync_provider_credential_reference(reference: &str) -> Result<(), String> {
     if reference.starts_with(WEBDAV_CREDENTIAL_PREFIX) {
         validate_webdav_credential_reference(reference)
+    } else if reference.starts_with(GATEWAY_CREDENTIAL_PREFIX) {
+        validate_gateway_credential_reference(reference)
     } else {
         validate_s3_credential_reference(reference)
     }
@@ -219,6 +255,13 @@ fn validate_s3_credentials(
 fn validate_webdav_password(password: &[u8]) -> Result<(), String> {
     if password.is_empty() || password.len() > 1_024 || password.contains(&0) {
         return Err("WebDAV 密码必须为 1 至 1024 字节且不能包含 NUL".to_string());
+    }
+    Ok(())
+}
+
+fn validate_gateway_password(password: &[u8]) -> Result<(), String> {
+    if password.is_empty() || password.len() > 1_024 || password.contains(&0) {
+        return Err("Gateway 密码必须为 1 至 1024 字节且不能包含 NUL".to_string());
     }
     Ok(())
 }
@@ -278,5 +321,23 @@ mod tests {
         .unwrap();
         assert_eq!(valid.access_key_id(), "access");
         assert_eq!(valid.session_token(), Some("session-token"));
+    }
+
+    #[test]
+    fn gateway_credential_reference_and_password_are_strictly_bounded() {
+        let reference = format!("{GATEWAY_CREDENTIAL_PREFIX}{}", uuid::Uuid::new_v4());
+        assert!(validate_gateway_credential_reference(&reference).is_ok());
+        assert!(validate_sync_provider_credential_reference(&reference).is_ok());
+        for invalid in [
+            "sync-gateway-not-a-uuid",
+            "sync-gateway-00000000-0000-0000-0000-000000000000/escape",
+            "sync-s3-00000000-0000-0000-0000-000000000000",
+        ] {
+            assert!(validate_gateway_credential_reference(invalid).is_err());
+        }
+        assert!(validate_gateway_password(b"").is_err());
+        assert!(validate_gateway_password(&vec![b'x'; 1_025]).is_err());
+        assert!(validate_gateway_password(b"contains\0nul").is_err());
+        assert!(validate_gateway_password(b"valid-password").is_ok());
     }
 }

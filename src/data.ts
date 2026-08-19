@@ -427,6 +427,7 @@ export const initialState: AppState = {
     s3Bucket: "",
     s3Prefix: "vpshell",
     s3PathStyle: true,
+    gatewayVaultId: "",
     totpEnabled: false,
     syncSecrets: false,
   },

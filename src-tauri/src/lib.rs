@@ -48,6 +48,7 @@ mod sync_coordinator;
 mod sync_credential_vault;
 #[allow(dead_code)] // The coordinator/provider phases consume this bounded crypto API.
 mod sync_crypto;
+mod sync_gateway_provider;
 #[allow(dead_code)] // The sync coordinator/UI phases consume the deterministic merge model.
 mod sync_merge;
 #[allow(dead_code)] // The merge/coordinator phases consume the durable sync journal.
@@ -1689,6 +1690,39 @@ async fn configure_s3_sync(
     Ok(status)
 }
 
+#[tauri::command]
+async fn configure_gateway_sync(
+    app: tauri::AppHandle,
+    coordinator: State<'_, sync_coordinator::SyncCoordinatorManager>,
+    ca_manager: State<'_, sync_provider_ca::SyncProviderCaManager>,
+    scheduler: State<'_, sync_scheduler::AutomaticSyncScheduler>,
+    store: State<'_, app_store::AppStore>,
+    request: sync_coordinator::ConfigureGatewaySyncRequest,
+) -> Result<sync_coordinator::SyncCoordinatorStatus, String> {
+    sync_scheduler::AutomaticSyncScheduler::ensure_supported()?;
+    let coordinator = coordinator.inner().clone();
+    let ca_manager = ca_manager.inner().clone();
+    let store = store.inner().clone();
+    let worker_coordinator = coordinator.clone();
+    let worker_store = store.clone();
+    let provider_ca_ref = request.provider_ca_reference().map(str::to_string);
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let trusted_ca_pem = provider_ca_ref
+            .as_deref()
+            .map(|reference| ca_manager.read(reference))
+            .transpose()?;
+        worker_coordinator.configure_gateway(request, trusted_ca_pem)?;
+        worker_coordinator.status_with_app_store(&worker_store)
+    })
+    .await
+    .map_err(|error| format!("Gateway 同步配置任务异常结束: {error}"))??;
+    if let Err(error) = scheduler.start(app, coordinator.clone(), store) {
+        let _ = coordinator.detach_session();
+        return Err(error);
+    }
+    Ok(status)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunSyncOnceResult {
@@ -1941,6 +1975,17 @@ async fn store_s3_credential(
 }
 
 #[tauri::command]
+async fn store_gateway_credential(
+    request: sync_provider_credentials::StoreGatewayCredentialRequest,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sync_provider_credentials::store_gateway_credential(request)
+    })
+    .await
+    .map_err(|error| format!("Gateway 凭据保存任务异常结束: {error}"))?
+}
+
+#[tauri::command]
 async fn install_webdav_ca(
     manager: State<'_, sync_provider_ca::SyncProviderCaManager>,
     request: sync_provider_ca::InstallWebDavCaRequest,
@@ -2049,6 +2094,7 @@ pub fn run() {
             delete_credential,
             store_webdav_credential,
             store_s3_credential,
+            store_gateway_credential,
             install_webdav_ca,
             delete_webdav_ca,
             import_finalshell,
@@ -2060,6 +2106,7 @@ pub fn run() {
             configure_webdav_sync,
             configure_sftp_sync,
             configure_s3_sync,
+            configure_gateway_sync,
             run_sync_once,
             resolve_sync_conflict,
             cancel_sync,
