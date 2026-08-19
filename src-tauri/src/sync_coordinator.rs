@@ -46,12 +46,12 @@ use crate::{
         GatewayLoginSecrets, GatewayProviderConfig, GatewaySyncProvider, S3ProviderConfig,
         S3SyncProvider, SftpProviderConfig, SftpSyncProvider,
     },
-    sync_s3_provider::ReqwestS3ObjectTransport,
-    sync_sftp_provider::Ssh2SftpObjectTransport,
     sync_recovery::{
         DeviceRegistry, SignedDeviceRegistryEnvelope, decrypt_signed_device_registry,
         encrypt_signed_device_registry,
     },
+    sync_s3_provider::ReqwestS3ObjectTransport,
+    sync_sftp_provider::Ssh2SftpObjectTransport,
 };
 
 const COORDINATOR_SCHEMA_VERSION: u16 = 2;
@@ -921,13 +921,8 @@ impl SyncCoordinatorManager {
             return Err("reconcile-required".to_string());
         }
         let device_registry = if registry_required {
-            let (registry, hash) = self.refresh_device_registry(
-                provider,
-                vault_key,
-                vault_id,
-                cancellation,
-                now_ms,
-            )?;
+            let (registry, hash) =
+                self.refresh_device_registry(provider, vault_key, vault_id, cancellation, now_ms)?;
             let local_device_id = self.journal.local_device_id().map_err(journal_code)?;
             let local_device_authorized = registry.is_authorized(&local_device_id);
             self.update_device_registry(generation, registry.clone(), hash)?;
@@ -1478,13 +1473,9 @@ impl SyncCoordinatorManager {
                 now_ms,
             )
             .map_err(|_| "registry-integrity".to_string())?;
-            let signed = SignedDeviceRegistryEnvelope::sign(
-                &registry,
-                None,
-                &local_device_id,
-                &signing_key,
-            )
-            .map_err(|_| "registry-integrity".to_string())?;
+            let signed =
+                SignedDeviceRegistryEnvelope::sign(&registry, None, &local_device_id, &signing_key)
+                    .map_err(|_| "registry-integrity".to_string())?;
             let encrypted = encrypt_signed_device_registry(&signed, vault_key)
                 .map_err(|_| "registry-integrity".to_string())?;
             let encrypted = encrypted
@@ -1505,7 +1496,9 @@ impl SyncCoordinatorManager {
         let (mut registry, mut registry_hash, mut revision) = if let Some(trusted) = trusted {
             let signed = SignedDeviceRegistryEnvelope::decode(&trusted.signed_envelope)
                 .map_err(|_| "registry-integrity".to_string())?;
-            if signed.hash().map_err(|_| "registry-integrity".to_string())?
+            if signed
+                .hash()
+                .map_err(|_| "registry-integrity".to_string())?
                 != trusted.envelope_hash
             {
                 return Err("registry-integrity".to_string());
@@ -1525,14 +1518,12 @@ impl SyncCoordinatorManager {
             if encoded.len() as u64 != remote_current.size {
                 return Err("registry-integrity".to_string());
             }
-            let remote_signed = decrypt_signed_device_registry(
-                &encoded,
-                vault_key,
-                vault_id,
-                trusted.revision,
-            )
-            .map_err(|_| "registry-integrity".to_string())?;
-            if remote_signed.hash().map_err(|_| "registry-integrity".to_string())?
+            let remote_signed =
+                decrypt_signed_device_registry(&encoded, vault_key, vault_id, trusted.revision)
+                    .map_err(|_| "registry-integrity".to_string())?;
+            if remote_signed
+                .hash()
+                .map_err(|_| "registry-integrity".to_string())?
                 != trusted.envelope_hash
             {
                 return Err("registry-rollback".to_string());
@@ -1556,15 +1547,22 @@ impl SyncCoordinatorManager {
             if registry.vault_id() != vault_id {
                 return Err("registry-integrity".to_string());
             }
-            let hash = signed.hash().map_err(|_| "registry-integrity".to_string())?;
-            let encoded = signed.encode().map_err(|_| "registry-integrity".to_string())?;
+            let hash = signed
+                .hash()
+                .map_err(|_| "registry-integrity".to_string())?;
+            let encoded = signed
+                .encode()
+                .map_err(|_| "registry-integrity".to_string())?;
             self.journal
                 .advance_trusted_device_registry(vault_id, None, 1, &hash, &encoded, now_ms)
                 .map_err(registry_journal_code)?;
             (registry, hash, 1)
         };
 
-        let highest = *remote.keys().next_back().ok_or_else(|| "registry-rollback".to_string())?;
+        let highest = *remote
+            .keys()
+            .next_back()
+            .ok_or_else(|| "registry-rollback".to_string())?;
         if highest < revision {
             return Err("registry-rollback".to_string());
         }
@@ -1583,8 +1581,12 @@ impl SyncCoordinatorManager {
             let next = signed
                 .verify_successor(&registry, &registry_hash)
                 .map_err(|_| "registry-integrity".to_string())?;
-            let next_hash = signed.hash().map_err(|_| "registry-integrity".to_string())?;
-            let encoded = signed.encode().map_err(|_| "registry-integrity".to_string())?;
+            let next_hash = signed
+                .hash()
+                .map_err(|_| "registry-integrity".to_string())?;
+            let encoded = signed
+                .encode()
+                .map_err(|_| "registry-integrity".to_string())?;
             self.journal
                 .advance_trusted_device_registry(
                     vault_id,
@@ -1646,8 +1648,7 @@ impl SyncCoordinatorManager {
             let Some(next) = page.next_cursor else {
                 break;
             };
-            if cursor.as_ref().is_some_and(|current| next <= *current)
-                || !seen_keys.contains(&next)
+            if cursor.as_ref().is_some_and(|current| next <= *current) || !seen_keys.contains(&next)
             {
                 return Err("registry-integrity".to_string());
             }
@@ -3238,11 +3239,12 @@ mod tests {
         );
 
         fs::remove_file(registry_path).unwrap();
-        let rollback = coordinator
-            .run_once(&test_app_store(&root), 3_000)
-            .unwrap();
+        let rollback = coordinator.run_once(&test_app_store(&root), 3_000).unwrap();
         assert_eq!(rollback.phase, SyncCoordinatorPhase::Suspended);
-        assert_eq!(rollback.last_error_code.as_deref(), Some("registry-rollback"));
+        assert_eq!(
+            rollback.last_error_code.as_deref(),
+            Some("registry-rollback")
+        );
     }
 
     #[test]
@@ -3266,11 +3268,11 @@ mod tests {
         };
         let unknown_device = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
         let operation_bytes = operation(unknown_device, 1);
-        let operation_id = serde_json::from_slice::<serde_json::Value>(&operation_bytes).unwrap()
-            ["operationId"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let operation_id =
+            serde_json::from_slice::<serde_json::Value>(&operation_bytes).unwrap()["operationId"]
+                .as_str()
+                .unwrap()
+                .to_string();
         let operation = crate::sync_merge::MergeOperation::decode(&operation_bytes).unwrap();
         let signing_key = DeviceSigningKey::from_bytes([19; 32]);
         let signed = SignedOperationEnvelope::sign(&operation, &signing_key)
@@ -3294,9 +3296,7 @@ mod tests {
             encrypted,
         );
 
-        let status = coordinator
-            .run_once(&test_app_store(&root), 2_000)
-            .unwrap();
+        let status = coordinator.run_once(&test_app_store(&root), 2_000).unwrap();
         assert_eq!(status.phase, SyncCoordinatorPhase::Suspended);
         assert_eq!(status.last_error_code.as_deref(), Some("authentication"));
         assert_eq!(status.merge_revision, 0);

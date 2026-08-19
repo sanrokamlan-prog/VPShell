@@ -855,15 +855,16 @@ impl SyncJournal {
                     params![vault_id],
                     |row| {
                         let revision: i64 = row.get(0)?;
-                        Ok((revision, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
+                        Ok((
+                            revision,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
                     },
                 )
                 .optional()
                 .map_err(|_| {
-                    JournalError::new(
-                        JournalErrorCode::Storage,
-                        "无法读取设备 registry 信任水位",
-                    )
+                    JournalError::new(JournalErrorCode::Storage, "无法读取设备 registry 信任水位")
                 })?
                 .map(|(revision, envelope_hash, signed_envelope)| {
                     let revision = u64::try_from(revision).map_err(|_| {
@@ -930,10 +931,7 @@ impl SyncJournal {
                 )
                 .optional()
                 .map_err(|_| {
-                    JournalError::new(
-                        JournalErrorCode::Storage,
-                        "无法核对设备 registry 信任水位",
-                    )
+                    JournalError::new(JournalErrorCode::Storage, "无法核对设备 registry 信任水位")
                 })?;
             match (current.as_ref(), expected) {
                 (None, None) if revision == 1 => {}
@@ -952,11 +950,9 @@ impl SyncJournal {
                 (
                     Some((current_revision, current_hash, _)),
                     Some((expected_revision, expected_hash)),
-                )
-                    if *current_revision == expected_revision as i64
-                        && current_hash == expected_hash
-                        && revision == expected_revision.saturating_add(1) =>
-                {}
+                ) if *current_revision == expected_revision as i64
+                    && current_hash == expected_hash
+                    && revision == expected_revision.saturating_add(1) => {}
                 (Some((current_revision, _, _)), _) if *current_revision >= revision as i64 => {
                     return Err(JournalError::new(
                         JournalErrorCode::Replay,
@@ -989,10 +985,7 @@ impl SyncJournal {
                     ],
                 )
                 .map_err(|_| {
-                    JournalError::new(
-                        JournalErrorCode::Storage,
-                        "无法保存设备 registry 信任水位",
-                    )
+                    JournalError::new(JournalErrorCode::Storage, "无法保存设备 registry 信任水位")
                 })?;
             Ok(TrustedDeviceRegistrySnapshot {
                 vault_id,
@@ -2188,12 +2181,13 @@ impl SyncJournal {
             vault_key,
             now_ms,
             |transaction, plaintext| {
-                let operation = decode_trusted_signed_operation(plaintext, registry).map_err(|_| {
-                    JournalError::new(
-                        JournalErrorCode::Authentication,
-                        "远端同步 operation 未通过活动 registry 验签",
-                    )
-                })?;
+                let operation =
+                    decode_trusted_signed_operation(plaintext, registry).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Authentication,
+                            "远端同步 operation 未通过活动 registry 验签",
+                        )
+                    })?;
                 if operation.device_id() != outer_device_id {
                     return Err(JournalError::new(
                         JournalErrorCode::Authentication,

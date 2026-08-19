@@ -496,12 +496,13 @@ impl SignedDeviceRegistryEnvelope {
         }
         let registry = self.decode_registry()?;
         if registry.vault_id != previous.vault_id
-            || registry.revision != previous.revision.checked_add(1).ok_or_else(|| {
-                RecoveryError::new(
-                    RecoveryErrorCode::LimitExceeded,
-                    "device registry revision 已耗尽",
-                )
-            })?
+            || registry.revision
+                != previous.revision.checked_add(1).ok_or_else(|| {
+                    RecoveryError::new(
+                        RecoveryErrorCode::LimitExceeded,
+                        "device registry revision 已耗尽",
+                    )
+                })?
         {
             return Err(RecoveryError::new(
                 RecoveryErrorCode::Integrity,
@@ -547,7 +548,10 @@ impl SignedDeviceRegistryEnvelope {
         let signature = decode_exact_64(&self.signature, "device registry 签名")?;
         let signature = Signature::from_bytes(&signature);
         let verifying_key = VerifyingKey::from_bytes(&key).map_err(|_| {
-            RecoveryError::new(RecoveryErrorCode::Authentication, "device registry 公钥无效")
+            RecoveryError::new(
+                RecoveryErrorCode::Authentication,
+                "device registry 公钥无效",
+            )
         })?;
         let registry_bytes = signed_registry.encode()?;
         let message = registry_signature_message(
@@ -555,12 +559,14 @@ impl SignedDeviceRegistryEnvelope {
             self.previous_registry_hash.as_deref(),
             &registry_bytes,
         );
-        verifying_key.verify_strict(&message, &signature).map_err(|_| {
-            RecoveryError::new(
-                RecoveryErrorCode::Authentication,
-                "device registry 签名验证失败",
-            )
-        })
+        verifying_key
+            .verify_strict(&message, &signature)
+            .map_err(|_| {
+                RecoveryError::new(
+                    RecoveryErrorCode::Authentication,
+                    "device registry 签名验证失败",
+                )
+            })
     }
 
     fn validate_shape(&self) -> RecoveryResult<()> {
@@ -1580,14 +1586,8 @@ mod tests {
     fn signed_registry_chain_is_contiguous_authorized_and_encrypted() {
         let signer_a = DeviceSigningKey::from_bytes([7; 32]);
         let signer_b = DeviceSigningKey::from_bytes([8; 32]);
-        let mut registry = DeviceRegistry::new(
-            VAULT_ID,
-            DEVICE_A,
-            "Laptop",
-            &signer_a.public_key(),
-            1,
-        )
-        .unwrap();
+        let mut registry =
+            DeviceRegistry::new(VAULT_ID, DEVICE_A, "Laptop", &signer_a.public_key(), 1).unwrap();
         let genesis =
             SignedDeviceRegistryEnvelope::sign(&registry, None, DEVICE_A, &signer_a).unwrap();
         assert_eq!(genesis.verify_genesis().unwrap(), registry);
@@ -1596,13 +1596,9 @@ mod tests {
         registry
             .add_device(1, DEVICE_B, "Phone", &signer_b.public_key(), 2)
             .unwrap();
-        let successor = SignedDeviceRegistryEnvelope::sign(
-            &registry,
-            Some(&genesis_hash),
-            DEVICE_A,
-            &signer_a,
-        )
-        .unwrap();
+        let successor =
+            SignedDeviceRegistryEnvelope::sign(&registry, Some(&genesis_hash), DEVICE_A, &signer_a)
+                .unwrap();
         assert_eq!(
             successor
                 .verify_successor(&genesis.verify_genesis().unwrap(), &genesis_hash)
