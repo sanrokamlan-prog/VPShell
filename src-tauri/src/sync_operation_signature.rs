@@ -271,7 +271,7 @@ mod tests {
                 "kind": "patch",
                 "payload": {
                     "entityKind": "setting",
-                    "entityId": "setting-font",
+                    "entityId": "11111111-1111-4111-8111-111111111111",
                     "fields": {"fontSize": {"type": "integer", "value": 14}},
                     "observedFields": {"fontSize": null},
                     "observedTombstone": null
