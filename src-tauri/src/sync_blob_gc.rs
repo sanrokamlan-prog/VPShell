@@ -276,7 +276,7 @@ fn remote_segment_frontier(
     cancellation: &ProviderCancellation,
 ) -> Result<BTreeMap<String, u64>, String> {
     let prefix = format!("vpshell/v1/{vault_id}/segments/");
-    let mut frontier = BTreeMap::new();
+    let mut frontier = BTreeMap::<String, u64>::new();
     for object in list_all(provider, &prefix, cancellation)? {
         let relative = object
             .key
