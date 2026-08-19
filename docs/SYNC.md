@@ -2,13 +2,15 @@
 
 当前实现补充：`onboardingCompleted`、默认监控采样频率与背景可见度已分别作为第三、第四、第五个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；它们分别只含一个布尔字段、一个 5–300 秒整数和一个 5%–65% 整数。通过秘密扫描的命令、远端路径与具名非敏感参数历史，以及 Rust 证明的已认证连接历史，使用独立 `history` 实体、稳定 UUID 和 tombstone 接入同一链路；含明显秘密、敏感/未知参数的记录、没有真实时间的旧路径和没有认证事实的旧/伪造连接条目保持本机。背景使用独立 `background` 实体和加密分块；PNG 由 Rust 解码并规范化，JPEG/WebP 通过结构、RIFF/chunk 或 JPEG 结束标记校验后保留原始编码；原始 URL、引导内容、运行中监控状态及设备本地数据仍不入同步包。
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible/Gateway 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练，以及默认关闭的独立凭据 vault。桌面五种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth、S3 SigV4 与 Gateway 登录密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录；Gateway 可选 TOTP 只进入当次登录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。真实 Gateway 服务、设备 operation 签名、系统钥匙串恢复写回和密钥轮换流程仍未实现；SFTP/S3/Gateway 没有条件删除能力而保守保留旧密文，真实外部服务器与多设备矩阵也仍需验收。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible/Gateway 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、本机 operation Ed25519 签名封套，以及默认关闭的独立凭据 vault。桌面五种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth、S3 SigV4 与 Gateway 登录密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录；Gateway 可选 TOTP 只进入当次登录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。真实 Gateway 服务、远端 registry 锚定的 operation 授权验签、系统钥匙串恢复写回和密钥轮换流程仍未实现；SFTP/S3/Gateway 没有条件删除能力而保守保留旧密文，真实外部服务器与多设备矩阵也仍需验收。
 
 ### 当前 v1 密码学边界
 
 `sync_crypto.rs` 只在 Rust 内存中持有 32-byte VMK，类型不可序列化且在释放时清零。密码 keyslot 使用 Argon2id v19，默认 64 MiB/3 次/1 lane，读取时只接受 19–256 MiB、2–10 次、1–4 lanes 和固定 32-byte 输出；密码为 8–1024 bytes。keyslot 使用 16-byte salt、24-byte nonce 和 XChaCha20-Poly1305 包裹 VMK，格式版本、vault/slot ID、业务密钥域、算法、全部 KDF 参数和密文长度进入长度前缀 AAD。
 
 业务对象按 event/blob/index/checkpoint/device-registry 五个 HKDF-SHA256 label 派生不同密钥；vault ID 参与 extract salt，对象类型、对象 ID、设备/序号、算法和密文长度进入 AAD。对象明文最多 16 MiB，JSON 信封最多 24 MiB，keyslot 最多 16 KiB；UUID、base64url、类型与序号组合逐字段验证，未知字段和未知版本拒绝。每次生产加密都从 OS CSPRNG 取得随机 nonce；固定 nonce/salt 入口只在单元测试中用于稳定向量。
+
+本机实体 changefeed 与冲突解决 operation 现先进入严格 Ed25519 version-1 签名封套，再由 event AEAD 加密。私钥由 OS CSPRNG 生成、只保存到独立系统凭据条目且 Rust 内存副本清零；签名以固定 domain 和长度前缀绑定 canonical device UUID 与原始 operation 字节。registry API 只为活动设备返回登记公钥；远端协调器 trust anchor 与 registry 防回滚链仍待下一阶段，因此封套自验当前不承担设备授权。
 
 该格式能认证对象身份并阻止把密文搬到另一域/vault/设备/序号后解密，但相同完整对象的重放需要后续 outbox/head/sequence 状态机检测。当前没有任何 IPC 返回 VMK、KEK、密码或解密明文；产品流程开放桌面 Local Folder、标准 HTTPS WebDAV、固定 host-key 的 SFTP、SigV4 S3-compatible 和自建 Gateway。
 
@@ -103,7 +105,7 @@ worker claim 使用两分钟租约；进程中断后的过期租约不会立即�
 
 HLC 不是权限或真实性来源，只解决时间漂移下的合并排序。签名、AEAD 和已信任设备记录负责完整性验证。
 
-当前内部 `sync_recovery` device registry 为严格 schema v1，最多 32 台，只保存 canonical device UUID、1–128 byte 非控制字符标签、公开 32-byte 签名键、时间与 active/revoked 状态。更新使用 expected revision；相同设备的公钥和加入身份不可替换，撤销单调且禁止撤销最后活动设备，合并时撤销优先并拒绝身份冲突。registry 作为 `device-registry` 域对象加密，恢复演练要求发布者在该 registry 中仍为 active。当前尚未签名 event/segment，也没有协调器验证远端 registry 的签名/历史链，因此这些规则只构成内部状态和本地发布边界，不能独立抵抗远端回滚到旧 registry。
+当前内部 `sync_recovery` device registry 为严格 schema v1，最多 32 台，只保存 canonical device UUID、1–128 byte 非控制字符标签、公开 32-byte 签名键、时间与 active/revoked 状态。更新使用 expected revision；相同设备的公钥和加入身份不可替换，撤销单调且禁止撤销最后活动设备，合并时撤销优先并拒绝身份冲突。registry 作为 `device-registry` 域对象加密，恢复演练要求发布者在该 registry 中仍为 active。本机新 operation 已签名，但 event segment 没有独立签名，协调器也尚未验证远端 registry 的签名/历史链；当前仍不得把封套自带公钥视为授权来源，这些规则不能独立抵抗远端回滚到旧 registry。
 
 ## 6. Provider 抽象
 

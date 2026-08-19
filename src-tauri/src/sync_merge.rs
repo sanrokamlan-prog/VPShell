@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::sync_operation_signature::decode_signed_or_legacy_operation;
+
 const FORMAT_VERSION: u32 = 1;
 const MAX_OPERATION_BYTES: usize = 1024 * 1024;
 const MAX_STATE_BYTES: usize = 64 * 1024 * 1024;
@@ -260,6 +262,10 @@ impl MergeOperation {
             operation_id: self.operation_id.clone(),
         }
     }
+
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
 }
 
 pub(crate) fn build_local_entity_operation(
@@ -388,7 +394,7 @@ pub(crate) fn local_entity_operation_matches(
     entity_id: &str,
     mutation: &LocalEntityMutation,
 ) -> bool {
-    let Ok(operation) = MergeOperation::decode(encoded) else {
+    let Ok(operation) = decode_signed_or_legacy_operation(encoded) else {
         return false;
     };
     if operation.operation_id != operation_id {
@@ -538,7 +544,9 @@ pub(crate) fn apply_persisted_operation(
             "持久同步 merge 时间不能为负数",
         ));
     }
-    let operation = MergeOperation::decode(encoded_operation)?;
+    let operation = decode_signed_or_legacy_operation(encoded_operation).map_err(|message| {
+        MergeError::new(MergeErrorCode::InvalidInput, message)
+    })?;
     let (revision, mut state) = load_persisted_state(transaction)?;
     if revision != expected_revision {
         return Err(MergeError::new(

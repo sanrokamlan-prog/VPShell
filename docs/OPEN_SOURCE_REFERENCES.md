@@ -30,6 +30,7 @@ Actual third-party code used or adapted by VPShell is listed separately in
 | [FinalShell password decoder](https://github.com/qurikuduo/finalshellPasswordDecoder) | Apache-2.0 | Legacy FinalShell DES import compatibility | Clean Rust port; see `THIRD_PARTY_NOTICES.md` |
 | [rusqlite](https://github.com/rusqlite/rusqlite) | MIT or Apache-2.0 | Local schema-v1 SQLite transaction/event store | Dependency used with `bundled`, no copied source; version/feature and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
 | [RustCrypto password-hashes/AEADs/KDFs/MACs](https://github.com/RustCrypto) | MIT or Apache-2.0 | Argon2id key wrapping, XChaCha20-Poly1305 envelopes, HKDF domain separation and Relay HMAC-SHA256 proofs | Stable crates used through public APIs; no copied source; exact versions/features and replacement plan recorded in `THIRD_PARTY_NOTICES.md` and development docs |
+| [ed25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek/tree/ed25519-2.2.0/ed25519-dalek) | BSD-3-Clause | Strict Ed25519 device-operation signing and active-registry public-key verification | Existing locked 2.2.0 crate promoted to a direct dependency with default features disabled; public APIs only, no source, examples, vectors or protocol text copied |
 | [quick-xml](https://github.com/tafia/quick-xml) and [percent-encoding](https://github.com/servo/rust-url) | MIT | Bounded WebDAV XML parsing and href decoding | Existing locked packages promoted to direct dependencies; public APIs only, no copied source or provider implementation |
 | Amazon S3 REST API: [SigV4](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sig-v4-header-based-auth.html), [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html), [PutObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html) | AWS protocol documentation | S3 canonical request/signing scope, continuation token and `If-None-Match: *` behavior | Protocol behavior only; no AWS SDK, source, examples, fixtures, prose or assets copied |
 | [image-rs/image-png](https://github.com/image-rs/image-png/tree/fbf256669ff23594bf4c618b61fde6a52b79e088) | MIT or Apache-2.0 | Bounded PNG decoding and canonical re-encoding for managed wallpaper blobs | Locked 0.17.16 crate promoted to a direct dependency and used only through public APIs; no source, example, fixture or asset copied |
@@ -135,6 +136,11 @@ inventory and per-item partial results. No reviewed project's file-manager code 
   the already locked crate to a direct dependency and uses only its public decoder/encoder APIs for
   independently specified PNG limits and canonicalization; no source, examples, fixtures or assets
   were copied.
+- 2026-08-19: Verified the official `ed25519-dalek` tag `ed25519-2.2.0` manifest and its
+  BSD-3-Clause license declaration. VPShell promotes the already locked crate to a direct dependency
+  with default features disabled and uses only its public strict signing/verification APIs for an
+  independently specified domain-separated operation envelope. No source, examples, vectors,
+  protocol text or assets were copied.
 - 2026-08-19: Reviewed the official Amazon S3 SigV4 header-authentication, ListObjectsV2 and
   PutObject API references. VPShell independently implements only the bounded REST subset needed by
   immutable encrypted objects using already locked `reqwest`, `hmac`, `sha2` and `quick-xml` public

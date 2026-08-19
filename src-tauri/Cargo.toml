@@ -41,6 +41,7 @@ sha2 = "0.10.9"
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["alloc", "zeroize"] }
 hkdf = { version = "=0.12.4", default-features = false }
 hmac = { version = "=0.12.1", default-features = false }
 getrandom = { version = "=0.3.4", default-features = false }

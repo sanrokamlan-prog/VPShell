@@ -15,7 +15,7 @@ use crate::{
         EncryptedSyncObject, PasswordKeyslot, RecoveryKey, RecoveryKeyslot, SyncObjectKind,
         VaultKey, decrypt_sync_object, encrypt_sync_object, open_recovery_keyslot,
     },
-    sync_merge::MergeOperation,
+    sync_operation_signature::decode_signed_or_legacy_operation,
     sync_provider::validate_key,
 };
 
@@ -331,6 +331,19 @@ impl DeviceRegistry {
         self.devices
             .get(device_id)
             .is_some_and(|device| matches!(device.status, DeviceStatus::Active))
+    }
+
+    pub(crate) fn public_signing_key(&self, device_id: &str) -> RecoveryResult<[u8; 32]> {
+        let device = self.devices.get(device_id).ok_or_else(|| {
+            RecoveryError::new(RecoveryErrorCode::NotFound, "同步设备不存在")
+        })?;
+        if !matches!(device.status, DeviceStatus::Active) {
+            return Err(RecoveryError::new(
+                RecoveryErrorCode::Conflict,
+                "已撤销设备不能验证同步 operation",
+            ));
+        }
+        decode_exact_32(&device.public_signing_key, "设备签名公钥")
     }
 
     pub(crate) fn vault_id(&self) -> &str {
@@ -798,7 +811,7 @@ pub(crate) fn run_recovery_drill(
         })?;
         match envelope.object_kind() {
             SyncObjectKind::Event => {
-                MergeOperation::decode(&plaintext).map_err(|_| {
+                decode_signed_or_legacy_operation(&plaintext).map_err(|_| {
                     RecoveryError::new(
                         RecoveryErrorCode::Integrity,
                         "恢复演练 event operation 无效",
@@ -1071,6 +1084,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_merge::MergeOperation;
     use std::path::PathBuf;
 
     const VAULT_ID: &str = "11111111-1111-4111-8111-111111111111";

@@ -20,6 +20,7 @@ use crate::{
         build_local_conflict_resolution_operation, build_local_entity_operation,
         load_persisted_state, local_entity_operation_matches,
     },
+    sync_operation_signature::DeviceSigningKey,
     sync_provider::validate_key,
 };
 
@@ -1364,7 +1365,13 @@ impl SyncJournal {
                 mutation,
             )
             .map_err(map_merge_error)?;
-            let encoded_operation = operation.encode().map_err(map_merge_error)?;
+            let signer = DeviceSigningKey::load_or_create(&device_id).map_err(|message| {
+                JournalError::new(JournalErrorCode::Authentication, message)
+            })?;
+            let encoded_operation = signer
+                .sign(&operation)
+                .and_then(|signed| signed.encode())
+                .map_err(|message| JournalError::new(JournalErrorCode::Authentication, message))?;
             let encrypted_object = encrypt_sync_object(
                 vault_key,
                 &vault_id,
@@ -1498,7 +1505,13 @@ impl SyncJournal {
                 alternative_index,
             )
             .map_err(map_merge_error)?;
-            let encoded_operation = operation.encode().map_err(map_merge_error)?;
+            let signer = DeviceSigningKey::load_or_create(&device_id).map_err(|message| {
+                JournalError::new(JournalErrorCode::Authentication, message)
+            })?;
+            let encoded_operation = signer
+                .sign(&operation)
+                .and_then(|signed| signed.encode())
+                .map_err(|message| JournalError::new(JournalErrorCode::Authentication, message))?;
             let encrypted_object = encrypt_sync_object(
                 vault_key,
                 &vault_id,
@@ -2063,6 +2076,7 @@ mod tests {
 
     use super::*;
     use crate::sync_crypto::{SyncObjectKind, encrypt_sync_object};
+    use crate::sync_operation_signature::SignedOperationEnvelope;
 
     struct TempDir(PathBuf);
 
@@ -2340,6 +2354,11 @@ mod tests {
         );
         assert_eq!(journal.status().unwrap().pending_objects, 1);
         assert_eq!(journal.merge_status().unwrap().revision, 1);
+        let claim = journal.claim_next_for_vault(VAULT_ID, 13).unwrap().unwrap();
+        let encrypted = EncryptedSyncObject::decode(&claim.encrypted_object).unwrap();
+        let plaintext = decrypt_sync_object(&key, &encrypted).unwrap();
+        let signed = SignedOperationEnvelope::decode(&plaintext).unwrap();
+        assert_eq!(signed.verify_self().unwrap().device_id(), journal.local_device_id().unwrap());
     }
 
     #[test]

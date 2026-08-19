@@ -53,6 +53,8 @@ mod sync_gateway_provider;
 mod sync_merge;
 #[allow(dead_code)] // The merge/coordinator phases consume the durable sync journal.
 mod sync_outbox;
+#[allow(dead_code)] // Local outbox and recovery verification consume signed operation envelopes.
+mod sync_operation_signature;
 #[allow(dead_code)] // Cross-module protocol compatibility and failure fixtures.
 mod sync_protocol_regression;
 #[allow(dead_code)] // The outbox/coordinator phases consume the provider boundary.
