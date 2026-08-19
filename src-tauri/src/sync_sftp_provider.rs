@@ -545,8 +545,16 @@ mod tests {
             host_key_sha256,
             timeout_seconds: 30,
         };
+        config.validate().expect("fixture config");
+        let mut wrong_host_key_sha256 = config.host_key_sha256.clone();
+        let replacement = if wrong_host_key_sha256.starts_with("SHA256:A") {
+            "B"
+        } else {
+            "A"
+        };
+        wrong_host_key_sha256.replace_range(7..8, replacement);
         let wrong_pin = SftpProviderConfig {
-            host_key_sha256: format!("SHA256:{}", "B".repeat(43)),
+            host_key_sha256: wrong_host_key_sha256,
             ..config.clone()
         };
         let wrong_pin_error = Ssh2SftpObjectTransport::connect(&wrong_pin, connection.clone())
