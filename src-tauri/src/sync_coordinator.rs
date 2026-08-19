@@ -716,8 +716,8 @@ impl SyncCoordinatorManager {
             .snapshot()
             .map_err(|_| "app-state-handoff".to_string())
             .and_then(|snapshot| {
-                let snapshot = serde_json::to_value(snapshot)
-                    .map_err(|_| "app-state-handoff".to_string())?;
+                let snapshot =
+                    serde_json::to_value(snapshot).map_err(|_| "app-state-handoff".to_string())?;
                 let state_json = snapshot["stateJson"]
                     .as_str()
                     .ok_or_else(|| "app-state-handoff".to_string())?;
