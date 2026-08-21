@@ -536,8 +536,8 @@ impl SyncCoordinatorManager {
         let enrollment = DeviceEnrollmentRequest::decode(&request.enrollment_request)
             .map_err(registry_recovery_code)?;
         self.mutate_device_registry(request.expected_revision, now_ms, |registry| {
-            let (device_id, label, public_key) = enrollment
-                .verify_for_vault(registry.vault_id(), now_ms)?;
+            let (device_id, label, public_key) =
+                enrollment.verify_for_vault(registry.vault_id(), now_ms)?;
             registry.add_device(
                 request.expected_revision,
                 &device_id,

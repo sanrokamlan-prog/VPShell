@@ -649,17 +649,11 @@ impl DeviceEnrollmentRequest {
         validate_label(label)?;
         validate_time(now_ms)?;
         let expires_at_ms = now_ms.checked_add(ENROLLMENT_TTL_MS).ok_or_else(|| {
-            RecoveryError::new(
-                RecoveryErrorCode::LimitExceeded,
-                "设备登记请求过期时间溢出",
-            )
+            RecoveryError::new(RecoveryErrorCode::LimitExceeded, "设备登记请求过期时间溢出")
         })?;
         let mut nonce = [0_u8; ENROLLMENT_NONCE_BYTES];
         getrandom::fill(&mut nonce).map_err(|_| {
-            RecoveryError::new(
-                RecoveryErrorCode::Storage,
-                "无法生成设备登记请求随机数",
-            )
+            RecoveryError::new(RecoveryErrorCode::Storage, "无法生成设备登记请求随机数")
         })?;
         let public_signing_key = signing_key.public_key();
         let message = enrollment_signature_message(
@@ -689,10 +683,7 @@ impl DeviceEnrollmentRequest {
     pub(crate) fn encode(&self) -> RecoveryResult<String> {
         self.validate_shape()?;
         let encoded = serde_json::to_vec(self).map_err(|_| {
-            RecoveryError::new(
-                RecoveryErrorCode::InvalidInput,
-                "无法序列化设备登记请求",
-            )
+            RecoveryError::new(RecoveryErrorCode::InvalidInput, "无法序列化设备登记请求")
         })?;
         if encoded.len() > MAX_ENROLLMENT_BYTES {
             return Err(RecoveryError::new(
@@ -774,10 +765,7 @@ impl DeviceEnrollmentRequest {
             .created_at_ms
             .checked_add(ENROLLMENT_TTL_MS)
             .ok_or_else(|| {
-                RecoveryError::new(
-                    RecoveryErrorCode::LimitExceeded,
-                    "设备登记请求过期时间溢出",
-                )
+                RecoveryError::new(RecoveryErrorCode::LimitExceeded, "设备登记请求过期时间溢出")
             })?;
         if self.expires_at_ms <= self.created_at_ms || self.expires_at_ms > maximum_expiry {
             return Err(RecoveryError::new(
@@ -793,15 +781,10 @@ impl DeviceEnrollmentRequest {
                 "设备登记随机数长度无效",
             ));
         }
-        let signature = Signature::from_bytes(&decode_exact_64(
-            &self.signature,
-            "设备登记请求签名",
-        )?);
+        let signature =
+            Signature::from_bytes(&decode_exact_64(&self.signature, "设备登记请求签名")?);
         let verifying_key = VerifyingKey::from_bytes(&public_key).map_err(|_| {
-            RecoveryError::new(
-                RecoveryErrorCode::Authentication,
-                "设备登记请求公钥无效",
-            )
+            RecoveryError::new(RecoveryErrorCode::Authentication, "设备登记请求公钥无效")
         })?;
         let message = enrollment_signature_message(
             &self.vault_id,
@@ -1945,29 +1928,21 @@ mod tests {
             RecoveryErrorCode::Authentication
         );
 
-        let mut tampered: serde_json::Value = serde_json::from_slice(
-            &URL_SAFE_NO_PAD.decode(&encoded).unwrap(),
-        )
-        .unwrap();
+        let mut tampered: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&encoded).unwrap()).unwrap();
         tampered["label"] = serde_json::json!("Attacker");
         let tampered = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&tampered).unwrap());
         assert_eq!(
-            DeviceEnrollmentRequest::decode(&tampered)
-                .unwrap_err()
-                .code,
+            DeviceEnrollmentRequest::decode(&tampered).unwrap_err().code,
             RecoveryErrorCode::Authentication
         );
 
-        let mut extended: serde_json::Value = serde_json::from_slice(
-            &URL_SAFE_NO_PAD.decode(&encoded).unwrap(),
-        )
-        .unwrap();
+        let mut extended: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&encoded).unwrap()).unwrap();
         extended["expiresAtMs"] = serde_json::json!(901_001);
         let extended = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&extended).unwrap());
         assert_eq!(
-            DeviceEnrollmentRequest::decode(&extended)
-                .unwrap_err()
-                .code,
+            DeviceEnrollmentRequest::decode(&extended).unwrap_err().code,
             RecoveryErrorCode::InvalidInput
         );
         assert!(DeviceEnrollmentRequest::decode(&format!("{encoded}=")).is_err());
