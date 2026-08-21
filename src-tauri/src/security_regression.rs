@@ -490,6 +490,17 @@ mod tests {
                 "credential vault exposes forbidden surface: {forbidden}"
             );
         }
+        for required in [
+            "restore_credential_to_system_keyring",
+            "CredentialSecretKind::SshPassword => \"ssh-\"",
+            "CredentialSecretKind::PrivateKeyPassphrase => \"key-\"",
+            "delete_credential()",
+        ] {
+            assert!(
+                source.contains(required),
+                "credential vault writeback boundary is missing: {required}"
+            );
+        }
         assert!(!include_str!("../command_manifest.txt").contains("credential_vault"));
     }
 

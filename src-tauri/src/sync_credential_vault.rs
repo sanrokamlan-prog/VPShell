@@ -11,7 +11,9 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{sync_crypto::CredentialVaultKey, sync_recovery::DeviceRegistry};
+use crate::{
+    CREDENTIAL_SERVICE, sync_crypto::CredentialVaultKey, sync_recovery::DeviceRegistry,
+};
 
 const FORMAT_VERSION: u32 = 1;
 const NONCE_BYTES: usize = 24;
@@ -26,6 +28,7 @@ const MAX_PLAINTEXT_BYTES: usize = MAX_PRIVATE_KEY_BYTES + 128 * 1024;
 const MAX_ENVELOPE_BYTES: usize = 2 * 1024 * 1024;
 const ALGORITHM: &str = "xchacha20poly1305";
 const KEY_DOMAIN: &str = "credentials";
+const LOCAL_REFERENCE_ATTEMPTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CredentialVaultErrorCode {
@@ -35,6 +38,7 @@ pub(crate) enum CredentialVaultErrorCode {
     InvalidInput,
     LimitExceeded,
     Authentication,
+    Storage,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -562,6 +566,150 @@ pub(crate) fn decrypt_credential(
     CredentialSecret::new(payload.kind, payload.secret)
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct RestoredCredentialReference {
+    kind: CredentialSecretKind,
+    reference: String,
+}
+
+impl RestoredCredentialReference {
+    pub(crate) fn kind(&self) -> &CredentialSecretKind {
+        &self.kind
+    }
+
+    pub(crate) fn reference(&self) -> &str {
+        &self.reference
+    }
+}
+
+trait LocalCredentialStore {
+    fn contains(&mut self, reference: &str) -> Result<bool, ()>;
+    fn write(&mut self, reference: &str, secret: &str) -> Result<(), ()>;
+    fn read(&mut self, reference: &str) -> Result<Zeroizing<String>, ()>;
+    fn remove(&mut self, reference: &str) -> Result<(), ()>;
+}
+
+struct SystemCredentialStore;
+
+impl SystemCredentialStore {
+    fn entry(reference: &str) -> Result<keyring::Entry, ()> {
+        keyring::Entry::new(CREDENTIAL_SERVICE, reference).map_err(|_| ())
+    }
+}
+
+impl LocalCredentialStore for SystemCredentialStore {
+    fn contains(&mut self, reference: &str) -> Result<bool, ()> {
+        match Self::entry(reference)?.get_password() {
+            Ok(secret) => {
+                let _secret = Zeroizing::new(secret);
+                Ok(true)
+            }
+            Err(keyring::Error::NoEntry) => Ok(false),
+            Err(_) => Err(()),
+        }
+    }
+
+    fn write(&mut self, reference: &str, secret: &str) -> Result<(), ()> {
+        Self::entry(reference)?
+            .set_password(secret)
+            .map_err(|_| ())
+    }
+
+    fn read(&mut self, reference: &str) -> Result<Zeroizing<String>, ()> {
+        Self::entry(reference)?
+            .get_password()
+            .map(Zeroizing::new)
+            .map_err(|_| ())
+    }
+
+    fn remove(&mut self, reference: &str) -> Result<(), ()> {
+        match Self::entry(reference)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(()),
+        }
+    }
+}
+
+pub(crate) fn restore_credential_to_system_keyring(
+    policy: &CredentialVaultPolicy,
+    registry: &DeviceRegistry,
+    device_id: &str,
+    credential_key: &CredentialVaultKey,
+    envelope: &CredentialEnvelope,
+) -> VaultResult<RestoredCredentialReference> {
+    let mut store = SystemCredentialStore;
+    restore_credential_with_store(
+        policy,
+        registry,
+        device_id,
+        credential_key,
+        envelope,
+        &mut store,
+        Uuid::new_v4,
+    )
+}
+
+fn restore_credential_with_store<S, F>(
+    policy: &CredentialVaultPolicy,
+    registry: &DeviceRegistry,
+    device_id: &str,
+    credential_key: &CredentialVaultKey,
+    envelope: &CredentialEnvelope,
+    store: &mut S,
+    mut new_id: F,
+) -> VaultResult<RestoredCredentialReference>
+where
+    S: LocalCredentialStore,
+    F: FnMut() -> Uuid,
+{
+    let secret = decrypt_credential(policy, registry, device_id, credential_key, envelope)?;
+    let prefix = match &secret.kind {
+        CredentialSecretKind::SshPassword => "ssh-",
+        CredentialSecretKind::PrivateKeyPassphrase => "key-",
+        CredentialSecretKind::OpenSshPrivateKey | CredentialSecretKind::AccessToken => {
+            return Err(CredentialVaultError::new(
+                CredentialVaultErrorCode::InvalidInput,
+                "该凭据类型尚无安全的本机安装目标",
+            ));
+        }
+    };
+
+    for _ in 0..LOCAL_REFERENCE_ATTEMPTS {
+        let reference = format!("{prefix}{}", new_id());
+        validate_local_reference(&reference)?;
+        if store.contains(&reference).map_err(|_| storage_error())? {
+            continue;
+        }
+        if store.write(&reference, secret.value.as_str()).is_err() {
+            let _ = store.remove(&reference);
+            return Err(storage_error());
+        }
+        let verified = store
+            .read(&reference)
+            .is_ok_and(|stored| stored.as_str() == secret.value.as_str());
+        if !verified {
+            let _ = store.remove(&reference);
+            return Err(storage_error());
+        }
+        return Ok(RestoredCredentialReference {
+            kind: secret.kind,
+            reference,
+        });
+    }
+
+    Err(CredentialVaultError::new(
+        CredentialVaultErrorCode::Storage,
+        "无法分配新的本机凭据引用",
+    ))
+}
+
+fn storage_error() -> CredentialVaultError {
+    CredentialVaultError::new(
+        CredentialVaultErrorCode::Storage,
+        "系统凭据管理器写回失败",
+    )
+}
+
 fn validate_secret(kind: &CredentialSecretKind, value: &str) -> VaultResult<()> {
     let invalid_line = value.contains(['\0', '\r']);
     let valid = match kind {
@@ -737,6 +885,8 @@ fn validate_uuid(value: &str, label: &str) -> VaultResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, VecDeque};
+
     use super::*;
     use crate::{
         sync_crypto::{CredentialKeyslot, create_credential_keyslot, open_credential_keyslot},
@@ -747,6 +897,42 @@ mod tests {
     const OTHER_VAULT: &str = "22222222-2222-4222-8222-222222222222";
     const DEVICE_A: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const DEVICE_B: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    #[derive(Default)]
+    struct MemoryCredentialStore {
+        values: BTreeMap<String, String>,
+        contains_calls: usize,
+        corrupt_readback: bool,
+        removed: Vec<String>,
+    }
+
+    impl LocalCredentialStore for MemoryCredentialStore {
+        fn contains(&mut self, reference: &str) -> Result<bool, ()> {
+            self.contains_calls += 1;
+            Ok(self.values.contains_key(reference))
+        }
+
+        fn write(&mut self, reference: &str, secret: &str) -> Result<(), ()> {
+            self.values
+                .insert(reference.to_string(), secret.to_string());
+            Ok(())
+        }
+
+        fn read(&mut self, reference: &str) -> Result<Zeroizing<String>, ()> {
+            let value = self.values.get(reference).ok_or(())?;
+            if self.corrupt_readback {
+                Ok(Zeroizing::new("different-value".to_string()))
+            } else {
+                Ok(Zeroizing::new(value.clone()))
+            }
+        }
+
+        fn remove(&mut self, reference: &str) -> Result<(), ()> {
+            self.values.remove(reference);
+            self.removed.push(reference.to_string());
+            Ok(())
+        }
+    }
 
     fn registry() -> DeviceRegistry {
         let mut registry = DeviceRegistry::new(VAULT_ID, DEVICE_A, "Laptop", &[1; 32], 1).unwrap();
@@ -900,6 +1086,188 @@ mod tests {
         )
         .unwrap_err();
         assert!(!error.message.contains("source-secret"));
+    }
+
+    #[test]
+    fn authenticated_passwords_restore_to_new_consumable_references() {
+        let (registry, policy) = enabled_policy();
+        let key = CredentialVaultKey::from_bytes([6; 32]);
+        for (kind, value, identifier, prefix) in [
+            (
+                CredentialSecretKind::SshPassword,
+                "restored-password",
+                "33333333-3333-4333-8333-333333333333",
+                "ssh-",
+            ),
+            (
+                CredentialSecretKind::PrivateKeyPassphrase,
+                "restored-passphrase",
+                "44444444-4444-4444-8444-444444444444",
+                "key-",
+            ),
+        ] {
+            let envelope = encrypt_credential(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &key,
+                &CredentialSecret::new(kind.clone(), value.to_string()).unwrap(),
+            )
+            .unwrap();
+            let mut store = MemoryCredentialStore::default();
+            let restored = restore_credential_with_store(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &key,
+                &envelope,
+                &mut store,
+                || Uuid::parse_str(identifier).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(restored.kind(), &kind);
+            let expected_reference = format!("{prefix}{identifier}");
+            assert_eq!(restored.reference(), expected_reference.as_str());
+            assert_eq!(
+                store.values.get(restored.reference()).map(String::as_str),
+                Some(value)
+            );
+        }
+    }
+
+    #[test]
+    fn restore_authenticates_before_write_and_rejects_uninstallable_kinds() {
+        let (registry, policy) = enabled_policy();
+        let key = CredentialVaultKey::from_bytes([8; 32]);
+        let password = CredentialSecret::new(
+            CredentialSecretKind::SshPassword,
+            "never-written-password".to_string(),
+        )
+        .unwrap();
+        let password_envelope =
+            encrypt_credential(&policy, &registry, DEVICE_A, &key, &password).unwrap();
+        let mut store = MemoryCredentialStore::default();
+        assert_eq!(
+            error_code(restore_credential_with_store(
+                &policy,
+                &registry,
+                DEVICE_B,
+                &key,
+                &password_envelope,
+                &mut store,
+                Uuid::new_v4,
+            )),
+            CredentialVaultErrorCode::Unauthorized
+        );
+        assert_eq!(store.contains_calls, 0);
+        assert!(store.values.is_empty());
+
+        let wrong_key = CredentialVaultKey::from_bytes([9; 32]);
+        assert_eq!(
+            error_code(restore_credential_with_store(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &wrong_key,
+                &password_envelope,
+                &mut store,
+                Uuid::new_v4,
+            )),
+            CredentialVaultErrorCode::Authentication
+        );
+        assert_eq!(store.contains_calls, 0);
+        assert!(store.values.is_empty());
+
+        let token =
+            CredentialSecret::new(CredentialSecretKind::AccessToken, "token-value".to_string())
+                .unwrap();
+        let token_envelope =
+            encrypt_credential(&policy, &registry, DEVICE_A, &key, &token).unwrap();
+        assert_eq!(
+            error_code(restore_credential_with_store(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &key,
+                &token_envelope,
+                &mut store,
+                Uuid::new_v4,
+            )),
+            CredentialVaultErrorCode::InvalidInput
+        );
+        assert_eq!(store.contains_calls, 0);
+        assert!(store.values.is_empty());
+    }
+
+    #[test]
+    fn restore_never_overwrites_and_removes_unverified_writeback() {
+        let (registry, policy) = enabled_policy();
+        let key = CredentialVaultKey::from_bytes([10; 32]);
+        let secret_value = "writeback-secret";
+        let envelope = encrypt_credential(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &key,
+            &CredentialSecret::new(
+                CredentialSecretKind::SshPassword,
+                secret_value.to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let first_id = Uuid::parse_str("55555555-5555-4555-8555-555555555555").unwrap();
+        let second_id = Uuid::parse_str("66666666-6666-4666-8666-666666666666").unwrap();
+        let first_reference = format!("ssh-{first_id}");
+        let second_reference = format!("ssh-{second_id}");
+        let mut store = MemoryCredentialStore::default();
+        store
+            .values
+            .insert(first_reference.clone(), "existing-value".to_string());
+        let mut identifiers = VecDeque::from([first_id, second_id]);
+        let restored = restore_credential_with_store(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &key,
+            &envelope,
+            &mut store,
+            || identifiers.pop_front().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.reference(), second_reference.as_str());
+        assert_eq!(
+            store.values.get(&first_reference).map(String::as_str),
+            Some("existing-value")
+        );
+        assert_eq!(
+            store.values.get(&second_reference).map(String::as_str),
+            Some(secret_value)
+        );
+
+        let failed_id = Uuid::parse_str("77777777-7777-4777-8777-777777777777").unwrap();
+        let failed_reference = format!("ssh-{failed_id}");
+        let mut corrupt_store = MemoryCredentialStore {
+            corrupt_readback: true,
+            ..MemoryCredentialStore::default()
+        };
+        let error = match restore_credential_with_store(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &key,
+            &envelope,
+            &mut corrupt_store,
+            || failed_id,
+        ) {
+            Ok(_) => panic!("expected writeback verification failure"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, CredentialVaultErrorCode::Storage);
+        assert!(!error.message.contains(secret_value));
+        assert!(!error.message.contains(&failed_reference));
+        assert!(!corrupt_store.values.contains_key(&failed_reference));
+        assert_eq!(corrupt_store.removed, vec![failed_reference]);
     }
 
     #[test]
