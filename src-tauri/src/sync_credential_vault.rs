@@ -11,9 +11,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{
-    CREDENTIAL_SERVICE, sync_crypto::CredentialVaultKey, sync_recovery::DeviceRegistry,
-};
+use crate::{CREDENTIAL_SERVICE, sync_crypto::CredentialVaultKey, sync_recovery::DeviceRegistry};
 
 const FORMAT_VERSION: u32 = 1;
 const NONCE_BYTES: usize = 24;
@@ -610,9 +608,7 @@ impl LocalCredentialStore for SystemCredentialStore {
     }
 
     fn write(&mut self, reference: &str, secret: &str) -> Result<(), ()> {
-        Self::entry(reference)?
-            .set_password(secret)
-            .map_err(|_| ())
+        Self::entry(reference)?.set_password(secret).map_err(|_| ())
     }
 
     fn read(&mut self, reference: &str) -> Result<Zeroizing<String>, ()> {
@@ -704,10 +700,7 @@ where
 }
 
 fn storage_error() -> CredentialVaultError {
-    CredentialVaultError::new(
-        CredentialVaultErrorCode::Storage,
-        "系统凭据管理器写回失败",
-    )
+    CredentialVaultError::new(CredentialVaultErrorCode::Storage, "系统凭据管理器写回失败")
 }
 
 fn validate_secret(kind: &CredentialSecretKind, value: &str) -> VaultResult<()> {
@@ -1209,11 +1202,8 @@ mod tests {
             &registry,
             DEVICE_A,
             &key,
-            &CredentialSecret::new(
-                CredentialSecretKind::SshPassword,
-                secret_value.to_string(),
-            )
-            .unwrap(),
+            &CredentialSecret::new(CredentialSecretKind::SshPassword, secret_value.to_string())
+                .unwrap(),
         )
         .unwrap();
         let first_id = Uuid::parse_str("55555555-5555-4555-8555-555555555555").unwrap();

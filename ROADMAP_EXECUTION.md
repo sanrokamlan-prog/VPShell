@@ -129,7 +129,7 @@
 | 完成 | 自建 Gateway 产品入口：版本化 HTTPS login/session/list/get/条件 PUT、系统密码引用、当次可选 TOTP、受管 PEM CA、Rust journal device ID 与同一协调器已接线；对象路径修复提交 `3178d40` 的 PR #1 run `32286301875` 六项全绿，真实服务端限流/重放/恢复码/审计/撤销仍需外部实现与验收 |
 | 完成 | 设备 operation Ed25519 严格签名封套、本机系统凭据私钥、真实 outbox、远端签名 registry trust anchor、持久防回滚水位、配置后上传/下载授权验签和桌面/Android 只读状态已接线；格式修复提交 `0e95b52` 的 PR #1 run `32296587857` 六项全绿 |
 | 完成 | 桌面受控设备登记、重命名与撤销：15 分钟 vault-bound 新设备自签申请、活动设备 expected-revision successor 发布/回读、具名 IPC、管理 UI 与 Android 精确禁权已接线；格式修复提交 `616111e` 的 PR #1 run `32454051006` 六项全绿 |
-| 进行中 | 凭据 vault 内部恢复写回：授权设备通过 CVK 认证信封后，只为现有消费者支持的 SSH 密码/私钥口令生成不覆盖的随机 `ssh-`/`key-` 系统钥匙串引用并回读验证，失败清理且诊断无 secret/reference；当前工作树等待 Actions。provider/outbox、协调器/UI、OpenSSH 私钥/access token 安装目标、CVK/VMK 恢复轮换及真实多设备矩阵仍待实现 |
+| 进行中 | 凭据 vault 内部恢复写回：授权设备通过 CVK 认证信封后，只为现有消费者支持的 SSH 密码/私钥口令生成不覆盖的随机 `ssh-`/`key-` 系统钥匙串引用并回读验证，失败清理且诊断无 secret/reference；首轮 Actions 的 frontend/Android 已成功，四个平台 Rust 仅需格式修复后重跑。provider/outbox、协调器/UI、OpenSSH 私钥/access token 安装目标、CVK/VMK 恢复轮换及真实多设备矩阵仍待实现 |
 
 Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322`、JPEG/WebP 已在 `32256446076` 通过 Actions，活动设备确认式 blob GC 已在 `32264835549` 通过 Actions 并对无条件删除 provider 保守保留。SFTP 产品入口与单一 Linux OpenSSH fixture 已在 `32274011250` 全绿，S3 产品入口与独立 SigV4 HTTPS fixture 已在 `32280932435` 全绿，Gateway 产品入口已在 `32286301875` 全绿，远端 registry 授权锚与防回滚链已在 `32296587857` 全绿，设备管理已在 `32454051006` 全绿。广泛外部 provider、凭据完整产品接线/恢复轮换和真实多设备仍未完成。
 
@@ -363,7 +363,8 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-21 | B9 设备管理 Actions 完成 | 格式修复提交 `616111e` 的 PR #1 run `32454051006` 已确认 frontend、Android aarch64 debug APK/Gradle gate、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test 六项全部 `COMPLETED/SUCCESS`；PR #1 仍为面向 `main` 的 Draft，branch/head/remote 与该提交一致。设备登记、改名、撤销产品链路闭合，进入凭据 vault 独立项。 |
 | 2026-08-21 | B9 凭据 vault 系统钥匙串恢复原语（待 Actions） | `sync_credential_vault` 新增 Rust-owned 写回边界：策略授权与 AEAD 认证先于任何 keyring 操作，只支持现有 SSH 消费者可使用的密码与私钥口令；最多尝试八个随机 `ssh-<UUID>`/`key-<UUID>` 引用，预检已有条目避免覆盖，写入后回读验证，失败尽力删除且底层诊断统一净化。恢复 receipt 不实现 `Debug`/`Serialize`，OpenSSH 私钥正文/access token 因无明确安全安装目标 fail closed。注入式聚焦测试覆盖两类成功写回、未授权/错误 CVK 零写入、碰撞保留旧值、回读失败删除及错误不含 secret/reference；provider/outbox、协调器/UI 与轮换未伪装为完成。 |
 | 2026-08-21 | B9 凭据 vault 恢复原语本机轻量门禁 | `git diff --check`、package/Tauri/desktop/Android 严格 JSON、认证先于 keyring、两类固定引用前缀、unsupported kind 拒绝、随机碰撞预检、回读验证/失败删除、receipt 无 Debug/Serialize、模块无 Tauri command/event/log、无 `.codex-roadmap-complete`/`.codex-*` 交接残留/`node_modules`/`target` 检查通过。VPS 无 Cargo/rustc/rustfmt，未下载工具链、依赖或 SDK；完整四平台 locked fmt/check/test、frontend 与 Android 构建交给本项提交后的 PR #1 Actions。根分区受仓库外占用影响复核 72%，仓库仅约 6.2 MiB 且无本任务可安全清理的大型产物。 |
+| 2026-08-21 | B9 凭据 vault 恢复原语首轮 Actions 与格式修复 | supervisor 提交 `1ff29e0` 的 PR #1 run `32457246972` 中 frontend、Android aarch64 debug APK/Gradle gate 成功；Ubuntu/Windows/macOS Intel/macOS arm 的首个 `cargo fmt --check` 一致指出 `sync_credential_vault.rs` 4 处机械排版差异，未进入 locked check/test。现仅应用 runner 给出的 import、keyring write、storage error 和测试构造格式，不改变行为；等待修复提交后的完整矩阵。 |
 
 ## 下一个动作
 
-等待 supervisor 提交凭据 vault 系统钥匙串恢复原语。下一轮必须先等待该提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则定位并修复；全绿后继续 CVK 恢复 keyslot 与 CVK/VMK 轮换、全量重加密恢复路径，仍按独立项拆分。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收。
+等待 supervisor 提交凭据 vault 恢复原语格式修复。下一轮必须先等待修复提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则定位并修复；全绿后继续 CVK 恢复 keyslot 与 CVK/VMK 轮换、全量重加密恢复路径，仍按独立项拆分。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收。
