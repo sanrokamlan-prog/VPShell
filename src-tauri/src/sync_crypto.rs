@@ -168,8 +168,8 @@ pub(crate) struct CredentialRecoveryKeyslot {
 impl CredentialRecoveryKeyslot {
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
         validate_credential_recovery_keyslot(self)?;
-        let encoded = serde_json::to_vec(self)
-            .map_err(|_| "无法序列化凭据恢复 keyslot".to_string())?;
+        let encoded =
+            serde_json::to_vec(self).map_err(|_| "无法序列化凭据恢复 keyslot".to_string())?;
         if encoded.len() > MAX_KEYSLOT_BYTES {
             return Err("凭据恢复 keyslot 超过 16 KiB 上限".to_string());
         }
@@ -914,9 +914,7 @@ fn validate_recovery_keyslot(keyslot: &RecoveryKeyslot) -> Result<(), String> {
     validate_uuid(&keyslot.slot_id, "recovery keyslot")
 }
 
-fn validate_credential_recovery_keyslot(
-    keyslot: &CredentialRecoveryKeyslot,
-) -> Result<(), String> {
+fn validate_credential_recovery_keyslot(keyslot: &CredentialRecoveryKeyslot) -> Result<(), String> {
     if keyslot.format_version != FORMAT_VERSION
         || keyslot.key_domain != "credential-recovery"
         || keyslot.algorithm != CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM

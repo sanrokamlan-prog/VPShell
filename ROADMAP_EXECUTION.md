@@ -367,6 +367,7 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-21 | B9 凭据 vault 恢复原语首轮 Actions 与格式修复 | supervisor 提交 `1ff29e0` 的 PR #1 run `32457246972` 中 frontend、Android aarch64 debug APK/Gradle gate 成功；Ubuntu/Windows/macOS Intel/macOS arm 的首个 `cargo fmt --check` 一致指出 `sync_credential_vault.rs` 4 处机械排版差异，未进入 locked check/test。现仅应用 runner 给出的 import、keyring write、storage error 和测试构造格式，不改变行为；等待修复提交后的完整矩阵。 |
 | 2026-08-21 | B9 凭据 vault 恢复原语格式修复 Actions 完成 | 格式修复提交 `e671d40` 的 PR #1 run `32457930372` 已确认 frontend、Android aarch64 debug APK/Gradle gate、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test 六项全部 `COMPLETED/SUCCESS`；恢复写回原语闭合，进入 CVK 恢复 keyslot 独立项。 |
 | 2026-08-21 | B9 CVK 恢复 keyslot 本机轻量门禁 | 新增独立 `credential-recovery` keyslot 类型、HKDF salt/info 与 AAD 域，以 `RecoveryKey` 包裹 `CredentialVaultKey`；严格 schema/UUID/域/算法/nonce/密文长度和未知字段拒绝，错误不返回秘密，增加编解码、错误恢复密钥、域篡改、跨域解析和密文篡改测试。`git diff --check`、严格静态边界与无大型构建产物检查通过；VPS 无 Cargo/rustc/rustfmt，未下载工具链、依赖或 SDK，完整四平台 locked fmt/check/test、frontend 与 Android 构建交给本项提交后的 PR #1 Actions。 |
+| 2026-08-28 | B9 CVK 恢复 keyslot 首轮 Actions 与格式修复 | supervisor 提交 `d72f7bb` 的 PR #1 run `33167871434` 中 frontend 成功，Android 仍在运行；Ubuntu/Windows/macOS Intel/arm 四个平台均在首个 `cargo fmt --check` 报告 `sync_crypto.rs` 两处机械排版差异，未进入 locked check/test。现仅按 Ubuntu runner 日志修正两处格式，不改变 CVK 密文、域分离或验证行为；等待修复提交后的完整矩阵。 |
 
 ## 下一个动作
 
