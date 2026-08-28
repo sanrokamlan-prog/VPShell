@@ -29,6 +29,7 @@ const ARGON2_VERSION: u32 = 0x13;
 const KEYSLOT_ALGORITHM: &str = "argon2id+xchacha20poly1305";
 const OBJECT_ALGORITHM: &str = "xchacha20poly1305";
 const RECOVERY_KEYSLOT_ALGORITHM: &str = "hkdf-sha256+xchacha20poly1305";
+const CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM: &str = "hkdf-sha256+xchacha20poly1305";
 const CREDENTIAL_KEYSLOT_ALGORITHM: &str = "argon2id+xchacha20poly1305";
 const RECOVERY_KEY_PREFIX: &str = "VPS1";
 
@@ -150,6 +151,49 @@ pub(crate) struct RecoveryKeyslot {
     algorithm: String,
     nonce: String,
     wrapped_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CredentialRecoveryKeyslot {
+    format_version: u32,
+    vault_id: String,
+    slot_id: String,
+    key_domain: String,
+    algorithm: String,
+    nonce: String,
+    wrapped_key: String,
+}
+
+impl CredentialRecoveryKeyslot {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
+        validate_credential_recovery_keyslot(self)?;
+        let encoded = serde_json::to_vec(self)
+            .map_err(|_| "无法序列化凭据恢复 keyslot".to_string())?;
+        if encoded.len() > MAX_KEYSLOT_BYTES {
+            return Err("凭据恢复 keyslot 超过 16 KiB 上限".to_string());
+        }
+        Ok(encoded)
+    }
+
+    pub(crate) fn decode(encoded: &[u8]) -> Result<Self, String> {
+        if encoded.is_empty() || encoded.len() > MAX_KEYSLOT_BYTES {
+            return Err("凭据恢复 keyslot 为空或超过 16 KiB 上限".to_string());
+        }
+        let keyslot: Self = serde_json::from_slice(encoded)
+            .map_err(|_| "凭据恢复 keyslot JSON 损坏或字段不受支持".to_string())?;
+        validate_credential_recovery_keyslot(&keyslot)?;
+        decode_exact::<NONCE_BYTES>(&keyslot.nonce, "凭据恢复 keyslot nonce")?;
+        decode_exact::<{ KEY_BYTES + TAG_BYTES }>(
+            &keyslot.wrapped_key,
+            "凭据恢复 keyslot wrapped key",
+        )?;
+        Ok(keyslot)
+    }
+
+    pub(crate) fn vault_id(&self) -> &str {
+        &self.vault_id
+    }
 }
 
 impl RecoveryKeyslot {
@@ -657,6 +701,87 @@ pub(crate) fn open_recovery_keyslot(
     Ok(VaultKey(bytes))
 }
 
+pub(crate) fn create_credential_recovery_keyslot(
+    recovery_key: &RecoveryKey,
+    vault_id: &str,
+    credential_key: &CredentialVaultKey,
+) -> Result<CredentialRecoveryKeyslot, String> {
+    let mut nonce = [0_u8; NONCE_BYTES];
+    getrandom::fill(&mut nonce)
+        .map_err(|_| "无法从操作系统安全随机源生成凭据恢复 keyslot nonce".to_string())?;
+    create_credential_recovery_keyslot_with_nonce(
+        recovery_key,
+        vault_id,
+        &uuid::Uuid::new_v4().to_string(),
+        credential_key,
+        nonce,
+    )
+}
+
+fn create_credential_recovery_keyslot_with_nonce(
+    recovery_key: &RecoveryKey,
+    vault_id: &str,
+    slot_id: &str,
+    credential_key: &CredentialVaultKey,
+    nonce: [u8; NONCE_BYTES],
+) -> Result<CredentialRecoveryKeyslot, String> {
+    validate_uuid(vault_id, "vault")?;
+    validate_uuid(slot_id, "credential recovery keyslot")?;
+    let kek = derive_credential_recovery_key(recovery_key, vault_id, slot_id)?;
+    let aad = credential_recovery_keyslot_aad(vault_id, slot_id, KEY_BYTES + TAG_BYTES)?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(kek.as_ref()));
+    let wrapped_key = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &credential_key.0,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| "无法使用恢复密钥包裹凭据 vault 密钥".to_string())?;
+    Ok(CredentialRecoveryKeyslot {
+        format_version: FORMAT_VERSION,
+        vault_id: vault_id.to_string(),
+        slot_id: slot_id.to_string(),
+        key_domain: "credential-recovery".to_string(),
+        algorithm: CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM.to_string(),
+        nonce: URL_SAFE_NO_PAD.encode(nonce),
+        wrapped_key: URL_SAFE_NO_PAD.encode(wrapped_key),
+    })
+}
+
+pub(crate) fn open_credential_recovery_keyslot(
+    recovery_key: &RecoveryKey,
+    keyslot: &CredentialRecoveryKeyslot,
+) -> Result<CredentialVaultKey, String> {
+    validate_credential_recovery_keyslot(keyslot)?;
+    let nonce = decode_exact::<NONCE_BYTES>(&keyslot.nonce, "凭据恢复 keyslot nonce")?;
+    let wrapped = decode_exact::<{ KEY_BYTES + TAG_BYTES }>(
+        &keyslot.wrapped_key,
+        "凭据恢复 keyslot wrapped key",
+    )?;
+    let kek = derive_credential_recovery_key(recovery_key, &keyslot.vault_id, &keyslot.slot_id)?;
+    let aad = credential_recovery_keyslot_aad(&keyslot.vault_id, &keyslot.slot_id, wrapped.len())?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(kek.as_ref()));
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &wrapped,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| "同步凭据恢复密钥错误或 keyslot 已被篡改".to_string())?,
+    );
+    if plaintext.len() != KEY_BYTES {
+        return Err("凭据恢复 keyslot 解包后的密钥长度无效".to_string());
+    }
+    let mut bytes = [0_u8; KEY_BYTES];
+    bytes.copy_from_slice(&plaintext);
+    Ok(CredentialVaultKey(bytes))
+}
+
 pub(crate) fn encrypt_sync_object(
     vault_key: &VaultKey,
     vault_id: &str,
@@ -789,6 +914,19 @@ fn validate_recovery_keyslot(keyslot: &RecoveryKeyslot) -> Result<(), String> {
     validate_uuid(&keyslot.slot_id, "recovery keyslot")
 }
 
+fn validate_credential_recovery_keyslot(
+    keyslot: &CredentialRecoveryKeyslot,
+) -> Result<(), String> {
+    if keyslot.format_version != FORMAT_VERSION
+        || keyslot.key_domain != "credential-recovery"
+        || keyslot.algorithm != CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM
+    {
+        return Err("凭据恢复 keyslot 格式版本、密钥域或算法不受支持".to_string());
+    }
+    validate_uuid(&keyslot.vault_id, "vault")?;
+    validate_uuid(&keyslot.slot_id, "credential recovery keyslot")
+}
+
 fn validate_credential_keyslot(keyslot: &CredentialKeyslot) -> Result<(), String> {
     if keyslot.format_version != FORMAT_VERSION
         || keyslot.key_domain != "credentials"
@@ -900,6 +1038,22 @@ fn derive_recovery_key(
     Ok(output)
 }
 
+fn derive_credential_recovery_key(
+    recovery_key: &RecoveryKey,
+    vault_id: &str,
+    slot_id: &str,
+) -> Result<Zeroizing<[u8; KEY_BYTES]>, String> {
+    validate_uuid(vault_id, "vault")?;
+    validate_uuid(slot_id, "credential recovery keyslot")?;
+    let salt = format!("vpshell-sync-v1/credential-recovery/{vault_id}");
+    let info = format!("vpshell-sync-v1/credential-recovery-keyslot/{slot_id}");
+    let hkdf = Hkdf::<Sha256>::new(Some(salt.as_bytes()), &recovery_key.0);
+    let mut output = Zeroizing::new([0_u8; KEY_BYTES]);
+    hkdf.expand(info.as_bytes(), output.as_mut())
+        .map_err(|_| "凭据恢复 KEK 派生失败".to_string())?;
+    Ok(output)
+}
+
 fn keyslot_aad(
     vault_id: &str,
     slot_id: &str,
@@ -931,6 +1085,20 @@ fn recovery_keyslot_aad(
     push_field(&mut aad, slot_id.as_bytes())?;
     push_field(&mut aad, b"business-recovery")?;
     push_field(&mut aad, RECOVERY_KEYSLOT_ALGORITHM.as_bytes())?;
+    aad.extend_from_slice(&(wrapped_length as u64).to_be_bytes());
+    Ok(aad)
+}
+
+fn credential_recovery_keyslot_aad(
+    vault_id: &str,
+    slot_id: &str,
+    wrapped_length: usize,
+) -> Result<Vec<u8>, String> {
+    let mut aad = b"VPSHELL-CREDENTIAL-RECOVERY-KEYSLOT-V1".to_vec();
+    push_field(&mut aad, vault_id.as_bytes())?;
+    push_field(&mut aad, slot_id.as_bytes())?;
+    push_field(&mut aad, b"credential-recovery")?;
+    push_field(&mut aad, CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM.as_bytes())?;
     aad.extend_from_slice(&(wrapped_length as u64).to_be_bytes());
     Ok(aad)
 }
@@ -1236,5 +1404,46 @@ mod tests {
             contains_separator.0,
             RecoveryKey::parse(&exported).unwrap().0
         );
+    }
+
+    #[test]
+    fn credential_recovery_keyslot_is_domain_separated_and_round_trips() {
+        let recovery = RecoveryKey::from_bytes([0x64; KEY_BYTES]);
+        let credential = CredentialVaultKey::from_bytes([0x27; KEY_BYTES]);
+        let slot = create_credential_recovery_keyslot_with_nonce(
+            &recovery,
+            VAULT_ID,
+            "55555555-5555-4555-8555-555555555555",
+            &credential,
+            [0x66; NONCE_BYTES],
+        )
+        .expect("create credential recovery keyslot");
+        assert_eq!(slot.key_domain, "credential-recovery");
+        assert_eq!(slot.algorithm, CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM);
+        let encoded = slot.encode().expect("encode credential recovery keyslot");
+        assert_eq!(CredentialRecoveryKeyslot::decode(&encoded).unwrap(), slot);
+        let opened = open_credential_recovery_keyslot(&recovery, &slot)
+            .expect("open credential recovery keyslot");
+        assert_eq!(opened.key_material(), credential.key_material());
+
+        let wrong = RecoveryKey::from_bytes([0x65; KEY_BYTES]);
+        assert!(open_credential_recovery_keyslot(&wrong, &slot).is_err());
+
+        let mut tampered = slot.clone();
+        tampered.key_domain = "business-recovery".to_string();
+        assert!(tampered.encode().is_err());
+        assert!(RecoveryKeyslot::decode(&encoded).is_err());
+
+        let mut identity_tampered = slot.clone();
+        identity_tampered.vault_id = "22222222-2222-4222-8222-222222222222".to_string();
+        assert!(open_credential_recovery_keyslot(&recovery, &identity_tampered).is_err());
+
+        let mut wrapped_tampered = slot;
+        let mut wrapped = URL_SAFE_NO_PAD
+            .decode(&wrapped_tampered.wrapped_key)
+            .expect("decode wrapped key");
+        wrapped[0] ^= 0x01;
+        wrapped_tampered.wrapped_key = URL_SAFE_NO_PAD.encode(wrapped);
+        assert!(open_credential_recovery_keyslot(&recovery, &wrapped_tampered).is_err());
     }
 }
