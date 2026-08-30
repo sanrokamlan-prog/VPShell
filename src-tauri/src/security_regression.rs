@@ -492,6 +492,7 @@ mod tests {
         }
         for required in [
             "restore_credential_to_system_keyring",
+            "reencrypt_credential",
             "CredentialSecretKind::SshPassword => \"ssh-\"",
             "CredentialSecretKind::PrivateKeyPassphrase => \"key-\"",
             "delete_credential()",

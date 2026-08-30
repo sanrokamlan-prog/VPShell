@@ -130,7 +130,8 @@
 | 完成 | 设备 operation Ed25519 严格签名封套、本机系统凭据私钥、真实 outbox、远端签名 registry trust anchor、持久防回滚水位、配置后上传/下载授权验签和桌面/Android 只读状态已接线；格式修复提交 `0e95b52` 的 PR #1 run `32296587857` 六项全绿 |
 | 完成 | 桌面受控设备登记、重命名与撤销：15 分钟 vault-bound 新设备自签申请、活动设备 expected-revision successor 发布/回读、具名 IPC、管理 UI 与 Android 精确禁权已接线；格式修复提交 `616111e` 的 PR #1 run `32454051006` 六项全绿 |
 | 完成 | 凭据 vault 内部恢复写回：授权设备通过 CVK 认证信封后，只为现有消费者支持的 SSH 密码/私钥口令生成不覆盖的随机 `ssh-`/`key-` 系统钥匙串引用并回读验证，失败清理且诊断无 secret/reference；提交 `e671d40` 的 PR #1 run `32457930372` frontend、Android 与四平台 Rust 全部 `COMPLETED/SUCCESS`。provider/outbox、协调器/UI、OpenSSH 私钥/access token 安装目标、CVK/VMK 恢复轮换及真实多设备矩阵仍待实现 |
-| 进行中 | CVK 恢复 keyslot 原语：使用独立 `credential-recovery` HKDF/XChaCha20-Poly1305 域，以离线恢复密钥包裹独立 CVK；严格 UUID/域/算法/长度/未知字段校验、编解码、错误净化和篡改/跨域测试已加入，尚未接入恢复写回、provider/outbox、协调器/UI 或 CVK/VMK 轮换 |
+| 完成 | CVK 恢复 keyslot 原语：使用独立 `credential-recovery` HKDF/XChaCha20-Poly1305 域，以离线恢复密钥包裹独立 CVK；严格 UUID/域/算法/长度/未知字段校验、编解码、错误净化和篡改/跨域测试已加入。格式修复提交 `b8b9292` 的 PR #1 run `33168454315` frontend、Android 与四平台 Rust 全部 `COMPLETED/SUCCESS`；恢复写回、provider/outbox、协调器/UI 或 CVK/VMK 轮换仍未接线 |
+| 进行中 | VMK/CVK 单对象轮换原语：旧密钥先完成 AEAD 认证，再用新密钥和新 nonce 重加密并保留 vault/object 或 item 身份；错误旧密钥不产生输出。批量全量重加密、恢复写入、provider/outbox、协调器/UI、回滚保护和真实多设备流程仍待实现 |
 
 Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322`、JPEG/WebP 已在 `32256446076` 通过 Actions，活动设备确认式 blob GC 已在 `32264835549` 通过 Actions 并对无条件删除 provider 保守保留。SFTP 产品入口与单一 Linux OpenSSH fixture 已在 `32274011250` 全绿，S3 产品入口与独立 SigV4 HTTPS fixture 已在 `32280932435` 全绿，Gateway 产品入口已在 `32286301875` 全绿，远端 registry 授权锚与防回滚链已在 `32296587857` 全绿，设备管理已在 `32454051006` 全绿。广泛外部 provider、凭据完整产品接线/恢复轮换和真实多设备仍未完成。
 
@@ -367,8 +368,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-21 | B9 凭据 vault 恢复原语首轮 Actions 与格式修复 | supervisor 提交 `1ff29e0` 的 PR #1 run `32457246972` 中 frontend、Android aarch64 debug APK/Gradle gate 成功；Ubuntu/Windows/macOS Intel/macOS arm 的首个 `cargo fmt --check` 一致指出 `sync_credential_vault.rs` 4 处机械排版差异，未进入 locked check/test。现仅应用 runner 给出的 import、keyring write、storage error 和测试构造格式，不改变行为；等待修复提交后的完整矩阵。 |
 | 2026-08-21 | B9 凭据 vault 恢复原语格式修复 Actions 完成 | 格式修复提交 `e671d40` 的 PR #1 run `32457930372` 已确认 frontend、Android aarch64 debug APK/Gradle gate、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test 六项全部 `COMPLETED/SUCCESS`；恢复写回原语闭合，进入 CVK 恢复 keyslot 独立项。 |
 | 2026-08-21 | B9 CVK 恢复 keyslot 本机轻量门禁 | 新增独立 `credential-recovery` keyslot 类型、HKDF salt/info 与 AAD 域，以 `RecoveryKey` 包裹 `CredentialVaultKey`；严格 schema/UUID/域/算法/nonce/密文长度和未知字段拒绝，错误不返回秘密，增加编解码、错误恢复密钥、域篡改、跨域解析和密文篡改测试。`git diff --check`、严格静态边界与无大型构建产物检查通过；VPS 无 Cargo/rustc/rustfmt，未下载工具链、依赖或 SDK，完整四平台 locked fmt/check/test、frontend 与 Android 构建交给本项提交后的 PR #1 Actions。 |
-| 2026-08-28 | B9 CVK 恢复 keyslot 首轮 Actions 与格式修复 | supervisor 提交 `d72f7bb` 的 PR #1 run `33167871434` 中 frontend 成功，Android 仍在运行；Ubuntu/Windows/macOS Intel/arm 四个平台均在首个 `cargo fmt --check` 报告 `sync_crypto.rs` 两处机械排版差异，未进入 locked check/test。现仅按 Ubuntu runner 日志修正两处格式，不改变 CVK 密文、域分离或验证行为；等待修复提交后的完整矩阵。 |
+| 2026-08-28 | B9 CVK 恢复 keyslot 首轮 Actions 与格式修复 | supervisor 提交 `d72f7bb` 的 PR #1 run `33167871434` 首轮仅因 `sync_crypto.rs` 两处 `cargo fmt --check` 差异失败；格式修复提交 `b8b9292` 的 PR #1 run `33168454315` 已确认 frontend、Android aarch64 debug APK/Gradle gate、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test 六项全部 `COMPLETED/SUCCESS`。 |
+| 2026-08-30 | B9 VMK/CVK 单对象轮换原语本机轻量门禁 | 新增 Rust-only `reencrypt_sync_object` 与 `reencrypt_credential`：旧 VMK/CVK 认证成功后才生成新 nonce 并重加密，保留对象/凭据身份，跨 vault 与错误旧密钥 fail closed；聚焦测试覆盖新旧密钥、身份保留、nonce 更新和错误路径。`git diff --check`、严格配置解析、静态敏感边界与无大型构建产物检查通过；VPS 无 Cargo/rustc/rustfmt，完整矩阵交给本项提交后的 PR #1 Actions。 |
 
 ## 下一个动作
 
-等待 supervisor 提交 CVK 恢复 keyslot 原语。下一轮必须先等待本项提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则定位并修复；全绿后继续 CVK/VMK 轮换与全量重加密恢复路径，仍按独立项拆分。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收。
+等待 supervisor 提交 VMK/CVK 单对象轮换原语。下一轮必须先等待该提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则定位并修复；全绿后继续批量全量重加密、恢复写入与回滚保护，仍按独立项拆分。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收。

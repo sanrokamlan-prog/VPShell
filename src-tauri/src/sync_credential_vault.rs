@@ -564,6 +564,88 @@ pub(crate) fn decrypt_credential(
     CredentialSecret::new(payload.kind, payload.secret)
 }
 
+pub(crate) fn reencrypt_credential(
+    policy: &CredentialVaultPolicy,
+    registry: &DeviceRegistry,
+    device_id: &str,
+    old_credential_key: &CredentialVaultKey,
+    new_credential_key: &CredentialVaultKey,
+    envelope: &CredentialEnvelope,
+) -> VaultResult<CredentialEnvelope> {
+    if old_credential_key.key_material() == new_credential_key.key_material() {
+        return Err(CredentialVaultError::new(
+            CredentialVaultErrorCode::InvalidInput,
+            "新旧凭据 vault 密钥必须不同",
+        ));
+    }
+    let secret = decrypt_credential(
+        policy,
+        registry,
+        device_id,
+        old_credential_key,
+        envelope,
+    )?;
+    let mut nonce = [0u8; NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|_| {
+        CredentialVaultError::new(
+            CredentialVaultErrorCode::Authentication,
+            "无法生成凭据 vault 轮换 nonce",
+        )
+    })?;
+    let payload = CredentialPayloadRef {
+        format_version: FORMAT_VERSION,
+        kind: &secret.kind,
+        secret: secret.value.as_str(),
+    };
+    let plaintext = Zeroizing::new(serde_json::to_vec(&payload).map_err(|_| {
+        CredentialVaultError::new(
+            CredentialVaultErrorCode::InvalidInput,
+            "无法编码凭据 vault 轮换载荷",
+        )
+    })?);
+    if plaintext.len() > MAX_PLAINTEXT_BYTES {
+        return Err(CredentialVaultError::new(
+            CredentialVaultErrorCode::LimitExceeded,
+            "凭据 vault 轮换明文载荷超过 1152 KiB",
+        ));
+    }
+    let ciphertext_len = plaintext.len().checked_add(TAG_BYTES).ok_or_else(|| {
+        CredentialVaultError::new(
+            CredentialVaultErrorCode::LimitExceeded,
+            "凭据 vault 轮换载荷长度溢出",
+        )
+    })?;
+    let aad = envelope_aad(&policy.vault_id, &envelope.item_id, &secret.kind, ciphertext_len)?;
+    let domain_key = derive_key(new_credential_key, &policy.vault_id, &secret.kind)?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(domain_key.as_ref()));
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext.as_ref(),
+                aad: &aad,
+            },
+        )
+        .map_err(|_| {
+            CredentialVaultError::new(
+                CredentialVaultErrorCode::Authentication,
+                "无法重加密凭据 vault 对象",
+            )
+        })?;
+    let rotated = CredentialEnvelope {
+        format_version: FORMAT_VERSION,
+        vault_id: envelope.vault_id.clone(),
+        item_id: envelope.item_id.clone(),
+        kind: secret.kind,
+        key_domain: KEY_DOMAIN.to_string(),
+        algorithm: ALGORITHM.to_string(),
+        nonce: URL_SAFE_NO_PAD.encode(nonce),
+        ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
+    };
+    validate_envelope(&rotated)?;
+    Ok(rotated)
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RestoredCredentialReference {
     kind: CredentialSecretKind,
@@ -1313,5 +1395,58 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn credential_rotation_reencrypts_with_new_cvk_without_changing_item_identity() {
+        let (registry, policy) = enabled_policy();
+        let old_key = CredentialVaultKey::from_bytes([0x31; 32]);
+        let new_key = CredentialVaultKey::from_bytes([0x32; 32]);
+        let envelope = encrypt_credential(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &old_key,
+            &CredentialSecret::new(CredentialSecretKind::PrivateKeyPassphrase, "passphrase".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let rotated = reencrypt_credential(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &old_key,
+            &new_key,
+            &envelope,
+        )
+        .unwrap();
+        assert_eq!(rotated.item_id, envelope.item_id);
+        assert_eq!(rotated.kind, envelope.kind);
+        assert_ne!(rotated.nonce, envelope.nonce);
+        assert_eq!(
+            decrypt_credential(&policy, &registry, DEVICE_A, &new_key, &rotated)
+                .unwrap()
+                .expose_for_test(),
+            "passphrase"
+        );
+        assert!(decrypt_credential(&policy, &registry, DEVICE_A, &old_key, &rotated).is_err());
+        assert!(reencrypt_credential(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &CredentialVaultKey::from_bytes([0x33; 32]),
+            &new_key,
+            &envelope,
+        )
+        .is_err());
+        assert!(reencrypt_credential(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &old_key,
+            &old_key,
+            &envelope,
+        )
+        .is_err());
     }
 }

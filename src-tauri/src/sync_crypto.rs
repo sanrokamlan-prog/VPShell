@@ -891,6 +891,26 @@ pub(crate) fn decrypt_sync_object(
         .map_err(|_| "同步对象认证失败：密文、身份或域已被篡改".to_string())
 }
 
+pub(crate) fn reencrypt_sync_object(
+    old_vault_key: &VaultKey,
+    new_vault_key: &VaultKey,
+    object: &EncryptedSyncObject,
+) -> Result<EncryptedSyncObject, String> {
+    if old_vault_key.0 == new_vault_key.0 {
+        return Err("新旧同步主密钥必须不同".to_string());
+    }
+    let plaintext = Zeroizing::new(decrypt_sync_object(old_vault_key, object)?);
+    encrypt_sync_object(
+        new_vault_key,
+        &object.vault_id,
+        object.object_kind.clone(),
+        &object.object_id,
+        object.device_id.as_deref(),
+        object.sequence,
+        plaintext.as_ref(),
+    )
+}
+
 fn validate_keyslot(keyslot: &PasswordKeyslot) -> Result<(), String> {
     if keyslot.format_version != FORMAT_VERSION
         || keyslot.key_domain != "business"
@@ -1443,5 +1463,34 @@ mod tests {
         wrapped[0] ^= 0x01;
         wrapped_tampered.wrapped_key = URL_SAFE_NO_PAD.encode(wrapped);
         assert!(open_credential_recovery_keyslot(&recovery, &wrapped_tampered).is_err());
+    }
+
+    #[test]
+    fn reencrypt_sync_object_authenticates_old_key_and_preserves_identity() {
+        let old_key = VaultKey::from_bytes([0x11; KEY_BYTES]);
+        let new_key = VaultKey::from_bytes([0x22; KEY_BYTES]);
+        let object = encrypt_sync_object_with_nonce(
+            &old_key,
+            VAULT_ID,
+            SyncObjectKind::Event,
+            "event-rotate",
+            Some(DEVICE_ID),
+            Some(9),
+            b"rotation payload",
+            [0x71; NONCE_BYTES],
+        )
+        .unwrap();
+        let rotated = reencrypt_sync_object(&old_key, &new_key, &object).unwrap();
+        assert_eq!(rotated.vault_id, object.vault_id);
+        assert_eq!(rotated.object_id, object.object_id);
+        assert_eq!(rotated.object_kind, object.object_kind);
+        assert_eq!(rotated.device_id, object.device_id);
+        assert_eq!(rotated.sequence, object.sequence);
+        assert_ne!(rotated.nonce, object.nonce);
+        assert_eq!(decrypt_sync_object(&new_key, &rotated).unwrap(), b"rotation payload");
+        assert!(decrypt_sync_object(&old_key, &rotated).is_err());
+        let wrong = VaultKey::from_bytes([0x33; KEY_BYTES]);
+        assert!(reencrypt_sync_object(&wrong, &new_key, &object).is_err());
+        assert!(reencrypt_sync_object(&old_key, &old_key, &object).is_err());
     }
 }
