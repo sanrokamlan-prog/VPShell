@@ -578,13 +578,7 @@ pub(crate) fn reencrypt_credential(
             "新旧凭据 vault 密钥必须不同",
         ));
     }
-    let secret = decrypt_credential(
-        policy,
-        registry,
-        device_id,
-        old_credential_key,
-        envelope,
-    )?;
+    let secret = decrypt_credential(policy, registry, device_id, old_credential_key, envelope)?;
     let mut nonce = [0u8; NONCE_BYTES];
     getrandom::fill(&mut nonce).map_err(|_| {
         CredentialVaultError::new(
@@ -615,7 +609,12 @@ pub(crate) fn reencrypt_credential(
             "凭据 vault 轮换载荷长度溢出",
         )
     })?;
-    let aad = envelope_aad(&policy.vault_id, &envelope.item_id, &secret.kind, ciphertext_len)?;
+    let aad = envelope_aad(
+        &policy.vault_id,
+        &envelope.item_id,
+        &secret.kind,
+        ciphertext_len,
+    )?;
     let domain_key = derive_key(new_credential_key, &policy.vault_id, &secret.kind)?;
     let cipher = XChaCha20Poly1305::new(Key::from_slice(domain_key.as_ref()));
     let ciphertext = cipher
@@ -1407,19 +1406,16 @@ mod tests {
             &registry,
             DEVICE_A,
             &old_key,
-            &CredentialSecret::new(CredentialSecretKind::PrivateKeyPassphrase, "passphrase".into())
-                .unwrap(),
+            &CredentialSecret::new(
+                CredentialSecretKind::PrivateKeyPassphrase,
+                "passphrase".into(),
+            )
+            .unwrap(),
         )
         .unwrap();
-        let rotated = reencrypt_credential(
-            &policy,
-            &registry,
-            DEVICE_A,
-            &old_key,
-            &new_key,
-            &envelope,
-        )
-        .unwrap();
+        let rotated =
+            reencrypt_credential(&policy, &registry, DEVICE_A, &old_key, &new_key, &envelope)
+                .unwrap();
         assert_eq!(rotated.item_id, envelope.item_id);
         assert_eq!(rotated.kind, envelope.kind);
         assert_ne!(rotated.nonce, envelope.nonce);
@@ -1430,23 +1426,20 @@ mod tests {
             "passphrase"
         );
         assert!(decrypt_credential(&policy, &registry, DEVICE_A, &old_key, &rotated).is_err());
-        assert!(reencrypt_credential(
-            &policy,
-            &registry,
-            DEVICE_A,
-            &CredentialVaultKey::from_bytes([0x33; 32]),
-            &new_key,
-            &envelope,
-        )
-        .is_err());
-        assert!(reencrypt_credential(
-            &policy,
-            &registry,
-            DEVICE_A,
-            &old_key,
-            &old_key,
-            &envelope,
-        )
-        .is_err());
+        assert!(
+            reencrypt_credential(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &CredentialVaultKey::from_bytes([0x33; 32]),
+                &new_key,
+                &envelope,
+            )
+            .is_err()
+        );
+        assert!(
+            reencrypt_credential(&policy, &registry, DEVICE_A, &old_key, &old_key, &envelope,)
+                .is_err()
+        );
     }
 }

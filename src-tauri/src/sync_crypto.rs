@@ -1487,7 +1487,10 @@ mod tests {
         assert_eq!(rotated.device_id, object.device_id);
         assert_eq!(rotated.sequence, object.sequence);
         assert_ne!(rotated.nonce, object.nonce);
-        assert_eq!(decrypt_sync_object(&new_key, &rotated).unwrap(), b"rotation payload");
+        assert_eq!(
+            decrypt_sync_object(&new_key, &rotated).unwrap(),
+            b"rotation payload"
+        );
         assert!(decrypt_sync_object(&old_key, &rotated).is_err());
         let wrong = VaultKey::from_bytes([0x33; KEY_BYTES]);
         assert!(reencrypt_sync_object(&wrong, &new_key, &object).is_err());
