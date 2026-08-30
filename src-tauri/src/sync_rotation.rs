@@ -233,13 +233,8 @@ pub(crate) fn activate_vault_rotation(
     if current_vault_key.same_material(new_vault_key) {
         return Err("轮换激活的新旧同步主密钥必须不同".to_string());
     }
-    let manifest = load_rotation_manifest(
-        provider,
-        new_vault_key,
-        vault_id,
-        publication,
-        cancellation,
-    )?;
+    let manifest =
+        load_rotation_manifest(provider, new_vault_key, vault_id, publication, cancellation)?;
     validate_current_snapshot(
         provider,
         current_vault_key,
@@ -249,8 +244,7 @@ pub(crate) fn activate_vault_rotation(
     )?;
     cancellation.check().map_err(|_| "cancelled".to_string())?;
 
-    let password_keyslot =
-        create_password_keyslot(new_password, vault_id, new_vault_key, kdf)?;
+    let password_keyslot = create_password_keyslot(new_password, vault_id, new_vault_key, kdf)?;
     let password_keyslot_encoded = password_keyslot.encode()?;
     let password_keyslot_key = format!(
         "vpshell/v1/{vault_id}/rotations/{}/keyslots/{}.json",
@@ -290,12 +284,7 @@ pub(crate) fn activate_vault_rotation(
         &commit_plaintext,
     )?
     .encode()?;
-    publish_staged(
-        provider,
-        &activation_key,
-        &activation_encoded,
-        cancellation,
-    )?;
+    publish_staged(provider, &activation_key, &activation_encoded, cancellation)?;
     Ok(RotationActivation {
         rotation_id: publication.rotation_id.clone(),
         activation_revision,
@@ -348,8 +337,7 @@ pub(crate) fn open_vault_rotation_activation(
     let password_keyslot_encoded = provider
         .get(&commit.password_keyslot_key, cancellation)
         .map_err(provider_code)?;
-    validate_object_bytes(&password_keyslot_encoded)
-        .map_err(|_| "resource-limit".to_string())?;
+    validate_object_bytes(&password_keyslot_encoded).map_err(|_| "resource-limit".to_string())?;
     if sha256_hex(&password_keyslot_encoded) != commit.password_keyslot_hash {
         return Err("integrity".to_string());
     }
@@ -486,7 +474,8 @@ fn validate_current_snapshot(
     let mut plaintext_bytes = 0_u64;
     for (metadata, item) in metadata.iter().zip(&manifest.objects) {
         cancellation.check().map_err(|_| "cancelled".to_string())?;
-        if metadata.key != item.source_key || metadata.size == 0 || metadata.size > MAX_OBJECT_BYTES {
+        if metadata.key != item.source_key || metadata.size == 0 || metadata.size > MAX_OBJECT_BYTES
+        {
             return Err("rotation-source-changed".to_string());
         }
         let encoded = provider
@@ -865,11 +854,7 @@ mod tests {
             })
         }
 
-        fn get(
-            &self,
-            key: &str,
-            cancellation: &ProviderCancellation,
-        ) -> ProviderResult<Vec<u8>> {
+        fn get(&self, key: &str, cancellation: &ProviderCancellation) -> ProviderResult<Vec<u8>> {
             cancellation.check()?;
             self.objects
                 .lock()
