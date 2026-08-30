@@ -203,7 +203,7 @@ K_event / K_blob / K_index / K_checkpoint / K_device_registry
 - SSH 密码/私钥口令各限 1024 bytes，access token 限 4 KiB，OpenSSH 私钥限 1 MiB；每类再使用独立 HKDF label 和随机 24-byte nonce，vault/item/type/算法/长度进入 AAD；
 - secret 类型不可 Debug/Serialize，临时明文缓冲清零；认证信封只含随机 item UUID、类型、nonce 和密文。本机 `credentialRef` 只作为 Rust 内存中的一次性系统钥匙串查找参数，不写入信封、provider object key、错误、日志或事件；
 - 内部系统钥匙串恢复原语先完成策略授权和信封 AEAD 认证，再为 SSH 密码/私钥口令生成新的 `ssh-<UUID>`/`key-<UUID>` 引用；最多尝试八个随机引用、预检不覆盖、写入后回读验证，失败则尽力删除且只返回稳定无敏感值错误。OpenSSH 私钥正文和通用 access token 在没有明确安装/消费目标前拒绝写回；
-- 当前模块不暴露 Tauri command/event；`credential-recovery` keyslot 与单对象 CVK 重加密仅是内部密码学原语，尚未接入设置 UI、provider/outbox、协调器、批量恢复写回或轮换调度，因此应用仍不会同步凭据。
+- 当前模块不暴露 Tauri command/event；`credential-recovery` keyslot、单对象 CVK 重加密及最多 10,000 项/256 MiB 的两阶段批量原语都只存在于 Rust 内部。批量原语先认证全部旧信封、拒绝重复 item/跨 vault，成功后才生成新 nonce，并不负责枚举 provider、发布新对象、切换 keyslot 或提交回滚水位；设置 UI、provider/outbox、协调器、批量恢复写回和轮换调度仍未接线，因此应用仍不会同步凭据。
 
 设备撤销无法抹除已经复制到该设备的 VMK/CVK。若被撤销设备可能泄露密钥，必须执行密钥轮换和全量重加密。
 
@@ -407,10 +407,10 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
 3. **MVP provider**：桌面 Local Folder 和 HTTPS WebDAV 已接通初始化/解锁、主机公开字段、安全自建脚本、五个固定设置实体、规范化 PNG/结构校验 JPEG-WebP 背景、公开命令/路径/非敏感参数/已认证连接历史的双向事务交接、活动设备确认式 blob 回收、持久冲突解决，以及手动与解锁期自动单周期；WebDAV 密码通过随机引用存入系统凭据管理器，显式 PEM CA 通过独立本机引用交给 Rust TLS 客户端。仍需其他尚未建模设置业务域、真实外部服务器兼容矩阵及断网退避测试。
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心、分页详情和 Rust-owned 候选解决 operation 已接入协调器事务；仍需多进程/真实设备演练。
-5. **恢复与设备层**：内部可打印恢复密钥、业务 VMK recovery keyslot、独立 CVK recovery keyslot、单调设备撤销、单对象 VMK/CVK 重加密原语、加密导出和离线恢复演练已实现；仍需批量轮换、恢复写入、协调器/UI 与真实多设备演练。
+5. **恢复与设备层**：内部可打印恢复密钥、业务 VMK recovery keyslot、独立 CVK recovery keyslot、单调设备撤销、单对象及有界两阶段 VMK/CVK 批量重加密原语、加密导出和离线恢复演练已实现；仍需 provider 全量枚举/发布、keyslot 原子切换、防回滚提交、恢复写入、协调器/UI 与真实多设备演练。
 6. **大对象**：PNG 背景的规范化分块、JPEG/WebP 的结构校验分块、限额和安全图片处理已接线；活动设备确认式垃圾回收已接线，仍需自建脚本附件和真实多设备/外部 provider 删除验收。
 7. **Provider 扩展**：SFTP 已接通桌面产品入口、真实 `ssh2` transport、协调器与 Linux OpenSSH fixture；S3-compatible 已接入 SigV4 transport、系统凭据、协调器和独立验签的 HTTPS Actions fixture；Gateway 已接入版本化 HTTPS login/session transport、系统凭据、协调器和独立 HTTPS Actions fixture。真实 AWS/MinIO/其他 S3 实现、真实 Gateway 及故障矩阵仍需外部验收，再评估 rclone 适配。
-8. **凭据 vault**：默认关闭、独立 CVK/keyslot/对象域、`credential-recovery` keyslot、单对象 CVK 重加密、逐设备授权及 SSH 密码/私钥口令内部钥匙串恢复原语已完成；仍需 provider/outbox、批量恢复写回、CVK/VMK 轮换调度、恢复演练、协调器/UI 与真实设备验证。
+8. **凭据 vault**：默认关闭、独立 CVK/keyslot/对象域、`credential-recovery` keyslot、单对象与有界批量 CVK 重加密、逐设备授权及 SSH 密码/私钥口令内部钥匙串恢复原语已完成；仍需 provider/outbox、批量恢复写回、CVK/VMK 轮换发布与提交、恢复演练、协调器/UI 与真实设备验证。
 9. **Gateway TOTP**：已作为可选当次登录字段接线，不持久化、不与 E2EE 解锁混在一起；真实服务的 seed 注册、恢复码、限流和审计仍需外部实现与验收。
 
 当前源码回归夹具已覆盖未知格式/AEAD 篡改/对象身份搬移、journal replay/发布终态、merge 到达顺序/截断、Local Folder 取消与截断字节、三个扩展 adapter 的条件创建/回读/边界、单一 Linux OpenSSH SFTP fixture、独立验签的 HTTPS S3 fixture，以及版本化登录/session/对象路径的 HTTPS Gateway fixture。上线前仍必须覆盖：两设备同时离线编辑、三设备删除复活、HLC 时钟倒退、上传中断、重复 list、S3 延迟可见、WebDAV 非原子行为、错误密码、旧 keyslot、恶意压缩载荷、对象篡改、segment 缺失、链分叉、远端整体回滚、恢复密钥导入、多版本真实 SFTP 服务器、真实 AWS/MinIO/其他 S3-compatible 与 Gateway 服务和多设备 CVK 轮换。

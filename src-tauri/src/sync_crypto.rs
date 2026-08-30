@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chacha20poly1305::{
@@ -25,6 +27,8 @@ const MAX_OBJECT_ID_BYTES: usize = 256;
 const MAX_PLAINTEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_KEYSLOT_BYTES: usize = 16 * 1024;
 const MAX_ENVELOPE_BYTES: usize = 24 * 1024 * 1024;
+const MAX_ROTATION_OBJECTS: usize = 10_000;
+const MAX_ROTATION_PLAINTEXT_BYTES: usize = 256 * 1024 * 1024;
 const ARGON2_VERSION: u32 = 0x13;
 const KEYSLOT_ALGORITHM: &str = "argon2id+xchacha20poly1305";
 const OBJECT_ALGORITHM: &str = "xchacha20poly1305";
@@ -911,6 +915,67 @@ pub(crate) fn reencrypt_sync_object(
     )
 }
 
+pub(crate) fn reencrypt_sync_objects(
+    old_vault_key: &VaultKey,
+    new_vault_key: &VaultKey,
+    objects: &[EncryptedSyncObject],
+) -> Result<Vec<EncryptedSyncObject>, String> {
+    if old_vault_key.0 == new_vault_key.0 {
+        return Err("新旧同步主密钥必须不同".to_string());
+    }
+    if objects.is_empty() || objects.len() > MAX_ROTATION_OBJECTS {
+        return Err("同步对象轮换批次必须为 1 至 10000 项".to_string());
+    }
+
+    let vault_id = objects[0].vault_id.as_str();
+    let mut identities = BTreeSet::new();
+    let mut total_plaintext_bytes = 0usize;
+    let mut plaintexts = Vec::with_capacity(objects.len());
+    for object in objects {
+        if object.vault_id != vault_id {
+            return Err("同步对象轮换批次不能跨 vault".to_string());
+        }
+        if !identities.insert((
+            object.object_kind.domain_label(),
+            object.object_id.as_str(),
+        )) {
+            return Err("同步对象轮换批次包含重复身份".to_string());
+        }
+        let plaintext = Zeroizing::new(decrypt_sync_object(old_vault_key, object)?);
+        total_plaintext_bytes = checked_rotation_plaintext_total(
+            total_plaintext_bytes,
+            plaintext.len(),
+        )?;
+        plaintexts.push(plaintext);
+    }
+
+    objects
+        .iter()
+        .zip(plaintexts.iter())
+        .map(|(object, plaintext)| {
+            encrypt_sync_object(
+                new_vault_key,
+                &object.vault_id,
+                object.object_kind.clone(),
+                &object.object_id,
+                object.device_id.as_deref(),
+                object.sequence,
+                plaintext.as_ref(),
+            )
+        })
+        .collect()
+}
+
+fn checked_rotation_plaintext_total(current: usize, next: usize) -> Result<usize, String> {
+    let total = current
+        .checked_add(next)
+        .ok_or_else(|| "同步对象轮换批次总明文长度溢出".to_string())?;
+    if total > MAX_ROTATION_PLAINTEXT_BYTES {
+        return Err("同步对象轮换批次总明文超过 256 MiB".to_string());
+    }
+    Ok(total)
+}
+
 fn validate_keyslot(keyslot: &PasswordKeyslot) -> Result<(), String> {
     if keyslot.format_version != FORMAT_VERSION
         || keyslot.key_domain != "business"
@@ -1495,5 +1560,94 @@ mod tests {
         let wrong = VaultKey::from_bytes([0x33; KEY_BYTES]);
         assert!(reencrypt_sync_object(&wrong, &new_key, &object).is_err());
         assert!(reencrypt_sync_object(&old_key, &old_key, &object).is_err());
+    }
+
+    #[test]
+    fn reencrypt_sync_object_batch_authenticates_every_item_before_rotation() {
+        assert_eq!(
+            checked_rotation_plaintext_total(MAX_ROTATION_PLAINTEXT_BYTES - 1, 1).unwrap(),
+            MAX_ROTATION_PLAINTEXT_BYTES
+        );
+        assert!(checked_rotation_plaintext_total(MAX_ROTATION_PLAINTEXT_BYTES, 1).is_err());
+        assert!(checked_rotation_plaintext_total(usize::MAX, 1).is_err());
+
+        let old_key = VaultKey::from_bytes([0x41; KEY_BYTES]);
+        let new_key = VaultKey::from_bytes([0x42; KEY_BYTES]);
+        let first = encrypt_sync_object_with_nonce(
+            &old_key,
+            VAULT_ID,
+            SyncObjectKind::Event,
+            "event-batch-rotate",
+            Some(DEVICE_ID),
+            Some(21),
+            b"first rotation payload",
+            [0x51; NONCE_BYTES],
+        )
+        .unwrap();
+        let second = encrypt_sync_object_with_nonce(
+            &old_key,
+            VAULT_ID,
+            SyncObjectKind::Blob,
+            "blob-batch-rotate",
+            None,
+            None,
+            b"second rotation payload",
+            [0x52; NONCE_BYTES],
+        )
+        .unwrap();
+
+        let rotated =
+            reencrypt_sync_objects(&old_key, &new_key, &[first.clone(), second.clone()]).unwrap();
+        assert_eq!(rotated.len(), 2);
+        assert_eq!(rotated[0].object_id, first.object_id);
+        assert_eq!(rotated[1].object_id, second.object_id);
+        assert_ne!(rotated[0].nonce, first.nonce);
+        assert_ne!(rotated[1].nonce, second.nonce);
+        assert_eq!(
+            decrypt_sync_object(&new_key, &rotated[0]).unwrap(),
+            b"first rotation payload"
+        );
+        assert_eq!(
+            decrypt_sync_object(&new_key, &rotated[1]).unwrap(),
+            b"second rotation payload"
+        );
+        assert!(decrypt_sync_object(&old_key, &rotated[0]).is_err());
+        assert!(decrypt_sync_object(&old_key, &rotated[1]).is_err());
+
+        let wrong_key = VaultKey::from_bytes([0x43; KEY_BYTES]);
+        let late_wrong_key = encrypt_sync_object_with_nonce(
+            &wrong_key,
+            VAULT_ID,
+            SyncObjectKind::Index,
+            "index-wrong-key",
+            None,
+            None,
+            b"wrong key payload",
+            [0x53; NONCE_BYTES],
+        )
+        .unwrap();
+        assert!(
+            reencrypt_sync_objects(&old_key, &new_key, &[first.clone(), late_wrong_key]).is_err()
+        );
+        assert!(
+            reencrypt_sync_objects(&old_key, &new_key, &[first.clone(), first.clone()]).is_err()
+        );
+        let oversized = vec![first.clone(); MAX_ROTATION_OBJECTS + 1];
+        assert!(reencrypt_sync_objects(&old_key, &new_key, &oversized).is_err());
+
+        let other_vault = encrypt_sync_object_with_nonce(
+            &old_key,
+            "22222222-2222-4222-8222-222222222222",
+            SyncObjectKind::Blob,
+            "blob-other-vault",
+            None,
+            None,
+            b"other vault payload",
+            [0x54; NONCE_BYTES],
+        )
+        .unwrap();
+        assert!(reencrypt_sync_objects(&old_key, &new_key, &[first, other_vault]).is_err());
+        assert!(reencrypt_sync_objects(&old_key, &new_key, &[]).is_err());
+        assert!(reencrypt_sync_objects(&old_key, &old_key, &[second]).is_err());
     }
 }

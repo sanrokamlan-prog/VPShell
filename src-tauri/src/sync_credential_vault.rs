@@ -24,6 +24,8 @@ const MAX_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_PRIVATE_KEY_BYTES: usize = 1024 * 1024;
 const MAX_PLAINTEXT_BYTES: usize = MAX_PRIVATE_KEY_BYTES + 128 * 1024;
 const MAX_ENVELOPE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ROTATION_ITEMS: usize = 10_000;
+const MAX_ROTATION_PLAINTEXT_BYTES: usize = 256 * 1024 * 1024;
 const ALGORITHM: &str = "xchacha20poly1305";
 const KEY_DOMAIN: &str = "credentials";
 const LOCAL_REFERENCE_ATTEMPTS: usize = 8;
@@ -579,13 +581,115 @@ pub(crate) fn reencrypt_credential(
         ));
     }
     let secret = decrypt_credential(policy, registry, device_id, old_credential_key, envelope)?;
-    let mut nonce = [0u8; NONCE_BYTES];
-    getrandom::fill(&mut nonce).map_err(|_| {
+    encrypt_credential_with_identity(policy, new_credential_key, envelope, secret)
+}
+
+pub(crate) fn reencrypt_credentials(
+    policy: &CredentialVaultPolicy,
+    registry: &DeviceRegistry,
+    device_id: &str,
+    old_credential_key: &CredentialVaultKey,
+    new_credential_key: &CredentialVaultKey,
+    envelopes: &[CredentialEnvelope],
+) -> VaultResult<Vec<CredentialEnvelope>> {
+    if old_credential_key.key_material() == new_credential_key.key_material() {
+        return Err(CredentialVaultError::new(
+            CredentialVaultErrorCode::InvalidInput,
+            "新旧凭据 vault 密钥必须不同",
+        ));
+    }
+    if envelopes.is_empty() || envelopes.len() > MAX_ROTATION_ITEMS {
+        return Err(CredentialVaultError::new(
+            CredentialVaultErrorCode::LimitExceeded,
+            "凭据 vault 轮换批次必须为 1 至 10000 项",
+        ));
+    }
+
+    policy.require_access(registry, device_id)?;
+    let mut item_ids = BTreeSet::new();
+    let mut total_plaintext_bytes = 0usize;
+    let mut plaintexts = Vec::with_capacity(envelopes.len());
+    for envelope in envelopes {
+        validate_envelope(envelope)?;
+        if envelope.vault_id != policy.vault_id {
+            return Err(CredentialVaultError::new(
+                CredentialVaultErrorCode::Conflict,
+                "凭据 vault 轮换批次不能跨 vault",
+            ));
+        }
+        if !item_ids.insert(envelope.item_id.as_str()) {
+            return Err(CredentialVaultError::new(
+                CredentialVaultErrorCode::Conflict,
+                "凭据 vault 轮换批次包含重复 item",
+            ));
+        }
+        let secret = decrypt_credential(
+            policy,
+            registry,
+            device_id,
+            old_credential_key,
+            envelope,
+        )?;
+        let kind = secret.kind.clone();
+        let plaintext = encode_credential_rotation_payload(&secret)?;
+        total_plaintext_bytes = checked_rotation_plaintext_total(
+            total_plaintext_bytes,
+            plaintext.len(),
+        )?;
+        plaintexts.push((kind, plaintext));
+    }
+
+    envelopes
+        .iter()
+        .zip(plaintexts)
+        .map(|(envelope, (kind, plaintext))| {
+            encrypt_credential_plaintext_with_identity(
+                policy,
+                new_credential_key,
+                envelope,
+                kind,
+                plaintext,
+            )
+        })
+        .collect()
+}
+
+fn checked_rotation_plaintext_total(current: usize, next: usize) -> VaultResult<usize> {
+    let total = current.checked_add(next).ok_or_else(|| {
         CredentialVaultError::new(
-            CredentialVaultErrorCode::Authentication,
-            "无法生成凭据 vault 轮换 nonce",
+            CredentialVaultErrorCode::LimitExceeded,
+            "凭据 vault 轮换批次总明文长度溢出",
         )
     })?;
+    if total > MAX_ROTATION_PLAINTEXT_BYTES {
+        return Err(CredentialVaultError::new(
+            CredentialVaultErrorCode::LimitExceeded,
+            "凭据 vault 轮换批次总明文超过 256 MiB",
+        ));
+    }
+    Ok(total)
+}
+
+fn encrypt_credential_with_identity(
+    policy: &CredentialVaultPolicy,
+    new_credential_key: &CredentialVaultKey,
+    envelope: &CredentialEnvelope,
+    secret: CredentialSecret,
+) -> VaultResult<CredentialEnvelope> {
+    let kind = secret.kind.clone();
+    let plaintext = encode_credential_rotation_payload(&secret)?;
+    encrypt_credential_plaintext_with_identity(
+        policy,
+        new_credential_key,
+        envelope,
+        kind,
+        plaintext,
+    )
+}
+
+fn encode_credential_rotation_payload(
+    secret: &CredentialSecret,
+) -> VaultResult<Zeroizing<Vec<u8>>> {
     let payload = CredentialPayloadRef {
         format_version: FORMAT_VERSION,
         kind: &secret.kind,
@@ -603,6 +707,23 @@ pub(crate) fn reencrypt_credential(
             "凭据 vault 轮换明文载荷超过 1152 KiB",
         ));
     }
+    Ok(plaintext)
+}
+
+fn encrypt_credential_plaintext_with_identity(
+    policy: &CredentialVaultPolicy,
+    new_credential_key: &CredentialVaultKey,
+    envelope: &CredentialEnvelope,
+    kind: CredentialSecretKind,
+    plaintext: Zeroizing<Vec<u8>>,
+) -> VaultResult<CredentialEnvelope> {
+    let mut nonce = [0u8; NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|_| {
+        CredentialVaultError::new(
+            CredentialVaultErrorCode::Authentication,
+            "无法生成凭据 vault 轮换 nonce",
+        )
+    })?;
     let ciphertext_len = plaintext.len().checked_add(TAG_BYTES).ok_or_else(|| {
         CredentialVaultError::new(
             CredentialVaultErrorCode::LimitExceeded,
@@ -612,10 +733,10 @@ pub(crate) fn reencrypt_credential(
     let aad = envelope_aad(
         &policy.vault_id,
         &envelope.item_id,
-        &secret.kind,
+        &kind,
         ciphertext_len,
     )?;
-    let domain_key = derive_key(new_credential_key, &policy.vault_id, &secret.kind)?;
+    let domain_key = derive_key(new_credential_key, &policy.vault_id, &kind)?;
     let cipher = XChaCha20Poly1305::new(Key::from_slice(domain_key.as_ref()));
     let ciphertext = cipher
         .encrypt(
@@ -635,7 +756,7 @@ pub(crate) fn reencrypt_credential(
         format_version: FORMAT_VERSION,
         vault_id: envelope.vault_id.clone(),
         item_id: envelope.item_id.clone(),
-        kind: secret.kind,
+        kind,
         key_domain: KEY_DOMAIN.to_string(),
         algorithm: ALGORITHM.to_string(),
         nonce: URL_SAFE_NO_PAD.encode(nonce),
@@ -1440,6 +1561,170 @@ mod tests {
         assert!(
             reencrypt_credential(&policy, &registry, DEVICE_A, &old_key, &old_key, &envelope,)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn credential_rotation_batch_is_bounded_ordered_and_all_or_nothing() {
+        assert_eq!(
+            checked_rotation_plaintext_total(MAX_ROTATION_PLAINTEXT_BYTES - 1, 1).unwrap(),
+            MAX_ROTATION_PLAINTEXT_BYTES
+        );
+        assert_eq!(
+            error_code(checked_rotation_plaintext_total(
+                MAX_ROTATION_PLAINTEXT_BYTES,
+                1,
+            )),
+            CredentialVaultErrorCode::LimitExceeded
+        );
+        assert_eq!(
+            error_code(checked_rotation_plaintext_total(usize::MAX, 1)),
+            CredentialVaultErrorCode::LimitExceeded
+        );
+
+        let (registry, policy) = enabled_policy();
+        let old_key = CredentialVaultKey::from_bytes([0x41; 32]);
+        let new_key = CredentialVaultKey::from_bytes([0x42; 32]);
+        let first = encrypt_credential(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &old_key,
+            &CredentialSecret::new(
+                CredentialSecretKind::SshPassword,
+                "first-password".into(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let second = encrypt_credential(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &old_key,
+            &CredentialSecret::new(
+                CredentialSecretKind::AccessToken,
+                "second-token".into(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let rotated = reencrypt_credentials(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &old_key,
+            &new_key,
+            &[first.clone(), second.clone()],
+        )
+        .unwrap();
+        assert_eq!(rotated.len(), 2);
+        assert_eq!(rotated[0].item_id, first.item_id);
+        assert_eq!(rotated[1].item_id, second.item_id);
+        assert_ne!(rotated[0].nonce, first.nonce);
+        assert_ne!(rotated[1].nonce, second.nonce);
+        assert_eq!(
+            decrypt_credential(&policy, &registry, DEVICE_A, &new_key, &rotated[0])
+                .unwrap()
+                .expose_for_test(),
+            "first-password"
+        );
+        assert_eq!(
+            decrypt_credential(&policy, &registry, DEVICE_A, &new_key, &rotated[1])
+                .unwrap()
+                .expose_for_test(),
+            "second-token"
+        );
+        assert!(
+            decrypt_credential(&policy, &registry, DEVICE_A, &old_key, &rotated[0]).is_err()
+        );
+        assert!(
+            decrypt_credential(&policy, &registry, DEVICE_A, &old_key, &rotated[1]).is_err()
+        );
+
+        let wrong_key = CredentialVaultKey::from_bytes([0x43; 32]);
+        let late_wrong_key = encrypt_credential(
+            &policy,
+            &registry,
+            DEVICE_A,
+            &wrong_key,
+            &CredentialSecret::new(
+                CredentialSecretKind::AccessToken,
+                "wrong-key-token".into(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            error_code(reencrypt_credentials(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &old_key,
+                &new_key,
+                &[first.clone(), late_wrong_key],
+            )),
+            CredentialVaultErrorCode::Authentication
+        );
+        assert_eq!(
+            error_code(reencrypt_credentials(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &old_key,
+                &new_key,
+                &[first.clone(), first.clone()],
+            )),
+            CredentialVaultErrorCode::Conflict
+        );
+        let oversized = vec![first.clone(); MAX_ROTATION_ITEMS + 1];
+        assert_eq!(
+            error_code(reencrypt_credentials(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &old_key,
+                &new_key,
+                &oversized,
+            )),
+            CredentialVaultErrorCode::LimitExceeded
+        );
+
+        let mut other_vault = second.clone();
+        other_vault.vault_id = OTHER_VAULT.to_string();
+        assert_eq!(
+            error_code(reencrypt_credentials(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &old_key,
+                &new_key,
+                &[first.clone(), other_vault],
+            )),
+            CredentialVaultErrorCode::Conflict
+        );
+        assert_eq!(
+            error_code(reencrypt_credentials(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &old_key,
+                &new_key,
+                &[],
+            )),
+            CredentialVaultErrorCode::LimitExceeded
+        );
+        assert_eq!(
+            error_code(reencrypt_credentials(
+                &policy,
+                &registry,
+                DEVICE_A,
+                &old_key,
+                &old_key,
+                &[second],
+            )),
+            CredentialVaultErrorCode::InvalidInput
         );
     }
 }

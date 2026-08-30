@@ -133,7 +133,7 @@
 - 远端 registry 夹具还必须覆盖 genesis/连续 successor 签名、前序 hash 篡改、持久水位跨重启、同 revision 分叉、远端删除已见 revision、revision 断层、外层发布者不一致，以及已登记/未知/撤销设备 event 的真实协调器验签。Android 只能观察 revision、本机授权和轮换状态，不能因此开放 Sync capability。
 - 设备管理夹具必须覆盖短时自签请求往返、跨 vault/过期/篡改/非规范编码拒绝、真实远端批准后新设备获得授权、改名、陈旧 revision 冲突、撤销后同步阻止、已登记身份重复申请和本机自撤销拒绝；桌面五个管理命令必须与 Android capability 精确隔离。
 - 加密导出夹具必须覆盖 manifest/对象篡改、截断、重复 key/hash、跨 vault、数量/大小、恰好一个 registry、错误恢复密钥、无覆盖原子写、Unix `0600` 与符号链接拒绝；演练必须认证每个对象并解析 event/registry。当前没有同步 UI、真实多设备签名或 restore-to-journal，不能做产品级恢复声明。
-- 凭据 vault 夹具必须确认默认关闭、revision 冲突、仅活动且已授权设备可访问、最后授权设备保护、撤销不可重新授权和轮换提示；错误 CVK、AAD 身份搬移、类型/大小、未知字段和跨 vault 必须拒绝。
+- 凭据 vault 夹具必须确认默认关闭、revision 冲突、仅活动且已授权设备可访问、最后授权设备保护、撤销不可重新授权和轮换提示；错误 CVK、AAD 身份搬移、类型/大小、未知字段和跨 vault 必须拒绝。有界 VMK/CVK 批量重加密还必须覆盖空批次、10,000 项上限、总明文边界、重复身份、跨 vault、后置错误旧密钥整批失败、输入顺序/身份保留以及新旧密钥解密结果。
 - 对 SSH 密码、私钥口令、OpenSSH 私钥和 access token 逐类往返，扫描 keyslot/信封/object key/稳定错误，确保不含 secret 或本机 credential reference。静态安全测试必须持续禁止该模块新增 Tauri command/event/日志；当前没有 UI 或钥匙串写回，不能用源码测试宣称凭据同步可用。
 - 扩展 provider adapter 夹具必须对 SFTP/S3/Gateway 复用同一不可变测试：首次创建、相同内容幂等、不同内容冲突、提交后回读、分页、非法/重复/越界 list、24 MiB 上限和取消。SFTP 另测 host-key/root/symlink/special，S3 另测 HTTPS/region/bucket/prefix，Gateway 另测六位 TOTP 只在登录消费及底层含秘密错误净化。
 - Linux Actions 已用单一 OpenSSH fixture 覆盖 SFTP 产品路径，用独立重算 SigV4 的自建 HTTPS fixture 覆盖 S3 path-style、ListObjectsV2 continuation、GET、`If-None-Match: *` 条件写、回读和冲突，并用独立 Gateway HTTPS fixture 覆盖 v1 登录、TOTP、bearer session、list/get、条件写、回读和冲突。B8 外部矩阵仍必须补不同 OpenSSH 服务器/权限/host-key 变化、AWS/MinIO/其他 S3-compatible（virtual-hosted/延迟 list/409-412/时钟偏差）及真实自建 Gateway 的断网、超时、限流、重放、撤销、审计、重复请求和篡改测试；当前 trait fake 和单一自建 fixture 都不能替代这些结果。
