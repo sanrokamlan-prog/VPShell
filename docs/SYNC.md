@@ -2,7 +2,7 @@
 
 当前实现补充：`onboardingCompleted`、默认监控采样频率与背景可见度已分别作为第三、第四、第五个固定 setting 实体接入 Rust changefeed、加密 operation、merge 投影和防回声；它们分别只含一个布尔字段、一个 5–300 秒整数和一个 5%–65% 整数。通过秘密扫描的命令、远端路径与具名非敏感参数历史，以及 Rust 证明的已认证连接历史，使用独立 `history` 实体、稳定 UUID 和 tombstone 接入同一链路；含明显秘密、敏感/未知参数的记录、没有真实时间的旧路径和没有认证事实的旧/伪造连接条目保持本机。背景使用独立 `background` 实体和加密分块；PNG 由 Rust 解码并规范化，JPEG/WebP 通过结构、RIFF/chunk 或 JPEG 结束标记校验后保留原始编码；原始 URL、引导内容、运行中监控状态及设备本地数据仍不入同步包。
 
-> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible/Gateway 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、本机 operation Ed25519 签名封套，以及默认关闭的独立凭据 vault。桌面五种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth、S3 SigV4 与 Gateway 登录密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录；Gateway 可选 TOTP 只进入当次登录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。协调器以签名、加密且按 revision 不可变的远端 registry 链作为授权锚，在 schema-v4 journal 持久化已验证水位，并提供桌面受控登记、改名和撤销；凭据 vault 已有 SSH 密码/私钥口令的内部系统钥匙串恢复写回原语，以及独立 `credential-recovery` CVK keyslot 原语，但 provider/outbox、协调器/UI 和 VMK/CVK 轮换流程仍未实现。SFTP/S3/Gateway 没有条件删除能力而保守保留旧密文，真实 Gateway、外部服务器与多设备矩阵也仍需验收。
+> 文档状态：协议设计与分阶段实现。当前未发布工作树已实现独立 Rust 密码学层、Local Folder/WebDAV/SFTP/S3-compatible/Gateway 不可变对象 provider、SQLite operation/outbox/replay 状态机、确定性 merge/冲突中心、Rust 单周期协调器、恢复密钥/设备 registry/加密恢复演练、本机 operation Ed25519 签名封套，以及默认关闭的独立凭据 vault。桌面五种 provider 已接入显式初始化/解锁、手动单周期和解锁期 Rust 自动调度；SFTP 只允许选择 AppStore 中已保存的主机，在认证前同时核对 known_hosts 和精确 SHA256 pin，并从本机系统凭据、私钥或 agent 认证。WebDAV basic-auth、S3 SigV4 与 Gateway 登录密码只保存到系统凭据管理器，显式 PEM CA 由 Rust 限量导入应用私有目录；Gateway 可选 TOTP 只进入当次登录。AppState 主机公开字段、安全自建脚本、五个固定设置实体、PNG/JPEG-WebP 背景及公开命令/路径/非敏感参数/已认证连接历史已接入事务 changefeed、具名加密 operation、outbox 和可重试投影；GC 以加密成员/确认索引和 schema-v3 候选表记录活动设备 frontier，满足 30 天保留后才尝试条件删除。协调器以签名、加密且按 revision 不可变的远端 registry 链作为授权锚，在 schema-v4 journal 持久化已验证水位，并提供桌面受控登记、改名和撤销；业务 VMK 已有完整 provider 快照暂存和 marker-last 密码 keyslot 激活原语，但协调器跟随、防回滚水位、恢复写入与 UI 尚未接线。凭据 vault 已有 SSH 密码/私钥口令的内部系统钥匙串恢复写回原语及独立 `credential-recovery` CVK keyslot，provider/outbox、协调器/UI 和 CVK 轮换仍未实现。SFTP/S3/Gateway 没有条件删除能力而保守保留旧密文，真实 Gateway、外部服务器与多设备矩阵也仍需验收。
 
 ### 当前 v1 密码学边界
 
@@ -152,6 +152,8 @@ vpshell/v1/<vault_id>/
   blobs/<blob_id>/<chunk_index:06>.oblob
   blobs/<blob_id>/manifest.oblob
   checkpoints/<device_id>/<seq>-<object_hash>.ocp
+  rotations/<rotation_id>/<staged_object_or_manifest_or_keyslot>
+  activations/<revision:020>.orac
 ```
 
 - `vault_id` 是随机标识，不来自用户名或 endpoint；
@@ -159,6 +161,7 @@ vpshell/v1/<vault_id>/
 - segment 是一批 operation 的压缩加密载荷；
 - blob 用于背景图片、脚本附件和较大模板，可分块；
 - checkpoint 是可选加速对象，删除它不会丢失 operation 真相；
+- rotation namespace 只保存新 VMK 下的暂存对象、manifest 和新密码 keyslot；只有连续 revision 的 activation commit 才构成逻辑切换点；
 - segment/checkpoint 对象名中的 hash 是密文对象哈希，用于幂等和传输校验；blob 因每次加密使用随机 nonce，不把密文 hash 放入稳定对象名，完整性由认证信封以及 manifest 内逐块/整图明文 hash 共同约束。
 
 远端列表可能重复、乱序或暂时漏项。同步器按 `(device_id, seq)` 校验连续性，不以 provider 返回顺序作为真相。
@@ -204,7 +207,7 @@ K_event / K_blob / K_index / K_checkpoint / K_device_registry
 - secret 类型不可 Debug/Serialize，临时明文缓冲清零；认证信封只含随机 item UUID、类型、nonce 和密文。本机 `credentialRef` 只作为 Rust 内存中的一次性系统钥匙串查找参数，不写入信封、provider object key、错误、日志或事件；
 - 内部系统钥匙串恢复原语先完成策略授权和信封 AEAD 认证，再为 SSH 密码/私钥口令生成新的 `ssh-<UUID>`/`key-<UUID>` 引用；最多尝试八个随机引用、预检不覆盖、写入后回读验证，失败则尽力删除且只返回稳定无敏感值错误。OpenSSH 私钥正文和通用 access token 在没有明确安装/消费目标前拒绝写回；
 - 当前模块不暴露 Tauri command/event；`credential-recovery` keyslot、单对象 CVK 重加密及最多 10,000 项/256 MiB 的两阶段批量原语都只存在于 Rust 内部。批量原语先认证全部旧信封、拒绝重复 item/跨 vault，成功后才生成新 nonce，并不负责枚举 provider、发布新对象、切换 keyslot 或提交回滚水位；设置 UI、provider/outbox、协调器、批量恢复写回和轮换调度仍未接线，因此应用仍不会同步凭据。
-- `sync_rotation::publish_vault_rotation` 是同样的 Rust-only 暂存发布边界：它分页认证同一 vault 的 segments、blobs、registry 和 blob-GC index，先一次性完成批量重加密，再把新对象写入不可覆盖的 `rotations/{rotation_id}/` namespace，最后发布加密 manifest。manifest 尚未激活，不会覆盖现役对象或切换 bootstrap/keyslot；取消、认证失败和发布冲突均不会产生 manifest，孤儿暂存清理与轮换提交留给后续独立项。
+- `sync_rotation::publish_vault_rotation` 是同样的 Rust-only 暂存发布边界：它分页认证同一 vault 的 segments、blobs、registry 和 blob-GC index，先一次性完成批量重加密，再把新对象写入不可覆盖的 `rotations/{rotation_id}/` namespace，最后发布新 VMK 加密 manifest。`activate_vault_rotation` 在任何激活副作用前重验 manifest、全部新密文和未漂移的现役旧快照，随后发布只包裹新 VMK 的随机密码 keyslot，并把由当前 VMK 认证、绑定 revision/前序 activation hash/manifest hash/keyslot hash 的 `activations/<revision>.orac` 放在最后；该单一 marker 是逻辑切换点。读取原语必须用当前 VMK 验证精确 revision 与前序哈希，打开被绑定的 keyslot，再用新 VMK 重验 manifest 和全部目标对象后才返回新密钥。marker 写入失败最多留下不可见的孤儿 keyslot，不会激活轮换；并发写冻结、连续 activation 自动发现、journal 防回滚水位、孤儿清理、recovery keyslot、协调器/UI 仍为后续独立项。
 
 设备撤销无法抹除已经复制到该设备的 VMK/CVK。若被撤销设备可能泄露密钥，必须执行密钥轮换和全量重加密。
 
@@ -408,7 +411,7 @@ Gateway 应提供限流、重放保护、恢复码、设备列表和登录审计
 2. **密码学层**：VMK/keyslot、Argon2id、XChaCha20-Poly1305、恢复密钥、测试向量和密钥清零。
 3. **MVP provider**：桌面 Local Folder 和 HTTPS WebDAV 已接通初始化/解锁、主机公开字段、安全自建脚本、五个固定设置实体、规范化 PNG/结构校验 JPEG-WebP 背景、公开命令/路径/非敏感参数/已认证连接历史的双向事务交接、活动设备确认式 blob 回收、持久冲突解决，以及手动与解锁期自动单周期；WebDAV 密码通过随机引用存入系统凭据管理器，显式 PEM CA 通过独立本机引用交给 Rust TLS 客户端。仍需其他尚未建模设置业务域、真实外部服务器兼容矩阵及断网退避测试。
 4. **合并层**：内部历史并集、字段级 LWW、因果 tombstone、持久冲突中心、分页详情和 Rust-owned 候选解决 operation 已接入协调器事务；仍需多进程/真实设备演练。
-5. **恢复与设备层**：内部可打印恢复密钥、业务 VMK recovery keyslot、独立 CVK recovery keyslot、单调设备撤销、单对象及有界两阶段 VMK/CVK 批量重加密原语、加密导出和离线恢复演练已实现；仍需 provider 全量枚举/发布、keyslot 原子切换、防回滚提交、恢复写入、协调器/UI 与真实多设备演练。
+5. **恢复与设备层**：内部可打印恢复密钥、业务 VMK recovery keyslot、独立 CVK recovery keyslot、单调设备撤销、单对象及有界两阶段 VMK/CVK 批量重加密、provider 全量暂存和 marker-last 密码 keyslot 激活原语、加密导出及离线恢复演练已实现；仍需连续 activation 自动发现、持久防回滚水位、recovery keyslot/恢复写入、并发写冻结、协调器/UI 与真实多设备演练。
 6. **大对象**：PNG 背景的规范化分块、JPEG/WebP 的结构校验分块、限额和安全图片处理已接线；活动设备确认式垃圾回收已接线，仍需自建脚本附件和真实多设备/外部 provider 删除验收。
 7. **Provider 扩展**：SFTP 已接通桌面产品入口、真实 `ssh2` transport、协调器与 Linux OpenSSH fixture；S3-compatible 已接入 SigV4 transport、系统凭据、协调器和独立验签的 HTTPS Actions fixture；Gateway 已接入版本化 HTTPS login/session transport、系统凭据、协调器和独立 HTTPS Actions fixture。真实 AWS/MinIO/其他 S3 实现、真实 Gateway 及故障矩阵仍需外部验收，再评估 rclone 适配。
 8. **凭据 vault**：默认关闭、独立 CVK/keyslot/对象域、`credential-recovery` keyslot、单对象与有界批量 CVK 重加密、逐设备授权及 SSH 密码/私钥口令内部钥匙串恢复原语已完成；仍需 provider/outbox、批量恢复写回、CVK/VMK 轮换发布与提交、恢复演练、协调器/UI 与真实设备验证。
