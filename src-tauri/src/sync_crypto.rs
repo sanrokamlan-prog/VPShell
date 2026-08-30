@@ -935,17 +935,12 @@ pub(crate) fn reencrypt_sync_objects(
         if object.vault_id != vault_id {
             return Err("同步对象轮换批次不能跨 vault".to_string());
         }
-        if !identities.insert((
-            object.object_kind.domain_label(),
-            object.object_id.as_str(),
-        )) {
+        if !identities.insert((object.object_kind.domain_label(), object.object_id.as_str())) {
             return Err("同步对象轮换批次包含重复身份".to_string());
         }
         let plaintext = Zeroizing::new(decrypt_sync_object(old_vault_key, object)?);
-        total_plaintext_bytes = checked_rotation_plaintext_total(
-            total_plaintext_bytes,
-            plaintext.len(),
-        )?;
+        total_plaintext_bytes =
+            checked_rotation_plaintext_total(total_plaintext_bytes, plaintext.len())?;
         plaintexts.push(plaintext);
     }
 

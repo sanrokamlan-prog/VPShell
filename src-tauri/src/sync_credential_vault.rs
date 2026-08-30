@@ -623,19 +623,11 @@ pub(crate) fn reencrypt_credentials(
                 "凭据 vault 轮换批次包含重复 item",
             ));
         }
-        let secret = decrypt_credential(
-            policy,
-            registry,
-            device_id,
-            old_credential_key,
-            envelope,
-        )?;
+        let secret = decrypt_credential(policy, registry, device_id, old_credential_key, envelope)?;
         let kind = secret.kind.clone();
         let plaintext = encode_credential_rotation_payload(&secret)?;
-        total_plaintext_bytes = checked_rotation_plaintext_total(
-            total_plaintext_bytes,
-            plaintext.len(),
-        )?;
+        total_plaintext_bytes =
+            checked_rotation_plaintext_total(total_plaintext_bytes, plaintext.len())?;
         plaintexts.push((kind, plaintext));
     }
 
@@ -730,12 +722,7 @@ fn encrypt_credential_plaintext_with_identity(
             "凭据 vault 轮换载荷长度溢出",
         )
     })?;
-    let aad = envelope_aad(
-        &policy.vault_id,
-        &envelope.item_id,
-        &kind,
-        ciphertext_len,
-    )?;
+    let aad = envelope_aad(&policy.vault_id, &envelope.item_id, &kind, ciphertext_len)?;
     let domain_key = derive_key(new_credential_key, &policy.vault_id, &kind)?;
     let cipher = XChaCha20Poly1305::new(Key::from_slice(domain_key.as_ref()));
     let ciphertext = cipher
@@ -1590,11 +1577,8 @@ mod tests {
             &registry,
             DEVICE_A,
             &old_key,
-            &CredentialSecret::new(
-                CredentialSecretKind::SshPassword,
-                "first-password".into(),
-            )
-            .unwrap(),
+            &CredentialSecret::new(CredentialSecretKind::SshPassword, "first-password".into())
+                .unwrap(),
         )
         .unwrap();
         let second = encrypt_credential(
@@ -1602,11 +1586,8 @@ mod tests {
             &registry,
             DEVICE_A,
             &old_key,
-            &CredentialSecret::new(
-                CredentialSecretKind::AccessToken,
-                "second-token".into(),
-            )
-            .unwrap(),
+            &CredentialSecret::new(CredentialSecretKind::AccessToken, "second-token".into())
+                .unwrap(),
         )
         .unwrap();
 
@@ -1636,12 +1617,8 @@ mod tests {
                 .expose_for_test(),
             "second-token"
         );
-        assert!(
-            decrypt_credential(&policy, &registry, DEVICE_A, &old_key, &rotated[0]).is_err()
-        );
-        assert!(
-            decrypt_credential(&policy, &registry, DEVICE_A, &old_key, &rotated[1]).is_err()
-        );
+        assert!(decrypt_credential(&policy, &registry, DEVICE_A, &old_key, &rotated[0]).is_err());
+        assert!(decrypt_credential(&policy, &registry, DEVICE_A, &old_key, &rotated[1]).is_err());
 
         let wrong_key = CredentialVaultKey::from_bytes([0x43; 32]);
         let late_wrong_key = encrypt_credential(
@@ -1649,11 +1626,8 @@ mod tests {
             &registry,
             DEVICE_A,
             &wrong_key,
-            &CredentialSecret::new(
-                CredentialSecretKind::AccessToken,
-                "wrong-key-token".into(),
-            )
-            .unwrap(),
+            &CredentialSecret::new(CredentialSecretKind::AccessToken, "wrong-key-token".into())
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -1681,12 +1655,7 @@ mod tests {
         let oversized = vec![first.clone(); MAX_ROTATION_ITEMS + 1];
         assert_eq!(
             error_code(reencrypt_credentials(
-                &policy,
-                &registry,
-                DEVICE_A,
-                &old_key,
-                &new_key,
-                &oversized,
+                &policy, &registry, DEVICE_A, &old_key, &new_key, &oversized,
             )),
             CredentialVaultErrorCode::LimitExceeded
         );
