@@ -15,8 +15,8 @@ use zeroize::Zeroizing;
 use crate::{
     sync_blob::object_key_matches_blob_envelope,
     sync_crypto::{
-        EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object,
-        encrypt_sync_object, reencrypt_sync_objects,
+        EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object, encrypt_sync_object,
+        reencrypt_sync_objects,
     },
     sync_provider::{
         ProviderCancellation, ProviderErrorCode, PutObjectOutcome, SyncObjectMetadata,
@@ -99,12 +99,15 @@ pub(crate) fn publish_vault_rotation(
         if item.size == 0 || item.size > MAX_OBJECT_BYTES {
             return Err("同步 provider 轮换对象大小越界".to_string());
         }
-        let encoded = provider.get(&item.key, cancellation).map_err(provider_code)?;
+        let encoded = provider
+            .get(&item.key, cancellation)
+            .map_err(provider_code)?;
         if encoded.len() as u64 != item.size {
             return Err("integrity".to_string());
         }
         validate_object_bytes(&encoded).map_err(|_| "resource-limit".to_string())?;
-        let envelope = EncryptedSyncObject::decode(&encoded).map_err(|_| "integrity".to_string())?;
+        let envelope =
+            EncryptedSyncObject::decode(&encoded).map_err(|_| "integrity".to_string())?;
         validate_source_identity(&item.key, vault_id, &envelope)?;
         let identity = envelope_identity(&envelope);
         if !identities.insert(identity) {
@@ -214,9 +217,7 @@ fn list_all(
         let Some(next) = page.next_cursor else {
             break;
         };
-        if cursor.as_ref().is_some_and(|current| next <= *current)
-            || !seen.contains(&next)
-        {
+        if cursor.as_ref().is_some_and(|current| next <= *current) || !seen.contains(&next) {
             return Err("protocol".to_string());
         }
         cursor = Some(next);
@@ -290,14 +291,18 @@ fn validate_source_identity(
         .map(|device| format!("blob-gc-member-{device}"));
     let valid_ack = relative.split_once('/').and_then(|(device, filename)| {
         let digest = filename.strip_suffix(".ogca")?;
-        if Uuid::parse_str(device).ok().is_none_or(|value| value.to_string() != device)
+        if Uuid::parse_str(device)
+            .ok()
+            .is_none_or(|value| value.to_string() != device)
             || !is_hash(digest)
         {
             return None;
         }
         Some(format!("blob-gc-ack-{device}-{digest}"))
     });
-    let expected_id = valid_member.or(valid_ack).ok_or_else(|| "protocol".to_string())?;
+    let expected_id = valid_member
+        .or(valid_ack)
+        .ok_or_else(|| "protocol".to_string())?;
     if envelope.object_kind() != &SyncObjectKind::Index
         || envelope.object_id() != expected_id
         || envelope.device_id().is_some()
@@ -308,7 +313,9 @@ fn validate_source_identity(
     Ok(())
 }
 
-fn envelope_identity(envelope: &EncryptedSyncObject) -> (String, String, Option<String>, Option<u64>) {
+fn envelope_identity(
+    envelope: &EncryptedSyncObject,
+) -> (String, String, Option<String>, Option<u64>) {
     (
         envelope.vault_id().to_string(),
         format!("{:?}", envelope.object_kind()),
@@ -323,7 +330,10 @@ fn publish_staged(
     encoded: &[u8],
     cancellation: &ProviderCancellation,
 ) -> Result<(), String> {
-    match provider.put(key, encoded, cancellation).map_err(provider_code)? {
+    match provider
+        .put(key, encoded, cancellation)
+        .map_err(provider_code)?
+    {
         PutObjectOutcome::Created | PutObjectOutcome::AlreadyPresent => Ok(()),
     }
 }
@@ -372,7 +382,8 @@ mod tests {
 
     impl TempDir {
         fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("vpshell-rotation-{label}-{}", Uuid::new_v4()));
+            let path =
+                std::env::temp_dir().join(format!("vpshell-rotation-{label}-{}", Uuid::new_v4()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -420,15 +431,24 @@ mod tests {
                 &cancellation,
             )
             .unwrap();
-        let publication = publish_vault_rotation(&provider, &old, &new, VAULT_ID, &cancellation).unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &old, &new, VAULT_ID, &cancellation).unwrap();
         assert_eq!(publication.published_objects, 3);
-        let manifest = provider.get(&publication.manifest_key, &cancellation).unwrap();
+        let manifest = provider
+            .get(&publication.manifest_key, &cancellation)
+            .unwrap();
         let envelope = EncryptedSyncObject::decode(&manifest).unwrap();
         let plaintext = decrypt_sync_object(&new, &envelope).unwrap();
         let decoded: RotationManifest = serde_json::from_slice(&plaintext).unwrap();
         assert_eq!(decoded.source_count, 2);
-        assert_eq!(decoded.objects[0].source_key, format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg"));
-        assert_eq!(decoded.objects[1].source_key, format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/2.oseg"));
+        assert_eq!(
+            decoded.objects[0].source_key,
+            format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg")
+        );
+        assert_eq!(
+            decoded.objects[1].source_key,
+            format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/2.oseg")
+        );
         for object in decoded.objects {
             let rotated = provider.get(&object.target_key, &cancellation).unwrap();
             let rotated = EncryptedSyncObject::decode(&rotated).unwrap();
