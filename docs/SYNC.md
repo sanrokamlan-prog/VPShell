@@ -204,6 +204,7 @@ K_event / K_blob / K_index / K_checkpoint / K_device_registry
 - secret 类型不可 Debug/Serialize，临时明文缓冲清零；认证信封只含随机 item UUID、类型、nonce 和密文。本机 `credentialRef` 只作为 Rust 内存中的一次性系统钥匙串查找参数，不写入信封、provider object key、错误、日志或事件；
 - 内部系统钥匙串恢复原语先完成策略授权和信封 AEAD 认证，再为 SSH 密码/私钥口令生成新的 `ssh-<UUID>`/`key-<UUID>` 引用；最多尝试八个随机引用、预检不覆盖、写入后回读验证，失败则尽力删除且只返回稳定无敏感值错误。OpenSSH 私钥正文和通用 access token 在没有明确安装/消费目标前拒绝写回；
 - 当前模块不暴露 Tauri command/event；`credential-recovery` keyslot、单对象 CVK 重加密及最多 10,000 项/256 MiB 的两阶段批量原语都只存在于 Rust 内部。批量原语先认证全部旧信封、拒绝重复 item/跨 vault，成功后才生成新 nonce，并不负责枚举 provider、发布新对象、切换 keyslot 或提交回滚水位；设置 UI、provider/outbox、协调器、批量恢复写回和轮换调度仍未接线，因此应用仍不会同步凭据。
+- `sync_rotation::publish_vault_rotation` 是同样的 Rust-only 暂存发布边界：它分页认证同一 vault 的 segments、blobs、registry 和 blob-GC index，先一次性完成批量重加密，再把新对象写入不可覆盖的 `rotations/{rotation_id}/` namespace，最后发布加密 manifest。manifest 尚未激活，不会覆盖现役对象或切换 bootstrap/keyslot；取消、认证失败和发布冲突均不会产生 manifest，孤儿暂存清理与轮换提交留给后续独立项。
 
 设备撤销无法抹除已经复制到该设备的 VMK/CVK。若被撤销设备可能泄露密钥，必须执行密钥轮换和全量重加密。
 

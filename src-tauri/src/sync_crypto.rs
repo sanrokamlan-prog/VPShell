@@ -47,6 +47,10 @@ impl VaultKey {
         Ok(Self(bytes))
     }
 
+    pub(crate) fn same_material(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
     #[cfg(test)]
     fn from_bytes(bytes: [u8; KEY_BYTES]) -> Self {
         Self(bytes)

@@ -65,6 +65,7 @@ mod sync_provider_credentials;
 mod sync_provider_ext;
 #[allow(dead_code)] // The coordinator/UI phases consume recovery and encrypted export APIs.
 mod sync_recovery;
+mod sync_rotation;
 mod sync_s3_provider;
 mod sync_scheduler;
 mod sync_sftp_provider;
