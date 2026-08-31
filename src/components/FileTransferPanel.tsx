@@ -226,6 +226,7 @@ interface FileTransferPanelProps {
   connection: SshConnectionSpec;
   connected: boolean;
   androidSessionId?: string;
+  nativeSessionId?: string;
   initialPath: string;
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
@@ -385,6 +386,7 @@ export function FileTransferPanel({
   connection,
   connected,
   androidSessionId,
+  nativeSessionId,
   initialPath,
   externalEditorPath,
   autoUploadEditedFiles,
@@ -449,6 +451,7 @@ export function FileTransferPanel({
     connection.identityFile ?? "",
     connection.identityPassphraseRef ?? "",
     androidSessionId ?? "",
+    nativeSessionId ?? "",
   ].join("\u0000");
 
   const sortedEntries = useMemo(() => [...entries].sort((left, right) => {
@@ -539,10 +542,14 @@ export function FileTransferPanel({
             ownerGroup: null,
           })),
         }))
-        : await invoke<RemoteDirectoryResult>("list_remote_files", {
-          connection: connectionRef.current,
-          path: requestedPath,
-        });
+        : nativeSessionId
+          ? await invoke<RemoteDirectoryResult>("native_list_remote_files", {
+              request: { sessionId: nativeSessionId, path: requestedPath },
+            })
+          : await invoke<RemoteDirectoryResult>("list_remote_files", {
+              connection: connectionRef.current,
+              path: requestedPath,
+            });
       if (generation !== loadGenerationRef.current) return;
       const resolvedPath = result.path.trim() || requestedPath;
       setEntries(result.entries);
@@ -1491,7 +1498,9 @@ export function FileTransferPanel({
         <div>
           <FolderOpen size={16} aria-hidden="true" />
           <strong>SFTP 文件</strong>
-          <span className={`preview-badge ${connected ? "connected" : ""}`}>{connected ? "已连接" : "未连接"}</span>
+          <span className={`preview-badge ${connected ? "connected" : ""}`}>
+            {connected ? (nativeSessionId ? "原生共享" : "已连接") : "未连接"}
+          </span>
         </div>
         <div>
           <button

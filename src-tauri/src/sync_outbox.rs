@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -10,11 +11,21 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    sync_crypto::{EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object},
+    sync_crypto::{
+        EncryptedSyncObject, SyncObjectKind, VaultKey, decrypt_sync_object, encrypt_sync_object,
+    },
+    sync_merge::{
+        EntityKind, LocalEntityMutation, MergeConflictSnapshot, MergeError, MergeErrorCode,
+        MergedEntityProjection, advance_local_hlc, apply_persisted_operation,
+        build_local_conflict_resolution_operation, build_local_entity_operation,
+        load_persisted_state, local_entity_operation_matches,
+    },
+    sync_operation_signature::{DeviceSigningKey, decode_trusted_signed_operation},
     sync_provider::validate_key,
+    sync_recovery::DeviceRegistry,
 };
 
-const JOURNAL_SCHEMA_VERSION: i64 = 1;
+const JOURNAL_SCHEMA_VERSION: i64 = 5;
 const MAX_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PENDING_OBJECTS: i64 = 10_000;
 const MAX_STORED_OBJECTS: i64 = 50_000;
@@ -183,6 +194,74 @@ pub(crate) struct JournalStatus {
     pub(crate) pending_bytes: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MergeJournalStatus {
+    pub(crate) revision: u64,
+    pub(crate) open_conflicts: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConflictJournalSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) total: usize,
+    pub(crate) conflicts: Vec<MergeConflictSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConflictResolutionJournalResult {
+    pub(crate) revision: u64,
+    pub(crate) open_conflicts: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteMergeResult {
+    pub(crate) outcome: RemoteApplyOutcome,
+    pub(crate) revision: u64,
+    pub(crate) open_conflicts: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EntityMergeProjectionSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) entities: Vec<MergedEntityProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BlobGcFrontierSnapshot {
+    pub(crate) local_device_id: String,
+    pub(crate) frontier: BTreeMap<String, u64>,
+    pub(crate) live_blob_ids: Vec<String>,
+    pub(crate) has_pending_objects: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TrustedDeviceRegistrySnapshot {
+    pub(crate) vault_id: String,
+    pub(crate) revision: u64,
+    pub(crate) envelope_hash: String,
+    pub(crate) signed_envelope: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TrustedRotationActivationSnapshot {
+    pub(crate) vault_id: String,
+    pub(crate) revision: u64,
+    pub(crate) activation_hash: String,
+}
+
+fn map_merge_error(error: MergeError) -> JournalError {
+    let code = match error.code {
+        MergeErrorCode::Replay => JournalErrorCode::Replay,
+        MergeErrorCode::LimitExceeded => JournalErrorCode::LimitExceeded,
+        MergeErrorCode::RevisionConflict => JournalErrorCode::Conflict,
+        MergeErrorCode::Storage | MergeErrorCode::CorruptState => JournalErrorCode::Storage,
+        MergeErrorCode::InvalidInput
+        | MergeErrorCode::ConflictMissing
+        | MergeErrorCode::StaleResolution => JournalErrorCode::InvalidInput,
+    };
+    JournalError::new(code, error.message)
+}
+
 fn journal_path(app_data_directory: &Path) -> PathBuf {
     app_data_directory.join("vpshell-sync.sqlite3")
 }
@@ -243,8 +322,9 @@ fn migrate_schema(connection: &mut Connection) -> JournalResult<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法开始同步 journal 迁移"))?;
-    transaction.execute_batch(
-        "CREATE TABLE sync_safety (
+    if version == 0 {
+        transaction.execute_batch(
+            "CREATE TABLE sync_safety (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
             blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)),
             reason TEXT
@@ -305,8 +385,97 @@ fn migrate_schema(connection: &mut Connection) -> JournalResult<()> {
             revision INTEGER NOT NULL CHECK (revision >= 0),
             state_blob BLOB NOT NULL,
             updated_at_ms INTEGER NOT NULL
-        );"
-    ).map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法创建同步 journal schema"))?;
+        );",
+        )
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法创建同步 journal schema"))?;
+    }
+    if version < 2 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_local_identity (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    device_id TEXT NOT NULL UNIQUE,
+                    last_hlc_ms INTEGER NOT NULL CHECK (last_hlc_ms >= 0),
+                    last_hlc_logical INTEGER NOT NULL CHECK (last_hlc_logical BETWEEN 0 AND 65535)
+                );",
+            )
+            .map_err(|_| {
+                JournalError::new(JournalErrorCode::Storage, "无法创建同步本机身份 schema")
+            })?;
+        let identity_exists: Option<i64> = transaction
+            .query_row(
+                "SELECT singleton FROM sync_local_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法检查同步本机身份"))?;
+        if identity_exists.is_none() {
+            transaction
+                .execute(
+                    "INSERT INTO sync_local_identity(
+                        singleton, device_id, last_hlc_ms, last_hlc_logical
+                     ) VALUES (1, ?1, 0, 0)",
+                    params![Uuid::new_v4().to_string()],
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法初始化同步本机身份")
+                })?;
+        }
+    }
+    if version < 3 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_blob_gc_candidates (
+                    vault_id TEXT NOT NULL,
+                    blob_id TEXT NOT NULL,
+                    confirmation_hash TEXT NOT NULL,
+                    first_confirmed_at_ms INTEGER NOT NULL CHECK (first_confirmed_at_ms >= 0),
+                    PRIMARY KEY(vault_id, blob_id)
+                );",
+            )
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::Storage,
+                    "无法创建同步 blob GC 候选 schema",
+                )
+            })?;
+    }
+    if version < 4 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_device_registry_trust (
+                    vault_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    envelope_hash TEXT NOT NULL,
+                    signed_envelope BLOB NOT NULL,
+                    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+                );",
+            )
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::Storage,
+                    "无法创建设备 registry 信任水位 schema",
+                )
+            })?;
+    }
+    if version < 5 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_rotation_activation_trust (
+                    vault_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    activation_hash TEXT NOT NULL,
+                    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+                );",
+            )
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::Storage,
+                    "无法创建轮换 activation 信任水位 schema",
+                )
+            })?;
+    }
     transaction
         .pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)
         .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入同步 journal schema"))?;
@@ -423,6 +592,13 @@ fn object_hash(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+fn is_lowercase_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_now(now_ms: i64) -> JournalResult<()> {
@@ -587,7 +763,401 @@ fn retry_delay_ms(attempt: u32) -> i64 {
         .min(MAX_RETRY_MS)
 }
 
+fn enqueue_local_in_transaction<F>(
+    transaction: &Transaction<'_>,
+    object_key: &str,
+    encrypted_object: &[u8],
+    object: &EncryptedSyncObject,
+    hash: &str,
+    now_ms: i64,
+    apply_business_change: F,
+) -> JournalResult<EnqueueOutcome>
+where
+    F: FnOnce(&Transaction<'_>) -> JournalResult<()>,
+{
+    ensure_unblocked(transaction)?;
+    let existing: Option<String> = transaction
+        .query_row(
+            "SELECT object_hash FROM sync_operations WHERE object_key = ?1",
+            params![object_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法检查同步 operation"))?;
+    if let Some(existing) = existing {
+        if existing == hash {
+            return Ok(EnqueueOutcome::AlreadyQueued);
+        }
+        return Err(JournalError::new(
+            JournalErrorCode::Conflict,
+            "同名同步 operation 的密文哈希不同",
+        ));
+    }
+    let relocated: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT object_key, object_hash FROM sync_operations
+             WHERE object_hash = ?1
+                OR (vault_id = ?2 AND object_kind = ?3 AND object_id = ?4)
+             LIMIT 1",
+            params![
+                hash,
+                object.vault_id(),
+                object_kind_label(object.object_kind()),
+                object.object_id(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法核对同步 operation 身份"))?;
+    if relocated.is_some() {
+        return Err(JournalError::new(
+            JournalErrorCode::Conflict,
+            "同步 operation 的密文或对象身份已由其他 key 使用",
+        ));
+    }
+    ensure_capacity(transaction, encrypted_object.len())?;
+    let sequence =
+        verify_next_sequence(transaction, "local", object.device_id(), object.sequence())?;
+    apply_business_change(transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO sync_operations(
+                object_key, object_hash, vault_id, object_kind, object_id, device_id, sequence,
+                encrypted_object, origin, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'local', ?9)",
+            params![
+                object_key,
+                hash,
+                object.vault_id(),
+                object_kind_label(object.object_kind()),
+                object.object_id(),
+                object.device_id(),
+                sequence,
+                encrypted_object,
+                now_ms,
+            ],
+        )
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入本地同步 operation"))?;
+    transaction
+        .execute(
+            "INSERT INTO sync_outbox(
+                object_key, state, attempt_count, next_attempt_ms, lease_id,
+                lease_expires_ms, last_error_code, published_at_ms, updated_at_ms
+             ) VALUES (?1, 'pending', 0, ?2, NULL, NULL, NULL, NULL, ?2)",
+            params![object_key, now_ms],
+        )
+        .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入同步 outbox"))?;
+    update_head(transaction, "local", object, hash, sequence)?;
+    Ok(EnqueueOutcome::Queued)
+}
+
 impl SyncJournal {
+    pub(crate) fn local_device_id(&self) -> JournalResult<String> {
+        self.transaction(|transaction| {
+            transaction
+                .query_row(
+                    "SELECT device_id FROM sync_local_identity WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份"))
+        })
+    }
+
+    pub(crate) fn trusted_device_registry(
+        &self,
+        vault_id: &str,
+    ) -> JournalResult<Option<TrustedDeviceRegistrySnapshot>> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "vault ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            transaction
+                .query_row(
+                    "SELECT revision, envelope_hash, signed_envelope
+                     FROM sync_device_registry_trust WHERE vault_id = ?1",
+                    params![vault_id],
+                    |row| {
+                        let revision: i64 = row.get(0)?;
+                        Ok((
+                            revision,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取设备 registry 信任水位")
+                })?
+                .map(|(revision, envelope_hash, signed_envelope)| {
+                    let revision = u64::try_from(revision).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Storage,
+                            "设备 registry revision 已损坏",
+                        )
+                    })?;
+                    if revision == 0
+                        || !is_lowercase_hash(&envelope_hash)
+                        || signed_envelope.is_empty()
+                        || signed_envelope.len() > 96 * 1024
+                    {
+                        return Err(JournalError::new(
+                            JournalErrorCode::Storage,
+                            "设备 registry 信任水位已损坏",
+                        ));
+                    }
+                    Ok(TrustedDeviceRegistrySnapshot {
+                        vault_id: vault_id.clone(),
+                        revision,
+                        envelope_hash,
+                        signed_envelope,
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    pub(crate) fn advance_trusted_device_registry(
+        &self,
+        vault_id: &str,
+        expected: Option<(u64, &str)>,
+        revision: u64,
+        envelope_hash: &str,
+        signed_envelope: &[u8],
+        now_ms: i64,
+    ) -> JournalResult<TrustedDeviceRegistrySnapshot> {
+        validate_now(now_ms)?;
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "vault ID 无效"))?
+            .to_string();
+        if revision == 0
+            || revision > i64::MAX as u64
+            || !is_lowercase_hash(envelope_hash)
+            || signed_envelope.is_empty()
+            || signed_envelope.len() > 96 * 1024
+            || expected.is_some_and(|(expected_revision, expected_hash)| {
+                expected_revision == 0 || !is_lowercase_hash(expected_hash)
+            })
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "设备 registry 信任水位输入无效",
+            ));
+        }
+        self.transaction(|transaction| {
+            let current: Option<(i64, String, Vec<u8>)> = transaction
+                .query_row(
+                    "SELECT revision, envelope_hash, signed_envelope
+                     FROM sync_device_registry_trust WHERE vault_id = ?1",
+                    params![vault_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法核对设备 registry 信任水位")
+                })?;
+            match (current.as_ref(), expected) {
+                (None, None) if revision == 1 => {}
+                (Some((current_revision, current_hash, current_envelope)), _)
+                    if *current_revision == revision as i64
+                        && current_hash == envelope_hash
+                        && current_envelope == signed_envelope =>
+                {
+                    return Ok(TrustedDeviceRegistrySnapshot {
+                        vault_id: vault_id.clone(),
+                        revision,
+                        envelope_hash: envelope_hash.to_string(),
+                        signed_envelope: signed_envelope.to_vec(),
+                    });
+                }
+                (
+                    Some((current_revision, current_hash, _)),
+                    Some((expected_revision, expected_hash)),
+                ) if *current_revision == expected_revision as i64
+                    && current_hash == expected_hash
+                    && revision == expected_revision.saturating_add(1) => {}
+                (Some((current_revision, _, _)), _) if *current_revision >= revision as i64 => {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Replay,
+                        "设备 registry revision 回退或同 revision 分叉",
+                    ));
+                }
+                _ => {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Conflict,
+                        "设备 registry 信任水位发生并发冲突",
+                    ));
+                }
+            }
+            transaction
+                .execute(
+                    "INSERT INTO sync_device_registry_trust(
+                        vault_id, revision, envelope_hash, signed_envelope, updated_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(vault_id) DO UPDATE SET
+                        revision = excluded.revision,
+                        envelope_hash = excluded.envelope_hash,
+                        signed_envelope = excluded.signed_envelope,
+                        updated_at_ms = excluded.updated_at_ms",
+                    params![
+                        vault_id,
+                        revision as i64,
+                        envelope_hash,
+                        signed_envelope,
+                        now_ms
+                    ],
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法保存设备 registry 信任水位")
+                })?;
+            Ok(TrustedDeviceRegistrySnapshot {
+                vault_id,
+                revision,
+                envelope_hash: envelope_hash.to_string(),
+                signed_envelope: signed_envelope.to_vec(),
+            })
+        })
+    }
+
+    pub(crate) fn trusted_rotation_activation(
+        &self,
+        vault_id: &str,
+    ) -> JournalResult<Option<TrustedRotationActivationSnapshot>> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "vault ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            transaction
+                .query_row(
+                    "SELECT revision, activation_hash
+                     FROM sync_rotation_activation_trust WHERE vault_id = ?1",
+                    params![vault_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法读取轮换 activation 信任水位",
+                    )
+                })?
+                .map(|(revision, activation_hash)| {
+                    let revision = u64::try_from(revision).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Storage,
+                            "轮换 activation revision 已损坏",
+                        )
+                    })?;
+                    if revision == 0 || !is_lowercase_hash(&activation_hash) {
+                        return Err(JournalError::new(
+                            JournalErrorCode::Storage,
+                            "轮换 activation 信任水位已损坏",
+                        ));
+                    }
+                    Ok(TrustedRotationActivationSnapshot {
+                        vault_id: vault_id.clone(),
+                        revision,
+                        activation_hash,
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    pub(crate) fn advance_trusted_rotation_activation(
+        &self,
+        vault_id: &str,
+        expected: Option<(u64, &str)>,
+        revision: u64,
+        activation_hash: &str,
+        now_ms: i64,
+    ) -> JournalResult<TrustedRotationActivationSnapshot> {
+        validate_now(now_ms)?;
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "vault ID 无效"))?
+            .to_string();
+        if revision == 0
+            || revision > i64::MAX as u64
+            || !is_lowercase_hash(activation_hash)
+            || expected.is_some_and(|(expected_revision, expected_hash)| {
+                expected_revision == 0 || !is_lowercase_hash(expected_hash)
+            })
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "轮换 activation 信任水位输入无效",
+            ));
+        }
+        self.transaction(|transaction| {
+            let current: Option<(i64, String)> = transaction
+                .query_row(
+                    "SELECT revision, activation_hash
+                     FROM sync_rotation_activation_trust WHERE vault_id = ?1",
+                    params![vault_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法核对轮换 activation 信任水位",
+                    )
+                })?;
+            match (current.as_ref(), expected) {
+                (None, None) if revision == 1 => {}
+                (Some((current_revision, current_hash)), _)
+                    if *current_revision == revision as i64 && current_hash == activation_hash =>
+                {
+                    return Ok(TrustedRotationActivationSnapshot {
+                        vault_id: vault_id.clone(),
+                        revision,
+                        activation_hash: activation_hash.to_string(),
+                    });
+                }
+                (Some((current_revision, current_hash)), Some((expected_revision, expected_hash)))
+                    if *current_revision == expected_revision as i64
+                        && current_hash == expected_hash
+                        && revision == expected_revision.saturating_add(1) =>
+                {}
+                (Some((current_revision, _)), _) if *current_revision >= revision as i64 => {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Replay,
+                        "轮换 activation revision 回退或同 revision 分叉",
+                    ));
+                }
+                _ => {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Conflict,
+                        "轮换 activation 信任水位发生并发冲突",
+                    ));
+                }
+            }
+            transaction
+                .execute(
+                    "INSERT INTO sync_rotation_activation_trust(
+                        vault_id, revision, activation_hash, updated_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(vault_id) DO UPDATE SET
+                        revision = excluded.revision,
+                        activation_hash = excluded.activation_hash,
+                        updated_at_ms = excluded.updated_at_ms",
+                    params![vault_id, revision as i64, activation_hash, now_ms],
+                )
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法保存轮换 activation 信任水位",
+                    )
+                })?;
+            Ok(TrustedRotationActivationSnapshot {
+                vault_id,
+                revision,
+                activation_hash: activation_hash.to_string(),
+            })
+        })
+    }
+
     pub(crate) fn open(app_data_directory: PathBuf) -> JournalResult<Self> {
         fs::create_dir_all(&app_data_directory).map_err(|_| {
             JournalError::new(JournalErrorCode::Storage, "无法创建同步 journal 目录")
@@ -654,6 +1224,241 @@ impl SyncJournal {
         })
     }
 
+    pub(crate) fn merge_status(&self) -> JournalResult<MergeJournalStatus> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            Ok(MergeJournalStatus {
+                revision,
+                open_conflicts: state.open_conflicts().len(),
+            })
+        })
+    }
+
+    pub(crate) fn conflict_snapshot(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> JournalResult<ConflictJournalSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let (total, conflicts) = state
+                .conflict_snapshot(offset, limit)
+                .map_err(map_merge_error)?;
+            Ok(ConflictJournalSnapshot {
+                revision,
+                total,
+                conflicts,
+            })
+        })
+    }
+
+    pub(crate) fn host_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let entities = state.host_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
+    pub(crate) fn script_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let entities = state.script_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
+    pub(crate) fn setting_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let entities = state.setting_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
+    pub(crate) fn background_merge_projection(
+        &self,
+    ) -> JournalResult<EntityMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let entities = state.background_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
+    pub(crate) fn blob_gc_frontier(&self, vault_id: &str) -> JournalResult<BlobGcFrontierSnapshot> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            let local_device_id: String = transaction
+                .query_row(
+                    "SELECT device_id FROM sync_local_identity WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份")
+                })?;
+            let mut frontier = BTreeMap::new();
+            let mut statement = transaction
+                .prepare(
+                    "SELECT device_id, highest_sequence FROM sync_heads
+                     WHERE direction = 'remote' ORDER BY device_id",
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取远端同步水位")
+                })?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法列举远端同步水位")
+                })?;
+            for row in rows {
+                let (device_id, sequence) = row.map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "远端同步水位损坏")
+                })?;
+                let sequence = u64::try_from(sequence).map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "远端同步水位越界")
+                })?;
+                frontier.insert(device_id, sequence);
+            }
+            let published_local: Option<i64> = transaction
+                .query_row(
+                    "SELECT MAX(o.sequence)
+                     FROM sync_operations o JOIN sync_outbox q USING(object_key)
+                     WHERE o.vault_id = ?1 AND o.device_id = ?2
+                       AND o.object_kind = 'event' AND q.state = 'published'",
+                    params![vault_id, local_device_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取本机已发布水位")
+                })?;
+            frontier.insert(
+                local_device_id.clone(),
+                published_local
+                    .and_then(|value| u64::try_from(value).ok())
+                    .unwrap_or(0),
+            );
+            let pending: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_outbox q
+                     JOIN sync_operations o USING(object_key)
+                     WHERE o.vault_id = ?1 AND q.state != 'published'",
+                    params![vault_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取 vault 待发布对象")
+                })?;
+            let (_, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let live_blob_ids = state
+                .background_blob_references()
+                .map_err(map_merge_error)?;
+            Ok(BlobGcFrontierSnapshot {
+                local_device_id,
+                frontier,
+                live_blob_ids,
+                has_pending_objects: pending > 0,
+            })
+        })
+    }
+
+    pub(crate) fn observe_blob_gc_candidate(
+        &self,
+        vault_id: &str,
+        blob_id: &str,
+        confirmation_hash: &str,
+        now_ms: i64,
+        retention_ms: i64,
+    ) -> JournalResult<bool> {
+        validate_now(now_ms)?;
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        if !is_lowercase_hash(blob_id) || !is_lowercase_hash(confirmation_hash) || retention_ms <= 0
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步 blob GC 候选字段无效",
+            ));
+        }
+        self.transaction(|transaction| {
+            let existing: Option<(String, i64)> = transaction
+                .query_row(
+                    "SELECT confirmation_hash, first_confirmed_at_ms
+                     FROM sync_blob_gc_candidates WHERE vault_id = ?1 AND blob_id = ?2",
+                    params![vault_id, blob_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步 blob GC 候选")
+                })?;
+            let first_confirmed_at_ms = match existing {
+                Some((stored_hash, first)) if stored_hash == confirmation_hash => first,
+                _ => {
+                    transaction
+                        .execute(
+                            "INSERT INTO sync_blob_gc_candidates(
+                                vault_id, blob_id, confirmation_hash, first_confirmed_at_ms
+                             ) VALUES (?1, ?2, ?3, ?4)
+                             ON CONFLICT(vault_id, blob_id) DO UPDATE SET
+                                confirmation_hash = excluded.confirmation_hash,
+                                first_confirmed_at_ms = excluded.first_confirmed_at_ms",
+                            params![vault_id, blob_id, confirmation_hash, now_ms],
+                        )
+                        .map_err(|_| {
+                            JournalError::new(
+                                JournalErrorCode::Storage,
+                                "无法记录同步 blob GC 候选",
+                            )
+                        })?;
+                    now_ms
+                }
+            };
+            Ok(now_ms.saturating_sub(first_confirmed_at_ms) >= retention_ms)
+        })
+    }
+
+    pub(crate) fn reset_blob_gc_candidate(
+        &self,
+        vault_id: &str,
+        blob_id: &str,
+    ) -> JournalResult<()> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        if !is_lowercase_hash(blob_id) {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步 blob ID 无效",
+            ));
+        }
+        self.transaction(|transaction| {
+            transaction
+                .execute(
+                    "DELETE FROM sync_blob_gc_candidates WHERE vault_id = ?1 AND blob_id = ?2",
+                    params![vault_id, blob_id],
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法清理同步 blob GC 候选")
+                })?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn history_merge_projection(&self) -> JournalResult<EntityMergeProjectionSnapshot> {
+        self.transaction(|transaction| {
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            let entities = state.history_entity_projection().map_err(map_merge_error)?;
+            Ok(EntityMergeProjectionSnapshot { revision, entities })
+        })
+    }
+
     pub(crate) fn acknowledge_reconciliation(&self) -> JournalResult<()> {
         self.transaction(|transaction| {
             transaction
@@ -689,90 +1494,442 @@ impl SyncJournal {
         let object = validate_envelope(encrypted_object)?;
         let hash = object_hash(encrypted_object);
         self.transaction(|transaction| {
+            enqueue_local_in_transaction(
+                transaction,
+                object_key,
+                encrypted_object,
+                &object,
+                &hash,
+                now_ms,
+                apply_business_change,
+            )
+        })
+    }
+
+    pub(crate) fn enqueue_local_blob(
+        &self,
+        vault_key: &VaultKey,
+        object_key: &str,
+        encrypted_object: &[u8],
+        now_ms: i64,
+    ) -> JournalResult<EnqueueOutcome> {
+        validate_now(now_ms)?;
+        validate_key(object_key).map_err(|_| {
+            JournalError::new(JournalErrorCode::InvalidInput, "同步 blob object key 无效")
+        })?;
+        let object = validate_envelope(encrypted_object)?;
+        if object.object_kind() != &SyncObjectKind::Blob
+            || object.device_id().is_some()
+            || object.sequence().is_some()
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步 blob 信封身份无效",
+            ));
+        }
+        let plaintext = decrypt_sync_object(vault_key, &object).map_err(|_| {
+            JournalError::new(JournalErrorCode::Authentication, "同步 blob 无法认证")
+        })?;
+        let hash = object_hash(encrypted_object);
+        self.transaction(|transaction| {
             ensure_unblocked(transaction)?;
-            let existing: Option<String> = transaction
+            let existing: Option<(String, String, Vec<u8>)> = transaction
                 .query_row(
-                    "SELECT object_hash FROM sync_operations WHERE object_key = ?1",
-                    params![object_key],
-                    |row| row.get(0),
+                    "SELECT object_key, origin, encrypted_object FROM sync_operations
+                     WHERE vault_id = ?1 AND object_kind = 'blob' AND object_id = ?2",
+                    params![object.vault_id(), object.object_id()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(|_| {
-                    JournalError::new(JournalErrorCode::Storage, "无法检查同步 operation")
+                    JournalError::new(JournalErrorCode::Storage, "无法检查同步 blob operation")
                 })?;
-            if let Some(existing) = existing {
-                if existing == hash {
+            if let Some((existing_key, origin, existing_encrypted)) = existing {
+                if existing_key != object_key || origin != "local" {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Conflict,
+                        "同步 blob 身份已由其他对象占用",
+                    ));
+                }
+                let existing_object = validate_envelope(&existing_encrypted)?;
+                let existing_plaintext =
+                    decrypt_sync_object(vault_key, &existing_object).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Authentication,
+                            "现有同步 blob 无法认证",
+                        )
+                    })?;
+                if existing_plaintext == plaintext {
                     return Ok(EnqueueOutcome::AlreadyQueued);
                 }
                 return Err(JournalError::new(
                     JournalErrorCode::Conflict,
-                    "同名同步 operation 的密文哈希不同",
+                    "同一同步 blob 身份的认证内容不同",
                 ));
             }
-            let relocated: Option<(String, String)> = transaction
+            enqueue_local_in_transaction(
+                transaction,
+                object_key,
+                encrypted_object,
+                &object,
+                &hash,
+                now_ms,
+                |_| Ok(()),
+            )
+        })
+    }
+
+    pub(crate) fn enqueue_local_entity_change(
+        &self,
+        vault_key: &VaultKey,
+        vault_id: &str,
+        operation_id: &str,
+        entity_kind: EntityKind,
+        entity_id: &str,
+        mutation: LocalEntityMutation,
+        now_ms: i64,
+    ) -> JournalResult<EnqueueOutcome> {
+        validate_now(now_ms)?;
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        let operation_id = Uuid::parse_str(operation_id)
+            .map_err(|_| {
+                JournalError::new(JournalErrorCode::InvalidInput, "同步 operation ID 无效")
+            })?
+            .to_string();
+        let entity_id = Uuid::parse_str(entity_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 entity ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            ensure_unblocked(transaction)?;
+            let existing: Option<(String, Vec<u8>)> = transaction
                 .query_row(
-                    "SELECT object_key, object_hash FROM sync_operations
-                     WHERE object_hash = ?1
-                        OR (vault_id = ?2 AND object_kind = ?3 AND object_id = ?4)
-                     LIMIT 1",
-                    params![
-                        hash,
-                        object.vault_id(),
-                        object_kind_label(object.object_kind()),
-                        object.object_id(),
-                    ],
+                    "SELECT origin, encrypted_object FROM sync_operations
+                     WHERE vault_id = ?1 AND object_kind = 'event' AND object_id = ?2",
+                    params![vault_id, operation_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(|_| {
-                    JournalError::new(JournalErrorCode::Storage, "无法核对同步 operation 身份")
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法检查 AppState 同步 operation",
+                    )
                 })?;
-            if relocated.is_some() {
+            if let Some((origin, encrypted)) = existing {
+                if origin == "local" {
+                    let envelope = validate_envelope(&encrypted)?;
+                    if envelope.vault_id() != vault_id.as_str()
+                        || envelope.object_kind() != &SyncObjectKind::Event
+                        || envelope.object_id() != operation_id.as_str()
+                    {
+                        return Err(JournalError::new(
+                            JournalErrorCode::Storage,
+                            "现有 AppState operation 身份损坏",
+                        ));
+                    }
+                    let plaintext = decrypt_sync_object(vault_key, &envelope).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Authentication,
+                            "现有 AppState operation 无法认证",
+                        )
+                    })?;
+                    if local_entity_operation_matches(
+                        &plaintext,
+                        &operation_id,
+                        &entity_kind,
+                        &entity_id,
+                        &mutation,
+                    ) {
+                        return Ok(EnqueueOutcome::AlreadyQueued);
+                    }
+                    return Err(JournalError::new(
+                        JournalErrorCode::Conflict,
+                        "现有 AppState operation 与 changefeed 内容不同",
+                    ));
+                }
                 return Err(JournalError::new(
                     JournalErrorCode::Conflict,
-                    "同步 operation 的密文或对象身份已由其他 key 使用",
+                    "AppState operation ID 已由远端对象占用",
                 ));
             }
-            ensure_capacity(transaction, encrypted_object.len())?;
-            let sequence =
-                verify_next_sequence(transaction, "local", object.device_id(), object.sequence())?;
-            apply_business_change(transaction)?;
-            transaction
-                .execute(
-                    "INSERT INTO sync_operations(
-                    object_key, object_hash, vault_id, object_kind, object_id, device_id, sequence,
-                    encrypted_object, origin, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'local', ?9)",
-                    params![
-                        object_key,
-                        hash,
-                        object.vault_id(),
-                        object_kind_label(object.object_kind()),
-                        object.object_id(),
-                        object.device_id(),
-                        sequence,
-                        encrypted_object,
-                        now_ms,
-                    ],
+            let (device_id, last_hlc_ms, last_hlc_logical): (String, i64, i64) = transaction
+                .query_row(
+                    "SELECT device_id, last_hlc_ms, last_hlc_logical
+                     FROM sync_local_identity WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(|_| {
-                    JournalError::new(JournalErrorCode::Storage, "无法写入本地同步 operation")
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份")
                 })?;
-            transaction
-                .execute(
-                    "INSERT INTO sync_outbox(
-                    object_key, state, attempt_count, next_attempt_ms, lease_id,
-                    lease_expires_ms, last_error_code, published_at_ms, updated_at_ms
-                 ) VALUES (?1, 'pending', 0, ?2, NULL, NULL, NULL, NULL, ?2)",
-                    params![object_key, now_ms],
+            let highest: Option<i64> = transaction
+                .query_row(
+                    "SELECT highest_sequence FROM sync_heads
+                     WHERE direction = 'local' AND device_id = ?1",
+                    params![device_id],
+                    |row| row.get(0),
                 )
-                .map_err(|_| JournalError::new(JournalErrorCode::Storage, "无法写入同步 outbox"))?;
-            update_head(transaction, "local", &object, &hash, sequence)?;
-            Ok(EnqueueOutcome::Queued)
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取本机同步序号")
+                })?;
+            let sequence = highest
+                .unwrap_or(0)
+                .checked_add(1)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| {
+                    JournalError::new(JournalErrorCode::LimitExceeded, "本机同步序号已耗尽")
+                })?;
+            let (physical_ms, logical) = if now_ms > last_hlc_ms {
+                (now_ms, 0_u16)
+            } else if last_hlc_logical < u16::MAX as i64 {
+                (last_hlc_ms, (last_hlc_logical as u16).saturating_add(1))
+            } else {
+                (
+                    last_hlc_ms.checked_add(1).ok_or_else(|| {
+                        JournalError::new(JournalErrorCode::LimitExceeded, "本机同步 HLC 已耗尽")
+                    })?,
+                    0_u16,
+                )
+            };
+            let (merge_revision, state) =
+                load_persisted_state(transaction).map_err(map_merge_error)?;
+            let (physical_ms, logical) =
+                advance_local_hlc(&state, physical_ms, logical).map_err(map_merge_error)?;
+            let operation = build_local_entity_operation(
+                &state,
+                &operation_id,
+                &device_id,
+                sequence,
+                physical_ms,
+                logical,
+                entity_kind,
+                &entity_id,
+                mutation,
+            )
+            .map_err(map_merge_error)?;
+            let signer = DeviceSigningKey::load_or_create(&device_id)
+                .map_err(|message| JournalError::new(JournalErrorCode::Authentication, message))?;
+            let encoded_operation = signer
+                .sign(&operation)
+                .and_then(|signed| signed.encode())
+                .map_err(|message| JournalError::new(JournalErrorCode::Authentication, message))?;
+            let encrypted_object = encrypt_sync_object(
+                vault_key,
+                &vault_id,
+                SyncObjectKind::Event,
+                &operation_id,
+                Some(&device_id),
+                Some(sequence),
+                &encoded_operation,
+            )
+            .and_then(|object| object.encode())
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::InvalidInput,
+                    "无法加密 AppState 同步 operation",
+                )
+            })?;
+            let object = validate_envelope(&encrypted_object)?;
+            let hash = object_hash(&encrypted_object);
+            let object_key = format!("vpshell/v1/{vault_id}/segments/{device_id}/{sequence}.oseg");
+            enqueue_local_in_transaction(
+                transaction,
+                &object_key,
+                &encrypted_object,
+                &object,
+                &hash,
+                now_ms,
+                |transaction| {
+                    apply_persisted_operation(
+                        transaction,
+                        &encoded_operation,
+                        merge_revision,
+                        now_ms,
+                    )
+                    .map_err(map_merge_error)?;
+                    transaction
+                        .execute(
+                            "UPDATE sync_local_identity
+                             SET last_hlc_ms = ?1, last_hlc_logical = ?2
+                             WHERE singleton = 1 AND device_id = ?3",
+                            params![physical_ms, i64::from(logical), device_id],
+                        )
+                        .map_err(|_| {
+                            JournalError::new(JournalErrorCode::Storage, "无法推进本机同步 HLC")
+                        })?;
+                    Ok(())
+                },
+            )
+        })
+    }
+
+    pub(crate) fn enqueue_local_conflict_resolution(
+        &self,
+        vault_key: &VaultKey,
+        vault_id: &str,
+        expected_revision: u64,
+        conflict_id: &str,
+        alternative_index: u8,
+        now_ms: i64,
+    ) -> JournalResult<ConflictResolutionJournalResult> {
+        validate_now(now_ms)?;
+        if alternative_index > 1 {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "同步冲突候选索引无效",
+            ));
+        }
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            ensure_unblocked(transaction)?;
+            let (merge_revision, state) =
+                load_persisted_state(transaction).map_err(map_merge_error)?;
+            if merge_revision != expected_revision {
+                return Err(JournalError::new(
+                    JournalErrorCode::Conflict,
+                    "同步冲突快照 revision 已变化",
+                ));
+            }
+            let (device_id, last_hlc_ms, last_hlc_logical): (String, i64, i64) = transaction
+                .query_row(
+                    "SELECT device_id, last_hlc_ms, last_hlc_logical
+                     FROM sync_local_identity WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取同步本机身份")
+                })?;
+            let highest: Option<i64> = transaction
+                .query_row(
+                    "SELECT highest_sequence FROM sync_heads
+                     WHERE direction = 'local' AND device_id = ?1",
+                    params![device_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(JournalErrorCode::Storage, "无法读取本机同步序号")
+                })?;
+            let sequence = highest
+                .unwrap_or(0)
+                .checked_add(1)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| {
+                    JournalError::new(JournalErrorCode::LimitExceeded, "本机同步序号已耗尽")
+                })?;
+            let (physical_ms, logical) = if now_ms > last_hlc_ms {
+                (now_ms, 0_u16)
+            } else if last_hlc_logical < u16::MAX as i64 {
+                (last_hlc_ms, (last_hlc_logical as u16).saturating_add(1))
+            } else {
+                (
+                    last_hlc_ms.checked_add(1).ok_or_else(|| {
+                        JournalError::new(JournalErrorCode::LimitExceeded, "本机同步 HLC 已耗尽")
+                    })?,
+                    0_u16,
+                )
+            };
+            let (physical_ms, logical) =
+                advance_local_hlc(&state, physical_ms, logical).map_err(map_merge_error)?;
+            let operation_id = Uuid::new_v4().to_string();
+            let operation = build_local_conflict_resolution_operation(
+                &state,
+                &operation_id,
+                &device_id,
+                sequence,
+                physical_ms,
+                logical,
+                conflict_id,
+                alternative_index,
+            )
+            .map_err(map_merge_error)?;
+            let signer = DeviceSigningKey::load_or_create(&device_id)
+                .map_err(|message| JournalError::new(JournalErrorCode::Authentication, message))?;
+            let encoded_operation = signer
+                .sign(&operation)
+                .and_then(|signed| signed.encode())
+                .map_err(|message| JournalError::new(JournalErrorCode::Authentication, message))?;
+            let encrypted_object = encrypt_sync_object(
+                vault_key,
+                &vault_id,
+                SyncObjectKind::Event,
+                &operation_id,
+                Some(&device_id),
+                Some(sequence),
+                &encoded_operation,
+            )
+            .and_then(|object| object.encode())
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::InvalidInput,
+                    "无法加密同步冲突解决 operation",
+                )
+            })?;
+            let object = validate_envelope(&encrypted_object)?;
+            let hash = object_hash(&encrypted_object);
+            let object_key = format!("vpshell/v1/{vault_id}/segments/{device_id}/{sequence}.oseg");
+            enqueue_local_in_transaction(
+                transaction,
+                &object_key,
+                &encrypted_object,
+                &object,
+                &hash,
+                now_ms,
+                |transaction| {
+                    apply_persisted_operation(
+                        transaction,
+                        &encoded_operation,
+                        merge_revision,
+                        now_ms,
+                    )
+                    .map_err(map_merge_error)?;
+                    transaction
+                        .execute(
+                            "UPDATE sync_local_identity
+                             SET last_hlc_ms = ?1, last_hlc_logical = ?2
+                             WHERE singleton = 1 AND device_id = ?3",
+                            params![physical_ms, i64::from(logical), device_id],
+                        )
+                        .map_err(|_| {
+                            JournalError::new(JournalErrorCode::Storage, "无法推进本机同步 HLC")
+                        })?;
+                    Ok(())
+                },
+            )?;
+            let (revision, state) = load_persisted_state(transaction).map_err(map_merge_error)?;
+            Ok(ConflictResolutionJournalResult {
+                revision,
+                open_conflicts: state.open_conflicts().len(),
+            })
         })
     }
 
     pub(crate) fn claim_next(&self, now_ms: i64) -> JournalResult<Option<ClaimedObject>> {
+        self.claim_next_scoped(None, now_ms)
+    }
+
+    pub(crate) fn claim_next_for_vault(
+        &self,
+        vault_id: &str,
+        now_ms: i64,
+    ) -> JournalResult<Option<ClaimedObject>> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "同步 vault ID 无效"))?
+            .to_string();
+        self.claim_next_scoped(Some(&vault_id), now_ms)
+    }
+
+    fn claim_next_scoped(
+        &self,
+        vault_id: Option<&str>,
+        now_ms: i64,
+    ) -> JournalResult<Option<ClaimedObject>> {
         validate_now(now_ms)?;
         self.transaction(|transaction| {
             ensure_unblocked(transaction)?;
@@ -783,9 +1940,21 @@ impl SyncJournal {
                      FROM sync_outbox q JOIN sync_operations o USING(object_key)
                      WHERE q.state IN ('pending', 'retry_wait')
                        AND q.next_attempt_ms <= ?1 AND q.attempt_count < ?2
+                       AND (?3 IS NULL OR o.vault_id = ?3)
+                       AND (
+                           o.object_kind = 'blob'
+                           OR NOT EXISTS (
+                               SELECT 1
+                               FROM sync_outbox dependency_q
+                               JOIN sync_operations dependency_o USING(object_key)
+                               WHERE dependency_o.vault_id = o.vault_id
+                                 AND dependency_o.object_kind = 'blob'
+                                 AND dependency_q.state != 'published'
+                           )
+                       )
                      ORDER BY q.next_attempt_ms, q.updated_at_ms, q.object_key
                      LIMIT 1",
-                    params![now_ms, MAX_ATTEMPTS],
+                    params![now_ms, MAX_ATTEMPTS, vault_id],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
@@ -1115,6 +2284,93 @@ impl SyncJournal {
         })
     }
 
+    pub(crate) fn apply_remote_merge(
+        &self,
+        object_key: &str,
+        encoded: &[u8],
+        vault_key: &VaultKey,
+        now_ms: i64,
+    ) -> JournalResult<RemoteMergeResult> {
+        let outcome = self.apply_remote(
+            object_key,
+            encoded,
+            vault_key,
+            now_ms,
+            |transaction, plaintext| {
+                let (revision, _) = load_persisted_state(transaction).map_err(map_merge_error)?;
+                apply_persisted_operation(transaction, plaintext, revision, now_ms)
+                    .map_err(map_merge_error)?;
+                Ok(())
+            },
+        )?;
+        let status = self.merge_status()?;
+        Ok(RemoteMergeResult {
+            outcome,
+            revision: status.revision,
+            open_conflicts: status.open_conflicts,
+        })
+    }
+
+    pub(crate) fn apply_remote_merge_trusted(
+        &self,
+        object_key: &str,
+        encoded: &[u8],
+        vault_key: &VaultKey,
+        registry: &DeviceRegistry,
+        now_ms: i64,
+    ) -> JournalResult<RemoteMergeResult> {
+        let object = validate_envelope(encoded)?;
+        if object.object_kind() != &SyncObjectKind::Event
+            || object.vault_id() != registry.vault_id()
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "可信远端 merge 对象身份无效",
+            ));
+        }
+        let outer_device_id = object
+            .device_id()
+            .ok_or_else(|| {
+                JournalError::new(
+                    JournalErrorCode::InvalidInput,
+                    "可信远端 merge 缺少设备身份",
+                )
+            })?
+            .to_string();
+        let outcome = self.apply_remote(
+            object_key,
+            encoded,
+            vault_key,
+            now_ms,
+            |transaction, plaintext| {
+                let operation =
+                    decode_trusted_signed_operation(plaintext, registry).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Authentication,
+                            "远端同步 operation 未通过活动 registry 验签",
+                        )
+                    })?;
+                if operation.device_id() != outer_device_id {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Authentication,
+                        "远端同步 operation 内外设备身份不匹配",
+                    ));
+                }
+                let operation = operation.encode().map_err(map_merge_error)?;
+                let (revision, _) = load_persisted_state(transaction).map_err(map_merge_error)?;
+                apply_persisted_operation(transaction, &operation, revision, now_ms)
+                    .map_err(map_merge_error)?;
+                Ok(())
+            },
+        )?;
+        let status = self.merge_status()?;
+        Ok(RemoteMergeResult {
+            outcome,
+            revision: status.revision,
+            open_conflicts: status.open_conflicts,
+        })
+    }
+
     pub(crate) fn prune(&self, now_ms: i64) -> JournalResult<()> {
         validate_now(now_ms)?;
         self.transaction(|transaction| {
@@ -1219,8 +2475,11 @@ fn recover_expired_leases(transaction: &Transaction<'_>, now_ms: i64) -> Journal
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::sync_crypto::{SyncObjectKind, encrypt_sync_object};
+    use crate::sync_operation_signature::SignedOperationEnvelope;
 
     struct TempDir(PathBuf);
 
@@ -1270,6 +2529,50 @@ mod tests {
         .unwrap()
         .encode()
         .unwrap()
+    }
+
+    fn encrypted_remote_patch(
+        key: &VaultKey,
+        device_id: &str,
+        sequence: u64,
+        entity_id: &str,
+        value: &str,
+    ) -> (String, Vec<u8>) {
+        let operation_id = Uuid::new_v4().to_string();
+        let operation = serde_json::json!({
+            "formatVersion": 1,
+            "operationId": operation_id,
+            "deviceId": device_id,
+            "sequence": sequence,
+            "hlc": {"physicalMs": 100, "logical": 0},
+            "payload": {
+                "kind": "patch",
+                "payload": {
+                    "entityKind": "host",
+                    "entityId": entity_id,
+                    "fields": {"address": {"type": "text", "value": value}},
+                    "observedFields": {},
+                    "observedTombstone": null
+                }
+            }
+        });
+        let encoded = serde_json::to_vec(&operation).unwrap();
+        let encrypted = encrypt_sync_object(
+            key,
+            VAULT_ID,
+            SyncObjectKind::Event,
+            &operation_id,
+            Some(device_id),
+            Some(sequence),
+            &encoded,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        (
+            format!("vpshell/v1/{VAULT_ID}/segments/{device_id}/{sequence}.oseg"),
+            encrypted,
+        )
     }
 
     fn create_business_table(transaction: &Transaction<'_>) -> JournalResult<()> {
@@ -1333,6 +2636,204 @@ mod tests {
         let status = journal.status().unwrap();
         assert_eq!(status.pending_objects, 1);
         assert_eq!(status.pending_bytes, object.len() as u64);
+    }
+
+    #[test]
+    fn retrying_blob_blocks_events_until_the_blob_is_published() {
+        let root = TempDir::new("blob-dependency");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let key = VaultKey::generate().unwrap();
+        let event = encrypted(&key, 1, b"background-reference");
+        let blob_id = "ab".repeat(32);
+        let blob = encrypted_blob(&key, &format!("{blob_id}-000000"), b"chunk");
+        journal
+            .enqueue_local("segments/device/1.oseg", &event, 0, |_| Ok(()))
+            .unwrap();
+        journal
+            .enqueue_local_blob(
+                &key,
+                &format!("vpshell/v1/{VAULT_ID}/blobs/{blob_id}/000000.oblob"),
+                &blob,
+                0,
+            )
+            .unwrap();
+
+        let first = journal.claim_next_for_vault(VAULT_ID, 0).unwrap().unwrap();
+        assert_eq!(first.encrypted_object, blob);
+        journal
+            .mark_failed(
+                &first.object_key,
+                &first.lease_id,
+                AttemptFailure::Network,
+                1,
+            )
+            .unwrap();
+        assert!(journal.claim_next_for_vault(VAULT_ID, 2).unwrap().is_none());
+
+        let retry = journal
+            .claim_next_for_vault(VAULT_ID, BASE_RETRY_MS + 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.encrypted_object, blob);
+        journal
+            .mark_published(&retry.object_key, &retry.lease_id, BASE_RETRY_MS + 2)
+            .unwrap();
+        let reference = journal
+            .claim_next_for_vault(VAULT_ID, BASE_RETRY_MS + 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.encrypted_object, event);
+    }
+
+    #[test]
+    fn app_state_host_enqueue_is_atomic_idempotent_and_content_bound() {
+        let root = TempDir::new("app-state-host");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let key = VaultKey::generate().unwrap();
+        let operation_id = Uuid::new_v4().to_string();
+        let entity_id = Uuid::new_v4().to_string();
+        let mutation = LocalEntityMutation::Patch(BTreeMap::from([(
+            "name".to_string(),
+            crate::sync_merge::FieldValue::Text("server".to_string()),
+        )]));
+        assert_eq!(
+            journal.enqueue_local_entity_change(
+                &key,
+                VAULT_ID,
+                &operation_id,
+                EntityKind::Host,
+                &entity_id,
+                mutation.clone(),
+                10,
+            ),
+            Ok(EnqueueOutcome::Queued)
+        );
+        assert_eq!(journal.merge_status().unwrap().revision, 1);
+        assert_eq!(
+            journal.enqueue_local_entity_change(
+                &key,
+                VAULT_ID,
+                &operation_id,
+                EntityKind::Host,
+                &entity_id,
+                mutation.clone(),
+                11,
+            ),
+            Ok(EnqueueOutcome::AlreadyQueued)
+        );
+        assert_eq!(
+            journal
+                .enqueue_local_entity_change(
+                    &key,
+                    VAULT_ID,
+                    &operation_id,
+                    EntityKind::Script,
+                    &entity_id,
+                    mutation,
+                    11,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Conflict
+        );
+        let changed = LocalEntityMutation::Patch(BTreeMap::from([(
+            "name".to_string(),
+            crate::sync_merge::FieldValue::Text("changed".to_string()),
+        )]));
+        assert_eq!(
+            journal
+                .enqueue_local_entity_change(
+                    &key,
+                    VAULT_ID,
+                    &operation_id,
+                    EntityKind::Host,
+                    &entity_id,
+                    changed,
+                    12,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Conflict
+        );
+        assert_eq!(journal.status().unwrap().pending_objects, 1);
+        assert_eq!(journal.merge_status().unwrap().revision, 1);
+        let claim = journal.claim_next_for_vault(VAULT_ID, 13).unwrap().unwrap();
+        let encrypted = EncryptedSyncObject::decode(&claim.encrypted_object).unwrap();
+        let plaintext = decrypt_sync_object(&key, &encrypted).unwrap();
+        let signed = SignedOperationEnvelope::decode(&plaintext).unwrap();
+        assert_eq!(
+            signed.verify_self().unwrap().device_id(),
+            journal.local_device_id().unwrap()
+        );
+    }
+
+    #[test]
+    fn conflict_resolution_is_revision_bound_encrypted_and_atomic_with_outbox() {
+        let root = TempDir::new("conflict-resolution");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let key = VaultKey::generate().unwrap();
+        let entity_id = Uuid::new_v4().to_string();
+        let device_a = "33333333-3333-4333-8333-333333333333".to_string();
+        let device_b = "44444444-4444-4444-8444-444444444444".to_string();
+        let (first_key, first) =
+            encrypted_remote_patch(&key, &device_a, 1, &entity_id, "first.example");
+        let (second_key, second) =
+            encrypted_remote_patch(&key, &device_b, 1, &entity_id, "second.example");
+        journal
+            .apply_remote_merge(&first_key, &first, &key, 100)
+            .unwrap();
+        journal
+            .apply_remote_merge(&second_key, &second, &key, 101)
+            .unwrap();
+
+        let snapshot = journal.conflict_snapshot(0, 10).unwrap();
+        assert_eq!(snapshot.revision, 2);
+        assert_eq!(snapshot.total, 1);
+        let conflict_id = snapshot.conflicts[0].conflict_id.clone();
+        assert_eq!(
+            journal
+                .enqueue_local_conflict_resolution(&key, VAULT_ID, 1, &conflict_id, 0, 200,)
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Conflict
+        );
+        assert_eq!(journal.status().unwrap().pending_objects, 0);
+        assert_eq!(journal.merge_status().unwrap().open_conflicts, 1);
+
+        let result = journal
+            .enqueue_local_conflict_resolution(
+                &key,
+                VAULT_ID,
+                snapshot.revision,
+                &conflict_id,
+                0,
+                200,
+            )
+            .unwrap();
+        assert_eq!(result.revision, 3);
+        assert_eq!(result.open_conflicts, 0);
+        assert_eq!(journal.status().unwrap().pending_objects, 1);
+        let projection = journal.host_merge_projection().unwrap();
+        assert_eq!(
+            projection.entities[0].fields.as_ref().unwrap()["address"],
+            crate::sync_merge::FieldValue::Text("first.example".to_string())
+        );
+        let claim = journal
+            .claim_next_for_vault(VAULT_ID, 201)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !claim
+                .encrypted_object
+                .windows("first.example".len())
+                .any(|window| window == b"first.example")
+        );
+        assert!(
+            !claim
+                .encrypted_object
+                .windows("second.example".len())
+                .any(|window| window == b"second.example")
+        );
     }
 
     #[test]
@@ -1635,6 +3136,141 @@ mod tests {
                 .filter_map(Result::ok)
                 .any(|entry| { entry.file_name().to_string_lossy().contains(".corrupt-") })
         );
+    }
+
+    #[test]
+    fn version_one_journal_adds_a_persistent_local_identity() {
+        let root = TempDir::new("identity-migration");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        drop(journal);
+        let connection = open_connection(&journal_path(&root.0)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE sync_local_identity;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        drop(journal);
+        let connection = open_connection(&journal_path(&root.0)).unwrap();
+        let device_id: String = connection
+            .query_row(
+                "SELECT device_id FROM sync_local_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(Uuid::parse_str(&device_id).unwrap().to_string(), device_id);
+    }
+
+    #[test]
+    fn registry_trust_watermark_persists_and_rejects_rollback_or_fork() {
+        let root = TempDir::new("registry-trust");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let hash_one = "a".repeat(64);
+        let hash_two = "b".repeat(64);
+        let first = b"signed-registry-one";
+        let second = b"signed-registry-two";
+        journal
+            .advance_trusted_device_registry(VAULT_ID, None, 1, &hash_one, first, 1)
+            .unwrap();
+        assert_eq!(
+            journal
+                .advance_trusted_device_registry(VAULT_ID, None, 1, &hash_one, first, 2)
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(
+            journal
+                .advance_trusted_device_registry(
+                    VAULT_ID,
+                    Some((1, &hash_one)),
+                    1,
+                    &hash_two,
+                    second,
+                    2,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Replay
+        );
+        journal
+            .advance_trusted_device_registry(
+                VAULT_ID,
+                Some((1, &hash_one)),
+                2,
+                &hash_two,
+                second,
+                3,
+            )
+            .unwrap();
+        drop(journal);
+
+        let reopened = SyncJournal::open(root.0.clone()).unwrap();
+        let trusted = reopened.trusted_device_registry(VAULT_ID).unwrap().unwrap();
+        assert_eq!(trusted.vault_id, VAULT_ID);
+        assert_eq!(trusted.revision, 2);
+        assert_eq!(trusted.envelope_hash, hash_two);
+        assert_eq!(trusted.signed_envelope, second);
+        assert_eq!(
+            reopened
+                .advance_trusted_device_registry(VAULT_ID, None, 1, &hash_one, first, 4)
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Replay
+        );
+    }
+
+    #[test]
+    fn rotation_activation_trust_watermark_persists_and_rejects_rollback_or_fork() {
+        let root = TempDir::new("rotation-trust");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let hash_one = "a".repeat(64);
+        let hash_two = "b".repeat(64);
+        journal
+            .advance_trusted_rotation_activation(VAULT_ID, None, 1, &hash_one, 1)
+            .unwrap();
+        assert_eq!(
+            journal
+                .advance_trusted_rotation_activation(VAULT_ID, None, 1, &hash_one, 2)
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(
+            journal
+                .advance_trusted_rotation_activation(
+                    VAULT_ID,
+                    Some((1, &hash_one)),
+                    1,
+                    &hash_two,
+                    2,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Replay
+        );
+        journal
+            .advance_trusted_rotation_activation(
+                VAULT_ID,
+                Some((1, &hash_one)),
+                2,
+                &hash_two,
+                3,
+            )
+            .unwrap();
+        drop(journal);
+        let reopened = SyncJournal::open(root.0.clone()).unwrap();
+        let trusted = reopened
+            .trusted_rotation_activation(VAULT_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(trusted.vault_id, VAULT_ID);
+        assert_eq!(trusted.revision, 2);
+        assert_eq!(trusted.activation_hash, hash_two);
     }
 
     #[test]

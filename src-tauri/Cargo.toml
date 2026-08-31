@@ -41,10 +41,13 @@ sha2 = "0.10.9"
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 hkdf = { version = "=0.12.4", default-features = false }
+hmac = { version = "=0.12.1", default-features = false }
 getrandom = { version = "=0.3.4", default-features = false }
 quick-xml = { version = "=0.41.0", default-features = false }
 percent-encoding = { version = "=2.3.2", default-features = false }
+png = "=0.17.16"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
@@ -52,6 +55,21 @@ tauri-plugin-process = "2"
 ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
 android-native-keyring-store = "1.0.0"
 keyring-core = "1.0.0"
+tauri-plugin-biometric = "=2.3.2"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+russh = { version = "=0.62.7", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "=2.4.0"
+tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
+
+[[bin]]
+name = "vpshell"
+path = "src/main.rs"
+
+[[bin]]
+name = "vpshell-relay"
+path = "src/bin/vpshell-relay.rs"

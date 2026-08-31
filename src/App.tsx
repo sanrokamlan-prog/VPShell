@@ -5,8 +5,10 @@ import {
   AlertTriangle,
   BookOpenText,
   Braces,
+  Cable,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Clock3,
   CircleHelp,
@@ -41,6 +43,7 @@ import {
   Server,
   Settings2,
   ShieldCheck,
+  ShieldX,
   Square,
   SquareTerminal,
   Trash2,
@@ -56,27 +59,46 @@ import { FileTransferPanel } from "./components/FileTransferPanel";
 import { HostOverview } from "./components/HostOverview";
 import { KeyManagerDialog } from "./components/KeyManagerDialog";
 import { MigrationDialog, type MigrationImportResult } from "./components/MigrationDialog";
-import { NetworkToolsDialog, type NetworkToolMode } from "./components/NetworkToolsDialog";
+import { NetworkToolsDialog, type NetworkToolMode, type RouteMeasurementOption } from "./components/NetworkToolsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TerminalView } from "./components/TerminalView";
-import { usePersistedState } from "./hooks/usePersistedState";
+import { type AppStoreSnapshot, usePersistedState } from "./hooks/usePersistedState";
 import brandMark from "./assets/vpshell.svg";
+import {
+  postAndroidVisibility,
+  requestAndroidSecurity,
+  type AndroidSecurityStatus,
+} from "./androidSecurity";
 import type {
   AppState,
+  CommandParameter,
   CommandRecipe,
+  ConnectionHistoryItem,
   EnvironmentKind,
   HostProfile,
   ScriptRecipe,
+  SshKeyProfile,
   SyncProviderKind,
   TerminalSession,
 } from "./types";
 import "./App.css";
 
 type SidebarView = "hosts" | "commands" | "scripts" | "history";
-type DialogKind = "host" | "host-key" | "sync" | "wallpaper" | "settings" | "guide" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | null;
+type DialogKind = "host" | "host-key" | "sync" | "wallpaper" | "settings" | "guide" | "script" | "command" | "custom-script" | "migration" | "key-manager" | "network" | "local-forward" | null;
 
 const RECYCLE_BIN_DAYS = 30;
+const MAX_PARAMETER_HISTORY = 10_000;
+
+function isSensitiveParameterName(value: string) {
+  const compact = value.toLowerCase().replace(/[-_ ]/g, "");
+  return ["password", "passphrase", "token", "secret", "privatekey", "credential", "authorization", "apikey"]
+    .some((needle) => compact.includes(needle));
+}
+
+function isSensitiveCommandParameter(parameter: CommandParameter) {
+  return parameter.sensitive === true || isSensitiveParameterName(parameter.name);
+}
 
 interface IntentSuggestion {
   kind: "command" | "script";
@@ -169,11 +191,211 @@ interface HostKeyInspection {
   fingerprint: string;
 }
 
+interface NativeEngineProbeResult {
+  schemaVersion: number;
+  engine: "russh";
+  sshReady: boolean;
+  sftpReady: boolean;
+}
+
+interface NativeTerminalStartResult {
+  schemaVersion: number;
+  engine: "russh";
+  sessionId: string;
+  connection: ConnectionHistoryItem;
+}
+
+interface OpenSshTerminalStartResult {
+  schemaVersion: number;
+  engine: "openssh";
+  sessionId: string;
+  connection: ConnectionHistoryItem;
+}
+
+interface MoshTerminalStartResult {
+  schemaVersion: number;
+  engine: "mosh";
+  sessionId: string;
+  connection: ConnectionHistoryItem;
+}
+
+interface AndroidConnectionResult {
+  sessionId: string;
+  connection: ConnectionHistoryItem;
+}
+
+interface NativeLocalForwardSnapshot {
+  schemaVersion: number;
+  forwardId: string;
+  state: "starting" | "active";
+  bindHost: "127.0.0.1";
+  bindPort: number;
+  routeHost: string;
+  routeHops: number;
+  targetHost: string;
+  targetPort: number;
+  activeConnections: number;
+  acceptedConnections: number;
+  rejectedConnections: number;
+}
+
+interface NativeRemoteForwardSnapshot {
+  schemaVersion: number;
+  forwardId: string;
+  state: "starting" | "active";
+  bindHost: "127.0.0.1";
+  bindPort: number;
+  routeHost: string;
+  routeHops: number;
+  targetHost: "127.0.0.1";
+  targetPort: number;
+  activeConnections: number;
+  acceptedConnections: number;
+  rejectedConnections: number;
+  failedConnections: number;
+}
+
+interface NativeDynamicForwardSnapshot {
+  schemaVersion: number;
+  forwardId: string;
+  state: "starting" | "active";
+  bindHost: "127.0.0.1";
+  bindPort: number;
+  routeHost: string;
+  routeHops: number;
+  activeConnections: number;
+  acceptedConnections: number;
+  rejectedConnections: number;
+}
+
+interface NativeEngineErrorPayload {
+  code?: string;
+  message?: string;
+  retryable?: boolean;
+  hopIndex?: number;
+  fallbackEngine?: "openssh";
+}
+
+const nativeOpenSshFallbackCodes = new Set([
+  "native-engine-key-invalid",
+  "native-engine-auth-negotiation-failed",
+  "native-engine-rsa-sha2-unavailable",
+]);
+
+function canFallbackNativeTerminalToOpenSsh(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const payload = error as NativeEngineErrorPayload;
+  return payload.fallbackEngine === "openssh"
+    && typeof payload.code === "string"
+    && nativeOpenSshFallbackCodes.has(payload.code);
+}
+
+function invokeErrorMessage(error: unknown) {
+  if (error && typeof error === "object") {
+    const payload = error as NativeEngineErrorPayload;
+    if (typeof payload.message === "string") {
+      const hop = typeof payload.hopIndex === "number" ? `第 ${payload.hopIndex} 跳：` : "";
+      return payload.code ? `${hop}${payload.message}（${payload.code}）` : `${hop}${payload.message}`;
+    }
+  }
+  return String(error);
+}
+
+type SyncCoordinatorPhase = "notConfigured" | "idle" | "uploading" | "downloading" | "merging" | "waitingRetry" | "conflicts" | "reconcileRequired" | "suspended" | "cancelled";
+
+interface SyncCoordinatorStatus {
+  schemaVersion: number;
+  phase: SyncCoordinatorPhase;
+  configured: boolean;
+  running: boolean;
+  generation: number;
+  pendingObjects: number;
+  pendingBytes: number;
+  mergeRevision: number;
+  openConflicts: number;
+  recoveryRequired: boolean;
+  recoveryNote?: string;
+  lastErrorCode?: string;
+  lastCompletedAtMs?: number;
+  lastUploadedObjects: number;
+  lastDownloadedObjects: number;
+  deviceRegistryRevision: number;
+  localDeviceAuthorized: boolean;
+  keyRotationRequired: boolean;
+}
+
+interface SyncCycleResult {
+  status: SyncCoordinatorStatus;
+  appStore: AppStoreSnapshot;
+}
+
+type SyncDeviceRevocationReason = "lost" | "stolen" | "retired" | "compromised";
+
+interface SyncDeviceRecord {
+  deviceId: string;
+  label: string;
+  labelUpdatedAtMs: number;
+  addedAtMs: number;
+  status: { state: "active" } | {
+    state: "revoked";
+    revoked_at_ms: number;
+    reason: SyncDeviceRevocationReason;
+  };
+}
+
+interface SyncDeviceRegistrySnapshot {
+  schemaVersion: number;
+  vaultId: string;
+  revision: number;
+  localDeviceId: string;
+  devices: SyncDeviceRecord[];
+}
+
+interface SyncDeviceEnrollmentResponse {
+  schemaVersion: number;
+  deviceId: string;
+  label: string;
+  expiresAtMs: number;
+  enrollmentRequest: string;
+}
+
+type SyncConflictEntityKind = "host" | "script" | "setting" | "background";
+type SyncConflictReason = "concurrent-edit" | "connection-identity" | "script-content" | "risk-lowered" | "deleted-entity-edited" | "concurrent-delete";
+
+interface SyncConflictAlternative {
+  index: number;
+  valueType: "text" | "integer" | "flag" | "text-list" | "blob-ref" | "clear" | "deleted";
+  preview?: string;
+  byteLength: number;
+  contentHash?: string;
+  truncated: boolean;
+}
+
+interface SyncConflictItem {
+  conflictId: string;
+  entityKind: SyncConflictEntityKind;
+  entityId: string;
+  field: string;
+  reason: SyncConflictReason;
+  alternatives: [SyncConflictAlternative, SyncConflictAlternative];
+}
+
+interface SyncConflictCenterSnapshot {
+  schemaVersion: number;
+  mergeRevision: number;
+  total: number;
+  offset: number;
+  conflicts: SyncConflictItem[];
+}
+
+const SYNC_CONFLICT_PAGE_SIZE = 10;
+
 interface RenderAsset {
   dataUrl: string;
   label: string;
   mediaType: string;
   size: number;
+  managedBlobId: string | null;
 }
 
 const CUSTOM_FONT_FAMILY = "VPShell Custom Font";
@@ -197,6 +419,42 @@ const environmentLabels: Record<EnvironmentKind, string> = {
   development: "测试",
 };
 
+const syncPhaseLabels: Record<SyncCoordinatorPhase, string> = {
+  notConfigured: "未配置",
+  idle: "空闲",
+  uploading: "正在上传",
+  downloading: "正在下载",
+  merging: "正在合并",
+  waitingRetry: "等待重试",
+  conflicts: "存在冲突",
+  reconcileRequired: "需要恢复核对",
+  suspended: "已暂停",
+  cancelled: "已取消",
+};
+
+const syncConflictKindLabels: Record<SyncConflictEntityKind, string> = {
+  host: "主机",
+  script: "脚本",
+  setting: "设置",
+  background: "背景",
+};
+
+const syncConflictReasonLabels: Record<SyncConflictReason, string> = {
+  "concurrent-edit": "并发编辑",
+  "connection-identity": "连接身份不一致",
+  "script-content": "脚本内容不一致",
+  "risk-lowered": "风险等级降低",
+  "deleted-entity-edited": "删除后又被编辑",
+  "concurrent-delete": "并发删除",
+};
+
+function syncConflictAlternativeLabel(alternative: SyncConflictAlternative) {
+  if (alternative.valueType === "deleted") return "保持删除";
+  if (alternative.valueType === "clear") return "清空该值";
+  if (alternative.valueType === "flag") return alternative.preview === "true" ? "启用" : "关闭";
+  return alternative.preview || "空值";
+}
+
 const sidebarLabels: Record<SidebarView, { eyebrow: string; title: string; placeholder: string }> = {
   hosts: { eyebrow: "CONNECTIONS", title: "主机", placeholder: "搜索名称、IP、标签" },
   commands: { eyebrow: "COMMAND LIBRARY", title: "命令库", placeholder: "搜索想完成的操作" },
@@ -210,6 +468,7 @@ function makeSession(host: HostProfile): TerminalSession {
     hostId: host.id,
     title: host.name,
     state: "idle",
+    engine: host.jumpRoute?.length ? "russh" : "openssh",
     currentPath: host.lastPath ?? "~",
     contextSource: "profile",
     contextStack: [],
@@ -260,6 +519,78 @@ function hostCredentialReferences(host: HostProfile) {
     .filter((reference): reference is string => Boolean(reference));
 }
 
+function nativeRouteHosts(host: HostProfile, hosts: HostProfile[]) {
+  const jumpRoute = host.jumpRoute ?? [];
+  if (jumpRoute.length > 3) throw new Error("原生 SSH 路线最多允许三台跳板机");
+  const routeIds = [...jumpRoute, host.id];
+  if (new Set(routeIds).size !== routeIds.length) {
+    throw new Error("原生 SSH 路线不能重复或形成循环");
+  }
+  return routeIds.map((hostId) => {
+    const routeHost = hosts.find((candidate) => candidate.id === hostId);
+    if (!routeHost) throw new Error("原生 SSH 路线引用了不存在的主机资料");
+    return routeHost;
+  });
+}
+
+function nativeRoute(
+  host: HostProfile,
+  hosts: HostProfile[],
+  sshKeys: SshKeyProfile[],
+  targetHostKeySha256?: string,
+) {
+  return {
+    hops: nativeRouteHosts(host, hosts).map((routeHost) => {
+      const hostKeySha256 = routeHost.id === host.id
+        ? targetHostKeySha256 ?? routeHost.hostKeySha256
+        : routeHost.hostKeySha256;
+      if (!hostKeySha256) throw new Error(`请先为“${routeHost.name}”保存 SHA256 主机指纹`);
+      if (!routeHost.identityFile && !routeHost.credentialRef) {
+        throw new Error(`“${routeHost.name}”缺少原生引擎可用的认证来源`);
+      }
+      const identityPassphraseRef = sshKeys.find(
+        (key) => key.privateKeyPath === routeHost.identityFile,
+      )?.passphraseRef;
+      return {
+        hopId: crypto.randomUUID(),
+        host: routeHost.host,
+        port: routeHost.port,
+        username: routeHost.username,
+        hostKeySha256,
+        timeoutSeconds: 15,
+        credentialRef: routeHost.identityFile ? undefined : routeHost.credentialRef,
+        identityFile: routeHost.identityFile,
+        identityPassphraseRef,
+      };
+    }),
+  };
+}
+
+function buildRouteMeasurementOptions(
+  host: HostProfile,
+  hosts: HostProfile[],
+  sshKeys: SshKeyProfile[],
+): RouteMeasurementOption[] {
+  const directHost = { ...host, jumpRoute: [] };
+  const options: RouteMeasurementOption[] = [{
+    candidateId: "direct",
+    label: "直连",
+    route: nativeRoute(directHost, hosts, sshKeys),
+  }];
+  if (host.jumpRoute?.length) {
+    const jumpLabels = nativeRouteHosts(host, hosts)
+      .slice(0, -1)
+      .map((routeHost) => routeHost.name)
+      .join(" > ");
+    options.push({
+      candidateId: "configured-jump",
+      label: `跳板 · ${jumpLabels}`,
+      route: nativeRoute(host, hosts, sshKeys),
+    });
+  }
+  return options;
+}
+
 function scoreIntent(query: string, fields: string[]) {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) return 0;
@@ -300,7 +631,7 @@ function migrateAppStateIntoSqlite(value: AppState) {
 }
 
 function App() {
-  const [appState, setAppState, appStoreStatus] = usePersistedState<AppState>(
+  const [appState, setAppState, appStoreStatus, applyAppStoreSnapshot] = usePersistedState<AppState>(
     "vpshell-state-v1",
     initialState,
     ["opsshell-state-v6"],
@@ -325,6 +656,31 @@ function App() {
   const [broadcastResult, setBroadcastResult] = useState<BroadcastResultResponse | null>(null);
   const [broadcastExecuting, setBroadcastExecuting] = useState(false);
   const [syncPassword, setSyncPassword] = useState("");
+  const [webDavPassword, setWebDavPassword] = useState("");
+  const [webDavCaPath, setWebDavCaPath] = useState("");
+  const [webDavCaLabel, setWebDavCaLabel] = useState("");
+  const [webDavUseSystemCa, setWebDavUseSystemCa] = useState(false);
+  const [s3AccessKeyId, setS3AccessKeyId] = useState("");
+  const [s3SecretAccessKey, setS3SecretAccessKey] = useState("");
+  const [s3SessionToken, setS3SessionToken] = useState("");
+  const [gatewayPassword, setGatewayPassword] = useState("");
+  const [gatewayTotp, setGatewayTotp] = useState("");
+  const [syncSetupMode, setSyncSetupMode] = useState<"unlock" | "initialize">("unlock");
+  const [desktopSyncStatus, setDesktopSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
+  const [desktopSyncError, setDesktopSyncError] = useState<string | null>(null);
+  const [desktopSyncBusy, setDesktopSyncBusy] = useState(false);
+  const [syncConflictCenter, setSyncConflictCenter] = useState<SyncConflictCenterSnapshot | null>(null);
+  const [syncConflictOffset, setSyncConflictOffset] = useState(0);
+  const [syncConflictError, setSyncConflictError] = useState<string | null>(null);
+  const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(null);
+  const [syncDevices, setSyncDevices] = useState<SyncDeviceRegistrySnapshot | null>(null);
+  const [syncDeviceError, setSyncDeviceError] = useState<string | null>(null);
+  const [syncDeviceBusy, setSyncDeviceBusy] = useState(false);
+  const [syncDeviceLabel, setSyncDeviceLabel] = useState("VPShell desktop");
+  const [syncDeviceLabels, setSyncDeviceLabels] = useState<Record<string, string>>({});
+  const [syncEnrollment, setSyncEnrollment] = useState<SyncDeviceEnrollmentResponse | null>(null);
+  const [syncEnrollmentApproval, setSyncEnrollmentApproval] = useState("");
+  const [syncRevocationReason, setSyncRevocationReason] = useState<SyncDeviceRevocationReason>("retired");
   const [toast, setToast] = useState<string | null>(null);
   const [installedFonts, setInstalledFonts] = useState<string[]>([]);
   const [fontRevision, setFontRevision] = useState(0);
@@ -334,6 +690,18 @@ function App() {
   const [trustingHostKey, setTrustingHostKey] = useState(false);
   const [androidTerminalIds, setAndroidTerminalIds] = useState<Record<string, string>>({});
   const [androidCredentialKind, setAndroidCredentialKind] = useState<"password" | "privateKey">("password");
+  const [androidSyncStatus, setAndroidSyncStatus] = useState<SyncCoordinatorStatus | null>(null);
+  const [androidSyncError, setAndroidSyncError] = useState<string | null>(null);
+  const [androidSecurityStatus, setAndroidSecurityStatus] = useState<AndroidSecurityStatus | null>(null);
+  const [nativeProbeInspecting, setNativeProbeInspecting] = useState(false);
+  const [nativeProbeOperationId, setNativeProbeOperationId] = useState<string | null>(null);
+  const [nativeTerminalStartingIds, setNativeTerminalStartingIds] = useState<string[]>([]);
+  const [nativeLocalForwards, setNativeLocalForwards] = useState<NativeLocalForwardSnapshot[]>([]);
+  const [nativeRemoteForwards, setNativeRemoteForwards] = useState<NativeRemoteForwardSnapshot[]>([]);
+  const [nativeDynamicForwards, setNativeDynamicForwards] = useState<NativeDynamicForwardSnapshot[]>([]);
+  const [nativeForwardMode, setNativeForwardMode] = useState<"local" | "remote" | "dynamic">("local");
+  const [nativeLocalForwardBusy, setNativeLocalForwardBusy] = useState(false);
+  const [nativeLocalForwardError, setNativeLocalForwardError] = useState<string | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
   const activeHost = appState.hosts.find((host) => host.id === activeSession.hostId) ?? appState.hosts[0] ?? emptyHost;
@@ -344,26 +712,198 @@ function App() {
   const activeShellContext = activeSession.contextStack?.[activeSession.contextStack.length - 1];
   const deletedHosts = appState.deletedHosts ?? [];
 
+  const refreshAndroidSyncStatus = useCallback(async () => {
+    if (!isAndroidRuntime()) return;
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("android_sync_status");
+      setAndroidSyncStatus(status);
+      setAndroidSyncError(null);
+    } catch (error) {
+      setAndroidSyncError(String(error));
+    }
+  }, []);
+
+  const refreshDesktopSyncStatus = useCallback(async () => {
+    if (!isDesktopRuntime()) return;
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("desktop_sync_status");
+      setDesktopSyncStatus(status);
+      setDesktopSyncError(null);
+    } catch (error) {
+      setDesktopSyncError(invokeErrorMessage(error));
+    }
+  }, []);
+
+  const refreshSyncConflicts = useCallback(async (offset: number) => {
+    if (!isDesktopRuntime()) return;
+    try {
+      const snapshot = await invoke<SyncConflictCenterSnapshot>("list_sync_conflicts", {
+        request: { offset, limit: SYNC_CONFLICT_PAGE_SIZE },
+      });
+      setSyncConflictCenter(snapshot);
+      setSyncConflictError(null);
+      if (snapshot.total > 0 && snapshot.conflicts.length === 0 && offset > 0) {
+        setSyncConflictOffset(Math.max(0, offset - SYNC_CONFLICT_PAGE_SIZE));
+      }
+    } catch (error) {
+      setSyncConflictError(invokeErrorMessage(error));
+    }
+  }, []);
+
   useEffect(() => {
     if (!isAndroidRuntime()) return undefined;
-    const setLifecycle = (lifecycle: "background" | "foreground") => {
-      void invoke("android_set_lifecycle", {
-        lifecycle,
-      }).catch(() => undefined);
+    let active = true;
+    let unlocking = false;
+    const enterBackground = () => {
+      postAndroidVisibility("hide");
+      setAndroidSecurityStatus((current) => current ? { ...current, locked: true } : current);
+      void invoke("android_enter_background").catch(() => undefined);
     };
-    const updateLifecycle = () => setLifecycle(document.hidden ? "background" : "foreground");
-    const enterBackground = () => setLifecycle("background");
-    const enterForeground = () => setLifecycle("foreground");
-    updateLifecycle();
+    const unlock = async () => {
+      if (unlocking) return;
+      unlocking = true;
+      try {
+        const status = await requestAndroidSecurity("unlock");
+        if (!active) return;
+        setAndroidSecurityStatus(status);
+        postAndroidVisibility(status.locked ? "failed" : "show");
+      } catch (error) {
+        if (!active || String(error).includes("authentication-in-progress")) return;
+        postAndroidVisibility("failed");
+        void requestAndroidSecurity("status")
+          .then((status) => active && setAndroidSecurityStatus(status))
+          .catch(() => undefined);
+      } finally {
+        unlocking = false;
+      }
+    };
+    const updateLifecycle = () => {
+      if (document.hidden) enterBackground();
+      else void unlock();
+    };
+    postAndroidVisibility("hide");
+    void unlock();
     document.addEventListener("visibilitychange", updateLifecycle);
     window.addEventListener("vpshell-native-background", enterBackground);
-    window.addEventListener("vpshell-native-foreground", enterForeground);
+    window.addEventListener("vpshell-native-resume", unlock);
     return () => {
+      active = false;
       document.removeEventListener("visibilitychange", updateLifecycle);
       window.removeEventListener("vpshell-native-background", enterBackground);
-      window.removeEventListener("vpshell-native-foreground", enterForeground);
+      window.removeEventListener("vpshell-native-resume", unlock);
     };
   }, []);
+
+  useEffect(() => {
+    if (!isAndroidRuntime()) return undefined;
+    void refreshAndroidSyncStatus();
+    const timer = window.setInterval(() => void refreshAndroidSyncStatus(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [refreshAndroidSyncStatus]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
+    void refreshDesktopSyncStatus();
+    const timer = window.setInterval(
+      () => void refreshDesktopSyncStatus(),
+      dialog === "sync" ? 1_000 : 15_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [dialog, refreshDesktopSyncStatus]);
+
+  useEffect(() => {
+    if (
+      !isDesktopRuntime()
+      || dialog !== "sync"
+      || !desktopSyncStatus?.configured
+      || desktopSyncStatus.openConflicts === 0
+    ) {
+      if (desktopSyncStatus?.openConflicts === 0) {
+        setSyncConflictCenter(null);
+        setSyncConflictError(null);
+        setSyncConflictOffset(0);
+      }
+      return;
+    }
+    void refreshSyncConflicts(syncConflictOffset);
+  }, [desktopSyncStatus?.configured, desktopSyncStatus?.mergeRevision, desktopSyncStatus?.openConflicts, dialog, refreshSyncConflicts, syncConflictOffset]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime() || dialog !== "sync" || !desktopSyncStatus?.configured) {
+      setSyncDevices(null);
+      setSyncDeviceError(null);
+      return;
+    }
+    let active = true;
+    void invoke<SyncDeviceRegistrySnapshot>("list_sync_devices")
+      .then((snapshot) => {
+        if (!active) return;
+        setSyncDevices(snapshot);
+        setSyncDeviceLabels(Object.fromEntries(snapshot.devices.map((device) => [device.deviceId, device.label])));
+        setSyncDeviceError(null);
+      })
+      .catch((error) => {
+        if (active) setSyncDeviceError(invokeErrorMessage(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [desktopSyncStatus?.configured, desktopSyncStatus?.deviceRegistryRevision, dialog]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
+    let active = true;
+    let stopListening: (() => void) | undefined;
+    void listen<SyncCycleResult>("desktop-sync-cycle", (event) => {
+      if (!active) return;
+      setDesktopSyncStatus(event.payload.status);
+      setDesktopSyncError(event.payload.status.lastErrorCode ?? null);
+      try {
+        if (!applyAppStoreSnapshot(event.payload.appStore)) {
+          setDesktopSyncError(event.payload.status.lastErrorCode ?? "local-state-busy");
+        }
+      } catch (error) {
+        setDesktopSyncError(invokeErrorMessage(error));
+      }
+    }).then((unlisten) => {
+      if (!active) unlisten();
+      else stopListening = unlisten;
+    }).catch((error) => {
+      if (active) setDesktopSyncError(invokeErrorMessage(error));
+    });
+    return () => {
+      active = false;
+      stopListening?.();
+    };
+  }, [applyAppStoreSnapshot]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
+    let active = true;
+    const refresh = () => {
+      void Promise.all([
+        invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards"),
+        invoke<NativeRemoteForwardSnapshot[]>("list_native_remote_forwards"),
+        invoke<NativeDynamicForwardSnapshot[]>("list_native_dynamic_forwards"),
+      ])
+        .then(([localForwards, remoteForwards, dynamicForwards]) => {
+          if (!active) return;
+          setNativeLocalForwards(localForwards);
+          setNativeRemoteForwards(remoteForwards);
+          setNativeDynamicForwards(dynamicForwards);
+          setNativeLocalForwardError(null);
+        })
+        .catch((error) => {
+          if (active) setNativeLocalForwardError(invokeErrorMessage(error));
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, dialog === "local-forward" ? 1_000 : 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [dialog]);
 
   useEffect(() => {
     if (!appStoreStatus.ready || appState.hosts.length === 0) return;
@@ -510,7 +1050,7 @@ function App() {
         const snapshot = await invoke<MonitorSnapshotResponse>("start_remote_monitor", {
           request: {
             sessionId: activeSession.id,
-            intervalSeconds: 15,
+            intervalSeconds: appState.settings.monitorIntervalSeconds,
             connection: {
               host: activeHost.host,
               port: activeHost.port,
@@ -534,7 +1074,7 @@ function App() {
               history: current[activeSession.id]?.history ?? [],
               loading: false,
               paused: false,
-              intervalSeconds: current[activeSession.id]?.intervalSeconds ?? 15,
+              intervalSeconds: current[activeSession.id]?.intervalSeconds ?? appState.settings.monitorIntervalSeconds,
               totalSamples: current[activeSession.id]?.totalSamples ?? 0,
               droppedSamples: current[activeSession.id]?.droppedSamples ?? 0,
               metrics: current[activeSession.id]?.metrics,
@@ -552,7 +1092,7 @@ function App() {
       stopListening?.();
       void invoke("stop_remote_monitor", { sessionId: activeSession.id }).catch(() => undefined);
     };
-  }, [activeHost.credentialRef, activeHost.host, activeHost.identityFile, activeHost.port, activeHost.username, activeIdentityPassphraseRef, activeSession.id, activeSession.state, applyMonitorSnapshot]);
+  }, [activeHost.credentialRef, activeHost.host, activeHost.identityFile, activeHost.port, activeHost.username, activeIdentityPassphraseRef, activeSession.id, activeSession.state, appState.settings.monitorIntervalSeconds, applyMonitorSnapshot]);
 
   const setMonitorPaused = useCallback(async (sessionId: string, paused: boolean) => {
     try {
@@ -567,6 +1107,10 @@ function App() {
     try {
       const snapshot = await invoke<MonitorSnapshotResponse>("set_remote_monitor_interval", { sessionId, intervalSeconds });
       applyMonitorSnapshot(snapshot);
+      setAppState((current) => ({
+        ...current,
+        settings: { ...current.settings, monitorIntervalSeconds: snapshot.intervalSeconds },
+      }));
     } catch (error) {
       showToast(`无法调整监控频率：${String(error)}`);
     }
@@ -577,6 +1121,13 @@ function App() {
     void invoke<RenderAsset | null>("load_font_asset").then((asset) => {
       if (asset) void registerFontAsset(asset);
     }).catch(() => undefined);
+  // Managed fonts are restored once after the SQLite snapshot is ready.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appStoreStatus.ready]);
+
+  useEffect(() => {
+    if (!appStoreStatus.ready || !isDesktopRuntime()) return;
+    let active = true;
     if (appState.wallpaper.source === "none") {
       setRenderedWallpaper("");
       return;
@@ -585,17 +1136,36 @@ function App() {
       void invoke<RenderAsset>("install_wallpaper_asset", {
         request: { source: "legacy-data", value: appState.wallpaper.value },
       }).then((asset) => {
+        if (!active) return;
         setRenderedWallpaper(asset.dataUrl);
-        setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, value: asset.label } }));
-      }).catch((error) => showToast(`旧壁纸迁移失败：${String(error)}`));
-      return;
+        setAppState((current) => ({
+          ...current,
+          wallpaper: {
+            ...current.wallpaper,
+            value: asset.label,
+            managedBlobId: asset.managedBlobId ?? undefined,
+          },
+        }));
+      }).catch((error) => {
+        if (active) showToast(`旧壁纸迁移失败：${String(error)}`);
+      });
+      return () => { active = false; };
     }
+    const expectedBlobId = appState.wallpaper.managedBlobId;
     void invoke<RenderAsset | null>("load_wallpaper_asset")
-      .then((asset) => setRenderedWallpaper(asset?.dataUrl ?? ""))
-      .catch(() => setRenderedWallpaper(""));
-  // Managed assets are restored once after the SQLite snapshot is ready.
+      .then((asset) => {
+        if (!active) return;
+        setRenderedWallpaper(
+          expectedBlobId && asset?.managedBlobId !== expectedBlobId ? "" : asset?.dataUrl ?? "",
+        );
+      })
+      .catch(() => {
+        if (active) setRenderedWallpaper("");
+      });
+    return () => { active = false; };
+  // The source/blob identity changes only after an asset has been installed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appStoreStatus.ready]);
+  }, [appState.wallpaper.managedBlobId, appState.wallpaper.source, appStoreStatus.ready]);
 
   const updateSession = useCallback((sessionId: string, patch: Partial<TerminalSession>) => {
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, ...patch } : session));
@@ -648,6 +1218,16 @@ function App() {
 
   function closeSession(sessionId: string) {
     const closing = sessions.find((session) => session.id === sessionId);
+    if (closing?.state === "connecting") {
+      if (closing.engine === "russh" && nativeTerminalStartingIds.includes(sessionId)) {
+        void invoke("cancel_native_engine_operation", { operationId: sessionId })
+          .then(() => showToast("正在取消原生终端连接"))
+          .catch((error) => showToast(invokeErrorMessage(error)));
+      } else {
+        showToast("连接准备完成前不能关闭标签");
+      }
+      return;
+    }
     if (closing?.state === "connected" && isAndroidRuntime()) {
       void invoke("android_disconnect_host", { sessionId }).catch(() => undefined);
       setAndroidTerminalIds((current) => {
@@ -667,13 +1247,15 @@ function App() {
     setBroadcastTargets((current) => current.filter((id) => id !== sessionId));
   }
 
-  async function startSshSession(session: TerminalSession, host: HostProfile) {
+  async function startSshSession(session: TerminalSession, host: HostProfile, hostKeySha256?: string) {
     if (isAndroidRuntime()) {
       const credentialRef = host.androidKeyRef ?? host.credentialRef;
       if (!credentialRef || !host.hostKeySha256) {
         throw new Error("Android 连接需要已保存凭据和已确认的 SHA256 主机指纹");
       }
-      const sessionId = await invoke<string>("android_connect_host", {
+      const connected = await invoke<AndroidConnectionResult>("android_connect_host", {
+        hostId: host.id,
+        initialPath: session.currentPath,
         request: {
           sessionId: session.id,
           host: host.host,
@@ -686,6 +1268,7 @@ function App() {
           passphraseRef: host.androidKeyPassphraseRef,
         },
       });
+      const sessionId = connected.sessionId;
       let terminalId: string;
       try {
         terminalId = await invoke<string>("android_open_terminal", {
@@ -701,12 +1284,7 @@ function App() {
       updateSession(session.id, { state: "connected" });
       setAppState((current) => ({
         ...current,
-        connectionHistory: [{
-          id: crypto.randomUUID(),
-          hostId: host.id,
-          connectedAt: new Date().toISOString(),
-          path: session.currentPath,
-        }, ...(current.connectionHistory ?? [])],
+        connectionHistory: [connected.connection, ...(current.connectionHistory ?? [])].slice(0, 10_000),
       }));
       showToast(`已连接 ${host.name}`);
       return;
@@ -714,31 +1292,109 @@ function App() {
     const identityPassphraseRef = appState.sshKeys.find(
       (key) => key.privateKeyPath === host.identityFile,
     )?.passphraseRef;
+    const startOpenSshTerminal = async () => {
+      const result = await invoke<OpenSshTerminalStartResult>("start_ssh_session", {
+        hostId: host.id,
+        initialPath: session.currentPath,
+        request: {
+          sessionId: session.id,
+          host: host.host,
+          port: host.port,
+          username: host.username,
+          identityFile: host.identityFile,
+          credentialRef: host.credentialRef,
+          identityPassphraseRef,
+          cols: 120,
+          rows: 32,
+        },
+      });
+      if (result.schemaVersion !== 1 || result.engine !== "openssh" || result.sessionId !== session.id) {
+        await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+        throw new Error("OpenSSH 返回了不受支持的会话结果");
+      }
+      return result.connection;
+    };
     updateSession(session.id, { state: "connecting" });
-    await invoke("start_ssh_session", {
-      request: {
-        sessionId: session.id,
-        host: host.host,
-        port: host.port,
-        username: host.username,
-        identityFile: host.identityFile,
-        credentialRef: host.credentialRef,
-        identityPassphraseRef,
-        cols: 120,
-        rows: 32,
-      },
-    });
+    let effectiveEngine = session.engine;
+    let usedCompatibilityFallback = false;
+    let authenticatedConnection: ConnectionHistoryItem | undefined;
+    if (session.engine === "russh") {
+      if (!hostKeySha256) throw new Error("原生终端需要已验证的 SHA256 主机指纹");
+      if (!host.identityFile && !host.credentialRef) {
+        throw new Error("原生终端目前需要已保存的密码或显式私钥；可切回 OpenSSH 使用 agent 等兼容认证");
+      }
+      setNativeTerminalStartingIds((current) => current.includes(session.id) ? current : [...current, session.id]);
+      let result: NativeTerminalStartResult | undefined;
+      try {
+        result = await invoke<NativeTerminalStartResult>("start_native_terminal", {
+          hostId: host.id,
+          initialPath: session.currentPath,
+          request: {
+            sessionId: session.id,
+            route: nativeRoute(host, appState.hosts, appState.sshKeys, hostKeySha256),
+            cols: 120,
+            rows: 32,
+          },
+        });
+      } catch (error) {
+        if (host.jumpRoute?.length || !canFallbackNativeTerminalToOpenSsh(error)) throw error;
+        authenticatedConnection = await startOpenSshTerminal();
+        effectiveEngine = "openssh";
+        usedCompatibilityFallback = true;
+        updateSession(session.id, { engine: "openssh" });
+      } finally {
+        setNativeTerminalStartingIds((current) => current.filter((sessionId) => sessionId !== session.id));
+      }
+      if (effectiveEngine === "russh"
+        && (!result || result.schemaVersion !== 1 || result.engine !== "russh" || result.sessionId !== session.id)) {
+        await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+        throw new Error("原生终端返回了不受支持的会话结果");
+      }
+      if (effectiveEngine === "russh") authenticatedConnection = result?.connection;
+    } else if (session.engine === "mosh") {
+      if (host.jumpRoute?.length) {
+        throw new Error("Mosh 是直连 UDP 交互模式，不支持跳板路线");
+      }
+      const result = await invoke<MoshTerminalStartResult>("start_mosh_session", {
+        hostId: host.id,
+        initialPath: session.currentPath,
+        request: {
+          sessionId: session.id,
+          host: host.host,
+          port: host.port,
+          username: host.username,
+          identityFile: host.identityFile,
+          credentialRef: host.credentialRef,
+          identityPassphraseRef,
+          cols: 120,
+          rows: 32,
+          udpPortStart: 60000,
+          udpPortEnd: 61000,
+        },
+      });
+      if (result.schemaVersion !== 1 || result.engine !== "mosh" || result.sessionId !== session.id) {
+        await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+        throw new Error("Mosh 返回了不受支持的会话结果");
+      }
+      authenticatedConnection = result.connection;
+    } else {
+      authenticatedConnection = await startOpenSshTerminal();
+    }
+    if (!authenticatedConnection) {
+      await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
+      throw new Error("连接成功但未返回 Rust 认证记录");
+    }
     updateSession(session.id, { state: "connected" });
     setAppState((current) => ({
       ...current,
-      connectionHistory: [{
-        id: crypto.randomUUID(),
-        hostId: host.id,
-        connectedAt: new Date().toISOString(),
-        path: session.currentPath,
-      }, ...(current.connectionHistory ?? [])],
+      connectionHistory: [authenticatedConnection, ...(current.connectionHistory ?? [])].slice(0, 10_000),
     }));
-    showToast(`已连接 ${host.name}`);
+    const engineLabel = effectiveEngine === "russh"
+      ? "原生 russh"
+      : effectiveEngine === "mosh"
+        ? "Mosh"
+        : usedCompatibilityFallback ? "OpenSSH 兼容回退" : "OpenSSH";
+    showToast(`已通过 ${engineLabel} 连接 ${host.name}`);
   }
 
   async function connectActiveSession() {
@@ -753,6 +1409,16 @@ function App() {
     }
     updateSession(activeSession.id, { state: "connecting" });
     try {
+      if (!isAndroidRuntime() && activeHost.jumpRoute?.length) {
+        if (activeSession.engine !== "russh") {
+          throw new Error("已配置的跳板路线只能通过原生 russh 引擎连接");
+        }
+        if (!activeHost.hostKeySha256) {
+          throw new Error("跳板路线的目标主机需要预先保存 SHA256 主机指纹");
+        }
+        await startSshSession(activeSession, activeHost, activeHost.hostKeySha256);
+        return;
+      }
       const inspection: HostKeyInspection = isAndroidRuntime()
         ? await invoke<HostKeyInspection>("android_inspect_host_key", {
           host: activeHost.host,
@@ -779,10 +1445,18 @@ function App() {
       if (inspection.status !== "verified") {
         throw new Error("无法验证 SSH 主机指纹，已拒绝连接");
       }
-      await startSshSession(activeSession, activeHost);
+      if (!isAndroidRuntime() && activeHost.hostKeySha256 !== inspection.fingerprint) {
+        setAppState((current) => ({
+          ...current,
+          hosts: current.hosts.map((host) => host.id === activeHost.id
+            ? { ...host, hostKeySha256: inspection.fingerprint }
+            : host),
+        }));
+      }
+      await startSshSession(activeSession, activeHost, inspection.fingerprint);
     } catch (error) {
       updateSession(activeSession.id, { state: "error" });
-      showToast(String(error));
+      showToast(invokeErrorMessage(error));
     }
   }
 
@@ -798,6 +1472,243 @@ function App() {
       await invoke("stop_terminal", { sessionId: activeSession.id }).catch((error) => showToast(String(error)));
     }
     updateSession(activeSession.id, { state: "closed" });
+  }
+
+  async function cancelNativeTerminalStart() {
+    if (!nativeTerminalStartingIds.includes(activeSession.id)) return;
+    try {
+      await invoke("cancel_native_engine_operation", { operationId: activeSession.id });
+      showToast("正在取消原生终端连接");
+    } catch (error) {
+      showToast(invokeErrorMessage(error));
+    }
+  }
+
+  async function probeNativeEngine() {
+    if (nativeProbeOperationId) {
+      const operationId = nativeProbeOperationId;
+      try {
+        await invoke("cancel_native_engine_operation", { operationId });
+        showToast("正在取消原生引擎检查");
+      } catch (error) {
+        showToast(invokeErrorMessage(error));
+      }
+      return;
+    }
+    if (nativeProbeInspecting || !hasActiveHost || !isDesktopRuntime()) return;
+    if (!activeHost.identityFile && !activeHost.credentialRef) {
+      showToast("原生引擎检查目前需要已保存的密码或显式私钥；该主机继续使用系统 OpenSSH");
+      return;
+    }
+    const operationId = crypto.randomUUID();
+    setNativeProbeInspecting(true);
+    try {
+      let targetHostKeySha256 = activeHost.hostKeySha256;
+      if (!activeHost.jumpRoute?.length) {
+        const inspection = await invoke<HostKeyInspection>("inspect_host_key", {
+          request: { host: activeHost.host, port: activeHost.port },
+        });
+        if (inspection.status === "unknown") {
+          throw new Error("请先通过正常连接流程核验并保存主机指纹");
+        }
+        if (inspection.status === "changed") {
+          throw new Error(`主机指纹与本机记录不一致，原生检查已拒绝：${inspection.fingerprint}`);
+        }
+        if (inspection.status !== "verified") {
+          throw new Error("无法验证 SSH 主机指纹，原生检查已拒绝");
+        }
+        targetHostKeySha256 = inspection.fingerprint;
+      }
+      if (!targetHostKeySha256) {
+        throw new Error("跳板路线的目标主机需要预先保存 SHA256 主机指纹");
+      }
+      setNativeProbeInspecting(false);
+      setNativeProbeOperationId(operationId);
+      const result = await invoke<NativeEngineProbeResult>("native_engine_probe", {
+        request: {
+          operationId,
+          route: nativeRoute(activeHost, appState.hosts, appState.sshKeys, targetHostKeySha256),
+        },
+      });
+      if (result.schemaVersion !== 1 || result.engine !== "russh" || !result.sshReady || !result.sftpReady) {
+        throw new Error("原生引擎返回了不受支持的检查结果");
+      }
+      showToast(`${activeHost.name} 的原生 SSH/SFTP 检查通过`);
+    } catch (error) {
+      showToast(invokeErrorMessage(error));
+    } finally {
+      setNativeProbeInspecting(false);
+      setNativeProbeOperationId((current) => current === operationId ? null : current);
+    }
+  }
+
+  async function refreshNativeForwards() {
+    if (!isDesktopRuntime()) return;
+    try {
+      const [localForwards, remoteForwards, dynamicForwards] = await Promise.all([
+        invoke<NativeLocalForwardSnapshot[]>("list_native_local_forwards"),
+        invoke<NativeRemoteForwardSnapshot[]>("list_native_remote_forwards"),
+        invoke<NativeDynamicForwardSnapshot[]>("list_native_dynamic_forwards"),
+      ]);
+      setNativeLocalForwards(localForwards);
+      setNativeRemoteForwards(remoteForwards);
+      setNativeDynamicForwards(dynamicForwards);
+      setNativeLocalForwardError(null);
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    }
+  }
+
+  async function startNativeLocalForward(form: HTMLFormElement) {
+    if (!hasActiveHost || nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    const data = new FormData(form);
+    const bindPort = Number(data.get("bindPort"));
+    const targetHost = String(data.get("targetHost") ?? "").trim();
+    const targetPort = Number(data.get("targetPort"));
+    if (!Number.isInteger(bindPort) || bindPort < 0 || bindPort > 65_535) {
+      setNativeLocalForwardError("本地端口必须在 0 到 65535 之间");
+      return;
+    }
+    if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65_535) {
+      setNativeLocalForwardError("请填写有效的目标地址和端口");
+      return;
+    }
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      const forward = await invoke<NativeLocalForwardSnapshot>("start_native_local_forward", {
+        request: {
+          forwardId: crypto.randomUUID(),
+          route: nativeRoute(activeHost, appState.hosts, appState.sshKeys),
+          bindPort,
+          targetHost,
+          targetPort,
+        },
+      });
+      setNativeLocalForwards((current) => [
+        forward,
+        ...current.filter((item) => item.forwardId !== forward.forwardId),
+      ]);
+      form.reset();
+      showToast(`本地转发已监听 ${forward.bindHost}:${forward.bindPort}`);
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function stopNativeLocalForward(forwardId: string) {
+    if (nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      await invoke("stop_native_local_forward", { forwardId });
+      showToast("正在停止本地转发");
+      await refreshNativeForwards();
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function startNativeRemoteForward(form: HTMLFormElement) {
+    if (!hasActiveHost || nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    const data = new FormData(form);
+    const bindPort = Number(data.get("bindPort"));
+    const targetPort = Number(data.get("targetPort"));
+    if (!Number.isInteger(bindPort) || bindPort < 0 || bindPort > 65_535) {
+      setNativeLocalForwardError("远端端口必须在 0 到 65535 之间");
+      return;
+    }
+    if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65_535) {
+      setNativeLocalForwardError("本机目标端口必须在 1 到 65535 之间");
+      return;
+    }
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      const forward = await invoke<NativeRemoteForwardSnapshot>("start_native_remote_forward", {
+        request: {
+          forwardId: crypto.randomUUID(),
+          route: nativeRoute(activeHost, appState.hosts, appState.sshKeys),
+          bindPort,
+          targetPort,
+        },
+      });
+      setNativeRemoteForwards((current) => [
+        forward,
+        ...current.filter((item) => item.forwardId !== forward.forwardId),
+      ]);
+      form.reset();
+      showToast(`远端转发已监听 ${forward.bindHost}:${forward.bindPort}`);
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function stopNativeRemoteForward(forwardId: string) {
+    if (nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      await invoke("stop_native_remote_forward", { forwardId });
+      showToast("正在停止远端转发");
+      await refreshNativeForwards();
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function startNativeDynamicForward(form: HTMLFormElement) {
+    if (!hasActiveHost || nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    const data = new FormData(form);
+    const bindPort = Number(data.get("bindPort"));
+    if (!Number.isInteger(bindPort) || bindPort < 0 || bindPort > 65_535) {
+      setNativeLocalForwardError("SOCKS 端口必须在 0 到 65535 之间");
+      return;
+    }
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      const forward = await invoke<NativeDynamicForwardSnapshot>("start_native_dynamic_forward", {
+        request: {
+          forwardId: crypto.randomUUID(),
+          route: nativeRoute(activeHost, appState.hosts, appState.sshKeys),
+          bindPort,
+        },
+      });
+      setNativeDynamicForwards((current) => [
+        forward,
+        ...current.filter((item) => item.forwardId !== forward.forwardId),
+      ]);
+      form.reset();
+      showToast(`SOCKS5 已监听 ${forward.bindHost}:${forward.bindPort}`);
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
+  }
+
+  async function stopNativeDynamicForward(forwardId: string) {
+    if (nativeLocalForwardBusy || !isDesktopRuntime()) return;
+    setNativeLocalForwardBusy(true);
+    setNativeLocalForwardError(null);
+    try {
+      await invoke("stop_native_dynamic_forward", { forwardId });
+      showToast("正在停止 SOCKS5 转发");
+      await refreshNativeForwards();
+    } catch (error) {
+      setNativeLocalForwardError(invokeErrorMessage(error));
+    } finally {
+      setNativeLocalForwardBusy(false);
+    }
   }
 
   async function trustPendingHostKey() {
@@ -819,6 +1730,12 @@ function App() {
           request: { host: pending.host, port: pending.port },
           expectedFingerprint: pending.fingerprint,
         });
+        setAppState((current) => ({
+          ...current,
+          hosts: current.hosts.map((host) => host.id === pending.hostId
+            ? { ...host, hostKeySha256: pending.fingerprint }
+            : host),
+        }));
       }
       setPendingHostKey(null);
       setDialog(null);
@@ -831,11 +1748,12 @@ function App() {
       showToast("主机指纹已保存，正在连接");
       await startSshSession(
         session,
-        isAndroidRuntime() ? { ...host, hostKeySha256: pending.fingerprint } : host,
+        { ...host, hostKeySha256: pending.fingerprint },
+        pending.fingerprint,
       );
     } catch (error) {
       updateSession(pending.sessionId, { state: "error" });
-      showToast(String(error));
+      showToast(invokeErrorMessage(error));
     } finally {
       setTrustingHostKey(false);
     }
@@ -865,8 +1783,8 @@ function App() {
     setAppState((current) => ({
       ...current,
       commandHistory: [
-        ...targetSessions.map((session, index) => ({
-          id: `history-${Date.now()}-${index}`,
+        ...targetSessions.map((session) => ({
+          id: crypto.randomUUID(),
           command,
           hostId: session.hostId,
           path: session.currentPath,
@@ -927,8 +1845,8 @@ function App() {
         setAppState((current) => ({
           ...current,
           commandHistory: [
-            ...sessions.filter((session) => successfulIds.includes(session.id)).map((session, index) => ({
-              id: `history-${Date.now()}-${index}`,
+            ...sessions.filter((session) => successfulIds.includes(session.id)).map((session) => ({
+              id: crypto.randomUUID(),
               command: broadcastPreview.command,
               hostId: session.hostId,
               path: session.currentPath,
@@ -974,7 +1892,14 @@ function App() {
       return;
     }
     setSelectedCommand(command);
-    setCommandParameters(Object.fromEntries((command.parameters ?? []).map((parameter) => [parameter.name, parameter.defaultValue ?? ""])));
+    setCommandParameters(Object.fromEntries((command.parameters ?? []).map((parameter) => {
+      const recent = isSensitiveCommandParameter(parameter)
+        ? undefined
+        : appState.parameterHistory.find((item) =>
+            item.commandId === command.id && item.parameterName === parameter.name
+          );
+      return [parameter.name, recent?.value ?? parameter.defaultValue ?? ""];
+    })));
     setDialog("command");
   }
 
@@ -984,6 +1909,34 @@ function App() {
       value = value.split(`{{${parameter.name}}}`).join(shellQuote(commandParameters[parameter.name]?.trim() ?? ""));
     }
     return value;
+  }
+
+  function rememberCommandParameters(command: CommandRecipe) {
+    const createdAt = new Date().toISOString();
+    const additions = (command.parameters ?? []).flatMap((parameter) => {
+      const value = commandParameters[parameter.name]?.trim() ?? "";
+      if (!value || isSensitiveCommandParameter(parameter)) return [];
+      return [{
+        id: crypto.randomUUID(),
+        commandId: command.id,
+        parameterName: parameter.name,
+        value,
+        createdAt,
+      }];
+    });
+    if (additions.length === 0) return;
+    setAppState((current) => {
+      const replaced = new Set(additions.map((item) => `${item.commandId}\0${item.parameterName}\0${item.value}`));
+      return {
+        ...current,
+        parameterHistory: [
+          ...additions,
+          ...current.parameterHistory.filter((item) =>
+            !replaced.has(`${item.commandId}\0${item.parameterName}\0${item.value}`)
+          ),
+        ].slice(0, MAX_PARAMETER_HISTORY),
+      };
+    });
   }
 
   function chooseIntent(suggestion: IntentSuggestion) {
@@ -1088,6 +2041,10 @@ function App() {
       credentialRef,
       androidKeyRef,
       androidKeyPassphraseRef,
+      hostKeySha256: String(data.get("hostKeySha256") || "") || undefined,
+      jumpRoute: String(data.get("jumpHostId") || "")
+        ? [String(data.get("jumpHostId"))]
+        : undefined,
       tags: [],
       lastPath: "~",
     };
@@ -1098,6 +2055,13 @@ function App() {
   }
 
   async function deleteHost(host: HostProfile) {
+    const routeDependents = appState.hosts.filter(
+      (candidate) => candidate.id !== host.id && candidate.jumpRoute?.includes(host.id),
+    );
+    if (routeDependents.length) {
+      showToast(`该主机仍被 ${routeDependents.length} 条跳板路线引用，不能删除`);
+      return;
+    }
     const confirmed = window.confirm(
       `确定将主机“${host.name}”（${host.username}@${host.host}:${host.port}）移到回收站吗？\n\n相关连接记录和命令/路径历史将一并保留 30 天，可在回收站恢复。`,
     );
@@ -1246,11 +2210,35 @@ function App() {
       setRenderedWallpaper(asset.dataUrl);
       setAppState((current) => ({
         ...current,
-        wallpaper: { ...current.wallpaper, source: "local", value: asset.label },
+        wallpaper: {
+          ...current.wallpaper,
+          source: "local",
+          value: asset.label,
+          managedBlobId: asset.managedBlobId ?? undefined,
+        },
       }));
       showToast(`已启用本机壁纸 ${asset.label}`);
     } catch (error) {
       showToast(`壁纸安装失败：${String(error)}`);
+    }
+  }
+
+  async function chooseWebDavCa() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        title: "选择 WebDAV CA 证书",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "PEM 证书", extensions: ["pem", "crt"] }],
+      });
+      if (typeof selected !== "string") return;
+      const parts = selected.split(/[\\/]/);
+      setWebDavCaPath(selected);
+      setWebDavCaLabel(parts[parts.length - 1] || "已选择证书");
+      setWebDavUseSystemCa(false);
+    } catch (error) {
+      showToast(`选择 WebDAV CA 失败：${String(error)}`);
     }
   }
 
@@ -1260,6 +2248,13 @@ function App() {
         request: { source: "url", value: appState.wallpaper.value.trim() },
       });
       setRenderedWallpaper(asset.dataUrl);
+      setAppState((current) => ({
+        ...current,
+        wallpaper: {
+          ...current.wallpaper,
+          managedBlobId: asset.managedBlobId ?? undefined,
+        },
+      }));
       showToast("HTTPS 壁纸已由 Rust 下载并缓存");
     } catch (error) {
       showToast(`壁纸下载失败：${String(error)}`);
@@ -1303,21 +2298,414 @@ function App() {
     }
   }
 
-  function saveSyncSettings() {
+  async function configureDesktopSync() {
+    if (appState.sync.provider !== "sftp" && !appState.sync.endpoint.trim()) {
+      showToast(appState.sync.provider === "local" ? "请输入已存在的同步目录" : "请输入 HTTPS endpoint");
+      return;
+    }
+    const sftpHost = appState.sync.provider === "sftp"
+      ? appState.hosts.find((host) => host.id === appState.sync.providerHostId)
+      : undefined;
+    if (appState.sync.provider === "sftp" && !sftpHost) {
+      showToast("请选择一台已保存的 SFTP 同步主机");
+      return;
+    }
+    if (sftpHost && !sftpHost.hostKeySha256) {
+      showToast("SFTP 同步主机必须先核验并保存 SHA256 主机指纹");
+      return;
+    }
+    if (appState.sync.provider === "sftp" && !appState.sync.remotePath.trim()) {
+      showToast("请输入已存在的 SFTP 同步根目录");
+      return;
+    }
+    if (appState.sync.provider === "s3" && (!appState.sync.s3Region.trim() || !appState.sync.s3Bucket.trim())) {
+      showToast("请输入 S3 region 与 bucket");
+      return;
+    }
+    if (appState.sync.provider === "gateway" && (!appState.sync.gatewayVaultId.trim() || !appState.sync.username.trim())) {
+      showToast("请输入 Gateway vault ID 与用户名");
+      return;
+    }
+    if (appState.sync.provider === "gateway" && appState.sync.totpEnabled && !/^\d{6}$/.test(gatewayTotp)) {
+      showToast("请输入当前 6 位 TOTP");
+      return;
+    }
     if (!syncPassword) {
       showToast("请输入二级同步密码");
       return;
     }
-    setAppState((current) => ({
+    setDesktopSyncBusy(true);
+    let createdCredentialRef: string | undefined;
+    let createdCaRef: string | undefined;
+    try {
+      const provider = appState.sync.provider;
+      const username = appState.sync.username.trim();
+      if (provider === "webdav" && webDavPassword && !username) {
+        throw new Error("保存 WebDAV 密码前必须填写用户名");
+      }
+      if (provider === "webdav" && webDavPassword) {
+        createdCredentialRef = await invoke<string>("store_webdav_credential", {
+          request: { password: webDavPassword },
+        });
+      }
+      const hasNewS3Credential = Boolean(s3AccessKeyId || s3SecretAccessKey || s3SessionToken);
+      if (provider === "s3" && hasNewS3Credential && (!s3AccessKeyId || !s3SecretAccessKey)) {
+        throw new Error("S3 Access Key ID 与 Secret Access Key 必须同时填写");
+      }
+      if (provider === "s3" && hasNewS3Credential) {
+        createdCredentialRef = await invoke<string>("store_s3_credential", {
+          request: {
+            accessKeyId: s3AccessKeyId,
+            secretAccessKey: s3SecretAccessKey,
+            sessionToken: s3SessionToken || undefined,
+          },
+        });
+      }
+      if (provider === "gateway" && gatewayPassword) {
+        createdCredentialRef = await invoke<string>("store_gateway_credential", {
+          request: { password: gatewayPassword },
+        });
+      }
+      if ((provider === "webdav" || provider === "s3" || provider === "gateway") && webDavCaPath) {
+        createdCaRef = await invoke<string>("install_webdav_ca", {
+          request: { path: webDavCaPath },
+        });
+      }
+      const savedProviderCredentialRef = provider === "webdav"
+        ? (appState.sync.providerCredentialRef?.startsWith("sync-webdav-") ? appState.sync.providerCredentialRef : undefined)
+        : provider === "s3"
+          ? (appState.sync.providerCredentialRef?.startsWith("sync-s3-") ? appState.sync.providerCredentialRef : undefined)
+          : provider === "gateway"
+            ? (appState.sync.providerCredentialRef?.startsWith("sync-gateway-") ? appState.sync.providerCredentialRef : undefined)
+            : undefined;
+      const providerCredentialRef = provider === "webdav"
+        ? (username ? createdCredentialRef ?? savedProviderCredentialRef : undefined)
+        : provider === "s3"
+          ? createdCredentialRef ?? savedProviderCredentialRef
+          : provider === "gateway"
+            ? createdCredentialRef ?? savedProviderCredentialRef
+            : undefined;
+      const providerCaRef = provider === "webdav" || provider === "s3" || provider === "gateway"
+        ? createdCaRef ?? (webDavUseSystemCa ? undefined : appState.sync.providerCaRef)
+        : undefined;
+      if (provider === "webdav" && Boolean(username) !== Boolean(providerCredentialRef)) {
+        throw new Error("WebDAV 用户名需要对应的已保存密码");
+      }
+      if (provider === "s3" && !providerCredentialRef) {
+        throw new Error("S3 配置需要系统凭据管理器中的访问密钥");
+      }
+      if (provider === "gateway" && !providerCredentialRef) {
+        throw new Error("Gateway 配置需要系统凭据管理器中的登录密码");
+      }
+      const status = provider === "local"
+        ? await invoke<SyncCoordinatorStatus>("configure_local_folder_sync", {
+          request: {
+            rootPath: appState.sync.endpoint.trim(),
+            password: syncPassword,
+            mode: syncSetupMode,
+          },
+        })
+        : provider === "webdav"
+          ? await invoke<SyncCoordinatorStatus>("configure_webdav_sync", {
+          request: {
+            endpoint: appState.sync.endpoint.trim(),
+            username,
+            providerCredentialRef,
+            providerCaRef,
+            password: syncPassword,
+            mode: syncSetupMode,
+          },
+          })
+          : provider === "sftp"
+            ? await invoke<SyncCoordinatorStatus>("configure_sftp_sync", {
+              request: {
+                hostId: sftpHost?.id,
+                rootPath: appState.sync.remotePath.trim(),
+                password: syncPassword,
+                mode: syncSetupMode,
+              },
+            })
+            : provider === "s3"
+              ? await invoke<SyncCoordinatorStatus>("configure_s3_sync", {
+                request: {
+                  endpoint: appState.sync.endpoint.trim(),
+                  region: appState.sync.s3Region.trim(),
+                  bucket: appState.sync.s3Bucket.trim(),
+                  prefix: appState.sync.s3Prefix.trim(),
+                  pathStyle: appState.sync.s3PathStyle,
+                  providerCredentialRef,
+                  providerCaRef,
+                  password: syncPassword,
+                  mode: syncSetupMode,
+                },
+              })
+              : await invoke<SyncCoordinatorStatus>("configure_gateway_sync", {
+                request: {
+                  endpoint: appState.sync.endpoint.trim(),
+                  gatewayVaultId: appState.sync.gatewayVaultId.trim(),
+                  username,
+                  providerCredentialRef,
+                  providerCaRef,
+                  totp: appState.sync.totpEnabled ? gatewayTotp : undefined,
+                  password: syncPassword,
+                  mode: syncSetupMode,
+                },
+              });
+      setDesktopSyncStatus(status);
+      setDesktopSyncError(null);
+      setAppState((current) => ({
+        ...current,
+        sync: {
+          ...current.sync,
+          enabled: true,
+          provider,
+          username,
+          providerHostId: provider === "sftp" ? sftpHost?.id : current.sync.providerHostId,
+          providerCredentialRef: provider === "webdav" || provider === "s3" || provider === "gateway"
+            ? providerCredentialRef
+            : current.sync.providerCredentialRef,
+          providerCaRef: provider === "webdav" || provider === "s3" || provider === "gateway"
+            ? providerCaRef
+            : current.sync.providerCaRef,
+        },
+      }));
+      createdCredentialRef = undefined;
+      createdCaRef = undefined;
+      setSyncPassword("");
+      setWebDavPassword("");
+      setWebDavCaPath("");
+      setWebDavCaLabel("");
+      setWebDavUseSystemCa(false);
+      setS3AccessKeyId("");
+      setS3SecretAccessKey("");
+      setS3SessionToken("");
+      setGatewayPassword("");
+      setGatewayTotp("");
+      showToast(syncSetupMode === "initialize" ? "同步 vault 已初始化并解锁" : "同步 vault 已解锁");
+    } catch (error) {
+      if (createdCredentialRef) {
+        await invoke("delete_credential", { reference: createdCredentialRef }).catch(() => undefined);
+      }
+      if (createdCaRef) {
+        await invoke("delete_webdav_ca", { reference: createdCaRef }).catch(() => undefined);
+      }
+      const message = invokeErrorMessage(error);
+      setDesktopSyncError(message);
+      showToast(`同步配置失败：${message}`);
+    } finally {
+      setDesktopSyncBusy(false);
+    }
+  }
+
+  async function runDesktopSyncOnce() {
+    if (appStoreStatus.saving) {
+      showToast("请等待本地状态保存完成后再同步");
+      return;
+    }
+    setDesktopSyncBusy(true);
+    try {
+      const result = await invoke<SyncCycleResult>("run_sync_once");
+      const status = result.status;
+      if (!applyAppStoreSnapshot(result.appStore)) {
+        throw new Error("本地状态仍有未提交更改；Rust 快照未覆盖当前编辑");
+      }
+      setDesktopSyncStatus(status);
+      setDesktopSyncError(null);
+      if (status.lastErrorCode) {
+        throw new Error(status.lastErrorCode);
+      }
+      showToast(`同步周期完成：上传 ${status.lastUploadedObjects}，下载 ${status.lastDownloadedObjects}`);
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setDesktopSyncError(message);
+      showToast(`同步失败：${message}`);
+      await refreshDesktopSyncStatus();
+    } finally {
+      setDesktopSyncBusy(false);
+    }
+  }
+
+  async function resolveSyncConflict(conflictId: string, alternativeIndex: number) {
+    if (!syncConflictCenter || appStoreStatus.saving || desktopSyncStatus?.running) {
+      showToast("请等待当前本地保存或同步任务完成");
+      return;
+    }
+    setResolvingConflictId(conflictId);
+    try {
+      const result = await invoke<SyncCycleResult>("resolve_sync_conflict", {
+        request: {
+          expectedRevision: syncConflictCenter.mergeRevision,
+          conflictId,
+          alternativeIndex,
+        },
+      });
+      const applied = applyAppStoreSnapshot(result.appStore);
+      setDesktopSyncStatus(result.status);
+      setDesktopSyncError(result.status.lastErrorCode ?? (applied ? null : "local-state-busy"));
+      showToast(
+        result.status.lastErrorCode
+          ? "同步冲突已解决并入队；本地投影将在下一周期重试"
+          : applied
+          ? "同步冲突已解决并加入加密发布队列"
+          : "同步冲突已解决；当前未提交编辑保留，稍后刷新本地视图",
+      );
+      await refreshSyncConflicts(syncConflictOffset);
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncConflictError(message);
+      showToast(`冲突解决失败：${message}`);
+      await refreshDesktopSyncStatus();
+      await refreshSyncConflicts(syncConflictOffset);
+    } finally {
+      setResolvingConflictId(null);
+    }
+  }
+
+  function applySyncDeviceSnapshot(snapshot: SyncDeviceRegistrySnapshot) {
+    setSyncDevices(snapshot);
+    setSyncDeviceLabels(Object.fromEntries(snapshot.devices.map((device) => [device.deviceId, device.label])));
+    setDesktopSyncStatus((current) => current ? {
       ...current,
-      sync: { ...current.sync, enabled: false, lastSyncedAt: undefined },
-    }));
-    setSyncPassword("");
-    setDialog(null);
-    showToast("同步配置草稿已保存；同步后端尚未启用");
+      deviceRegistryRevision: snapshot.revision,
+      localDeviceAuthorized: snapshot.devices.some((device) => (
+        device.deviceId === snapshot.localDeviceId && device.status.state === "active"
+      )),
+      keyRotationRequired: snapshot.devices.some((device) => device.status.state === "revoked"),
+    } : current);
+    setSyncDeviceError(null);
+  }
+
+  async function createSyncDeviceEnrollment() {
+    setSyncDeviceBusy(true);
+    try {
+      const enrollment = await invoke<SyncDeviceEnrollmentResponse>("create_sync_device_enrollment", {
+        request: { label: syncDeviceLabel.trim() },
+      });
+      setSyncEnrollment(enrollment);
+      setSyncDeviceError(null);
+      showToast("设备登记请求已生成");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncDeviceError(message);
+      showToast(`生成登记请求失败：${message}`);
+    } finally {
+      setSyncDeviceBusy(false);
+    }
+  }
+
+  async function approveSyncDeviceEnrollment() {
+    if (!syncDevices) return;
+    setSyncDeviceBusy(true);
+    try {
+      const snapshot = await invoke<SyncDeviceRegistrySnapshot>("approve_sync_device_enrollment", {
+        request: {
+          expectedRevision: syncDevices.revision,
+          enrollmentRequest: syncEnrollmentApproval.trim(),
+        },
+      });
+      applySyncDeviceSnapshot(snapshot);
+      setSyncEnrollmentApproval("");
+      showToast("新同步设备已登记");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncDeviceError(message);
+      showToast(`批准登记失败：${message}`);
+    } finally {
+      setSyncDeviceBusy(false);
+    }
+  }
+
+  async function renameSyncDevice(device: SyncDeviceRecord) {
+    if (!syncDevices) return;
+    setSyncDeviceBusy(true);
+    try {
+      const snapshot = await invoke<SyncDeviceRegistrySnapshot>("rename_sync_device", {
+        request: {
+          expectedRevision: syncDevices.revision,
+          deviceId: device.deviceId,
+          label: (syncDeviceLabels[device.deviceId] ?? device.label).trim(),
+        },
+      });
+      applySyncDeviceSnapshot(snapshot);
+      showToast("同步设备名称已更新");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncDeviceError(message);
+      showToast(`更新设备名称失败：${message}`);
+    } finally {
+      setSyncDeviceBusy(false);
+    }
+  }
+
+  async function revokeSyncDevice(device: SyncDeviceRecord) {
+    if (!syncDevices || !window.confirm(`永久撤销“${device.label}”的同步授权吗？此操作不能撤销。`)) return;
+    setSyncDeviceBusy(true);
+    try {
+      const snapshot = await invoke<SyncDeviceRegistrySnapshot>("revoke_sync_device", {
+        request: {
+          expectedRevision: syncDevices.revision,
+          deviceId: device.deviceId,
+          reason: syncRevocationReason,
+        },
+      });
+      applySyncDeviceSnapshot(snapshot);
+      showToast("同步设备已永久撤销；请轮换 vault 密钥");
+    } catch (error) {
+      const message = invokeErrorMessage(error);
+      setSyncDeviceError(message);
+      showToast(`撤销设备失败：${message}`);
+    } finally {
+      setSyncDeviceBusy(false);
+    }
+  }
+
+  async function cancelDesktopSync() {
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("cancel_sync");
+      setDesktopSyncStatus(status);
+      showToast("已请求取消同步");
+    } catch (error) {
+      showToast(`取消同步失败：${invokeErrorMessage(error)}`);
+    }
+  }
+
+  async function lockDesktopSync() {
+    setDesktopSyncBusy(true);
+    try {
+      const status = await invoke<SyncCoordinatorStatus>("lock_sync");
+      setDesktopSyncStatus(status);
+      setDesktopSyncError(null);
+      setSyncConflictCenter(null);
+      setSyncConflictError(null);
+      setSyncConflictOffset(0);
+      setSyncDevices(null);
+      setSyncDeviceError(null);
+      setSyncEnrollment(null);
+      setSyncEnrollmentApproval("");
+      setSyncPassword("");
+      setWebDavPassword("");
+      setWebDavCaPath("");
+      setWebDavCaLabel("");
+      setWebDavUseSystemCa(false);
+      setAppState((current) => ({
+        ...current,
+        sync: { ...current.sync, enabled: false },
+      }));
+      showToast("同步 vault 已锁定");
+    } catch (error) {
+      showToast(`锁定同步失败：${invokeErrorMessage(error)}`);
+    } finally {
+      setDesktopSyncBusy(false);
+    }
   }
 
   const currentPathHistory = appState.pathHistory[activeHost.id] ?? [];
+  const activeJumpHosts = (activeHost.jumpRoute ?? [])
+    .map((hostId) => appState.hosts.find((host) => host.id === hostId))
+    .filter((host): host is HostProfile => Boolean(host));
+  const activeRouteLabel = activeJumpHosts.length
+    ? activeJumpHosts.map((host) => host.name).join(" > ")
+    : "直连";
 
   return (
     <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
@@ -1332,15 +2720,41 @@ function App() {
         <div className="topbar-right">
           <div className="topbar-actions">
             <button
-              className={`sync-status ${appState.sync.enabled ? "is-synced" : ""}`}
+              className={`sync-status ${(isAndroidRuntime() ? androidSyncStatus?.phase === "idle" : desktopSyncStatus?.phase === "idle") ? "is-synced" : ""}`}
               type="button"
               onClick={() => setDialog("sync")}
             >
-              {appState.sync.enabled ? <Cloud size={15} /> : <CloudOff size={15} />}
-              <span>{appState.sync.enabled ? relativeTime(appState.sync.lastSyncedAt) : appState.sync.endpoint ? "同步后端未启用" : "同步未配置"}</span>
+              {(isAndroidRuntime() ? androidSyncStatus?.configured : desktopSyncStatus?.configured) ? <Cloud size={15} /> : <CloudOff size={15} />}
+              <span>{isAndroidRuntime()
+                ? androidSyncError ? "同步状态不可用" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取同步状态"
+                : desktopSyncError ? "同步状态不可用" : desktopSyncStatus ? syncPhaseLabels[desktopSyncStatus.phase] : "正在读取同步状态"}</span>
             </button>
-            <span className="route-status"><Route size={15} /> 路线：直连</span>
+            <span className="route-status"><Route size={15} /> 路线：{activeRouteLabel}</span>
             <button className="icon-button" type="button" title="网络诊断" aria-label="网络诊断" onClick={() => { setNetworkMode("trace"); setDialog("network"); }}><Network size={17} /></button>
+            {isDesktopRuntime() ? (
+              <button
+                className={`icon-button ${nativeLocalForwards.length + nativeRemoteForwards.length + nativeDynamicForwards.length ? "forward-active" : ""}`}
+                type="button"
+                title={`端口转发（本地 ${nativeLocalForwards.length} · 远端 ${nativeRemoteForwards.length} · SOCKS ${nativeDynamicForwards.length}）`}
+                aria-label={`端口转发（本地 ${nativeLocalForwards.length} · 远端 ${nativeRemoteForwards.length} · SOCKS ${nativeDynamicForwards.length}）`}
+                disabled={!hasActiveHost}
+                onClick={() => setDialog("local-forward")}
+              >
+                <Cable size={17} />
+              </button>
+            ) : null}
+            {isDesktopRuntime() ? (
+              <button
+                className="icon-button"
+                type="button"
+                title={nativeProbeOperationId ? "取消原生引擎检查" : nativeProbeInspecting ? "正在核验主机指纹" : "检查原生 SSH/SFTP 引擎"}
+                aria-label={nativeProbeOperationId ? "取消原生引擎检查" : nativeProbeInspecting ? "正在核验主机指纹" : "检查原生 SSH/SFTP 引擎"}
+                disabled={!hasActiveHost || nativeProbeInspecting}
+                onClick={() => void probeNativeEngine()}
+              >
+                {nativeProbeOperationId ? <X size={17} /> : <ShieldCheck size={17} />}
+              </button>
+            ) : null}
             <button className="icon-button" type="button" title="SSH 密钥" aria-label="SSH 密钥" onClick={() => setDialog("key-manager")}><KeyRound size={17} /></button>
             <button className="icon-button" type="button" title="终端外观" aria-label="终端外观" onClick={() => setDialog("wallpaper")}><Image size={17} /></button>
             <button className="icon-button" type="button" title="使用指南" aria-label="使用指南" onClick={() => setDialog("guide")}><CircleHelp size={17} /></button>
@@ -1489,6 +2903,24 @@ function App() {
 
             {sidebarView === "history" ? (
               <div className="history-list">
+                {appState.commandHistory.length > 0 ? (
+                  <div className="group-title">
+                    <History size={13} />
+                    <span>命令历史</span>
+                    <button
+                      type="button"
+                      title="清空命令历史"
+                      aria-label="清空命令历史"
+                      onClick={() => {
+                        if (window.confirm("清空全部命令历史吗？此变更会同步到其他设备。")) {
+                          setAppState((current) => ({ ...current, commandHistory: [] }));
+                        }
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ) : null}
                 {appState.commandHistory.filter((item) => !searchText || item.command.toLocaleLowerCase().includes(searchText.toLocaleLowerCase())).map((item) => (
                   <button className="history-row" type="button" key={item.id} onClick={() => setCommandInput(item.command)}>
                     <Command size={14} />
@@ -1570,6 +3002,13 @@ function App() {
             <span className="route-node local">本机</span>
             {hasActiveHost ? (
               <>
+                {activeJumpHosts.map((jumpHost) => (
+                  <span className="identity-breadcrumb-segment" key={jumpHost.id}>
+                    <ChevronRight size={14} />
+                    <strong className="route-node jump">{jumpHost.name}</strong>
+                    <code>{jumpHost.username}@{jumpHost.host}</code>
+                  </span>
+                ))}
                 <ChevronRight size={14} />
                 <strong className={`route-node current ${activeHost.environment}`}>{activeHost.name}</strong>
                 <code>{activeHost.username}@{activeHost.host}</code>
@@ -1591,12 +3030,53 @@ function App() {
                 <Braces size={13} /> 识别当前 Shell
               </button>
             ) : null}
+            {hasActiveHost && isDesktopRuntime() && activeSession.state !== "connected" ? (
+              <div className="engine-selector" role="group" aria-label="SSH 引擎">
+                <button
+                  className={activeSession.engine === "openssh" ? "active" : ""}
+                  type="button"
+                  title={activeJumpHosts.length ? "当前跳板路线使用原生引擎" : "系统 OpenSSH 兼容引擎"}
+                  disabled={activeSession.state === "connecting" || activeJumpHosts.length > 0}
+                  onClick={() => updateSession(activeSession.id, { engine: "openssh" })}
+                >
+                  <SquareTerminal size={12} /> OpenSSH
+                </button>
+                <button
+                  className={activeSession.engine === "russh" ? "active" : ""}
+                  type="button"
+                  title="原生 russh 引擎"
+                  disabled={activeSession.state === "connecting"}
+                  onClick={() => updateSession(activeSession.id, { engine: "russh" })}
+                >
+                  <ShieldCheck size={12} /> 原生
+                </button>
+                <button
+                  className={activeSession.engine === "mosh" ? "active" : ""}
+                  type="button"
+                  title={activeJumpHosts.length ? "Mosh 不支持跳板路线" : "需要本机 mosh、远端 mosh-server 和 UDP 60000–61000"}
+                  disabled={activeSession.state === "connecting" || activeJumpHosts.length > 0}
+                  onClick={() => updateSession(activeSession.id, { engine: "mosh" })}
+                >
+                  <RadioTower size={12} /> Mosh
+                </button>
+              </div>
+            ) : null}
             {hasActiveHost ? <span>{activeHost.latency ? `${activeHost.latency} ms` : "未测速"}</span> : null}
             {activeSession.state === "connected" ? (
               <button className="disconnect-button" type="button" onClick={disconnectActiveSession}><WifiOff size={14} /> 断开</button>
             ) : (
-              <button className="connect-button" type="button" disabled={activeSession.state === "connecting"} onClick={connectActiveSession}>
-                {activeSession.state === "connecting" ? <RefreshCw className="spin" size={14} /> : <Play size={14} />} {activeSession.state === "connecting" ? "连接中" : "连接"}
+              <button
+                className="connect-button"
+                type="button"
+                disabled={activeSession.state === "connecting" && !nativeTerminalStartingIds.includes(activeSession.id)}
+                onClick={() => activeSession.state === "connecting" && nativeTerminalStartingIds.includes(activeSession.id)
+                  ? void cancelNativeTerminalStart()
+                  : void connectActiveSession()}
+              >
+                {activeSession.state === "connecting"
+                  ? nativeTerminalStartingIds.includes(activeSession.id) ? <X size={14} /> : <RefreshCw className="spin" size={14} />
+                  : <Play size={14} />}
+                {activeSession.state === "connecting" ? nativeTerminalStartingIds.includes(activeSession.id) ? "取消连接" : "连接中" : "连接"}
               </button>
             )}
           </div>
@@ -1665,22 +3145,54 @@ function App() {
 
         <div className="content-split">
           <section className="terminal-pane">
-            <TerminalView
-              session={activeSession}
-              host={activeHost}
-              wallpaper={{ ...appState.wallpaper, value: renderedWallpaper }}
-              appearance={appState.terminalAppearance}
-              appearanceRevision={fontRevision}
-              androidTerminalId={androidTerminalIds[activeSession.id]}
-              onDisconnected={handleDisconnected}
-              onContextChanged={handleContextChanged}
-            />
+            <div className="terminal-stack">
+              {sessions.map((session) => {
+                const host = appState.hosts.find((candidate) => candidate.id === session.hostId) ?? emptyHost;
+                return (
+                  <div
+                    className={`terminal-session-view ${session.id === activeSession.id ? "active" : ""}`}
+                    aria-hidden={session.id !== activeSession.id}
+                    key={session.id}
+                  >
+                    <TerminalView
+                      session={session}
+                      host={host}
+                      wallpaper={{ ...appState.wallpaper, value: renderedWallpaper }}
+                      appearance={appState.terminalAppearance}
+                      appearanceRevision={fontRevision}
+                      androidTerminalId={androidTerminalIds[session.id]}
+                      onDisconnected={handleDisconnected}
+                      onContextChanged={handleContextChanged}
+                    />
+                  </div>
+                );
+              })}
+            </div>
             <div className="path-history-bar">
               <Clock3 size={14} />
               <span>路径</span>
               <div className="path-chips">
-                {currentPathHistory.map((path) => <button type="button" key={path} onClick={() => setCommandInput(`cd ${path}`)}>{path}</button>)}
+                {currentPathHistory.slice(0, 30).map((item) => (
+                  <button type="button" key={item.id} onClick={() => setCommandInput(`cd ${item.path}`)}>{item.path}</button>
+                ))}
               </div>
+              {currentPathHistory.length > 0 ? (
+                <button
+                  className="icon-button compact"
+                  type="button"
+                  title="清空此主机的路径历史"
+                  aria-label="清空此主机的路径历史"
+                  onClick={() => {
+                    if (!window.confirm(`清空“${activeHost.name}”的路径历史吗？`)) return;
+                    setAppState((current) => ({
+                      ...current,
+                      pathHistory: { ...current.pathHistory, [activeHost.id]: [] },
+                    }));
+                  }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              ) : null}
             </div>
             <div className="composer-shell">
               {intentSuggestions.length > 0 ? (
@@ -1716,6 +3228,7 @@ function App() {
               }}
               connected={activeSession.state === "connected"}
               androidSessionId={isAndroidRuntime() ? activeSession.id : undefined}
+              nativeSessionId={isDesktopRuntime() && activeSession.engine === "russh" ? activeSession.id : undefined}
               initialPath={isAndroidRuntime() && !activeSession.currentPath.startsWith("/") ? "/" : activeSession.currentPath}
               externalEditorPath={appState.settings.externalEditorPath}
               autoUploadEditedFiles={appState.settings.autoUploadEditedFiles}
@@ -1730,7 +3243,10 @@ function App() {
                   ...current,
                   pathHistory: {
                     ...current.pathHistory,
-                    [activeHost.id]: [path, ...(current.pathHistory[activeHost.id] ?? []).filter((item) => item !== path)].slice(0, 30),
+                    [activeHost.id]: [
+                      { id: crypto.randomUUID(), path, createdAt: new Date().toISOString() },
+                      ...(current.pathHistory[activeHost.id] ?? []).filter((item) => item.path !== path),
+                    ].slice(0, 100),
                   },
                 }));
               }}
@@ -1741,7 +3257,7 @@ function App() {
         </div>
 
         <footer className="statusbar">
-          <span><SquareTerminal size={13} /> {isAndroidRuntime() ? "Rust libssh2 移动引擎" : "OpenSSH 兼容引擎"}</span>
+          <span><SquareTerminal size={13} /> {isAndroidRuntime() ? "Rust libssh2 移动引擎" : activeSession.engine === "russh" ? "Rust russh 原生引擎" : activeSession.engine === "mosh" ? "Mosh UDP 交互模式" : "OpenSSH 兼容引擎"}</span>
           <span><Database size={13} /> SQLite {appStoreStatus.saving ? "保存中" : appStoreStatus.ready ? "已同步" : "初始化失败"}</span>
           <span className="status-spacer" />
           <span>UTF-8</span><span>xterm-256color</span><span>{activeSession.currentPath}</span>
@@ -1793,19 +3309,148 @@ function App() {
       ) : null}
 
       {dialog === "network" ? (
-        <NetworkToolsDialog initialMode={networkMode} defaultHost={activeHost.host} onClose={() => setDialog(null)} showToast={showToast} />
+        <NetworkToolsDialog
+          initialMode={networkMode}
+          defaultHost={activeHost.host}
+          onClose={() => setDialog(null)}
+          showToast={showToast}
+          buildRouteMeasurementOptions={() => buildRouteMeasurementOptions(activeHost, appState.hosts, appState.sshKeys)}
+        />
+      ) : null}
+
+      {dialog === "local-forward" ? (
+        <Dialog
+          title="端口转发"
+          wide
+          onClose={() => setDialog(null)}
+          footer={(
+            <>
+              <button className="secondary-button" type="button" disabled={nativeLocalForwardBusy} onClick={() => void refreshNativeForwards()}><RefreshCw size={14} /> 刷新</button>
+              <button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button>
+            </>
+          )}
+        >
+          <div className="engine-selector forward-mode-switch" role="group" aria-label="转发模式">
+            <button type="button" className={nativeForwardMode === "local" ? "active" : ""} aria-pressed={nativeForwardMode === "local"} onClick={() => { setNativeForwardMode("local"); setNativeLocalForwardError(null); }}><Cable size={14} /> 本地</button>
+            <button type="button" className={nativeForwardMode === "remote" ? "active" : ""} aria-pressed={nativeForwardMode === "remote"} onClick={() => { setNativeForwardMode("remote"); setNativeLocalForwardError(null); }}><RadioTower size={14} /> 远端</button>
+            <button type="button" className={nativeForwardMode === "dynamic" ? "active" : ""} aria-pressed={nativeForwardMode === "dynamic"} onClick={() => { setNativeForwardMode("dynamic"); setNativeLocalForwardError(null); }}><Network size={14} /> SOCKS</button>
+          </div>
+          {nativeForwardMode === "local" ? (
+            <>
+              <form
+                id="local-forward-form"
+                className="form-grid local-forward-form"
+                onSubmit={(event) => { event.preventDefault(); void startNativeLocalForward(event.currentTarget); }}
+              >
+                <label className="field span-2"><span>本地端口</span><input name="bindPort" type="number" defaultValue="0" min="0" max="65535" required /></label>
+                <label className="field span-2"><span>监听地址</span><input value="127.0.0.1" readOnly /></label>
+                <label className="field span-2"><span>目标地址</span><input name="targetHost" defaultValue="127.0.0.1" maxLength={253} required /></label>
+                <label className="field"><span>目标端口</span><input name="targetPort" type="number" defaultValue="80" min="1" max="65535" required /></label>
+                <button className="primary-button local-forward-start" type="submit" disabled={nativeLocalForwardBusy}><Play size={14} /> 启动</button>
+              </form>
+              <div className="local-forward-heading"><strong>运行中的本地转发</strong><span>{nativeLocalForwards.length} / 8</span></div>
+              {nativeLocalForwards.length ? (
+                <div className="local-forward-list" aria-live="polite">
+                  {nativeLocalForwards.map((forward) => (
+                    <div className="local-forward-row" key={forward.forwardId}>
+                      <span className={`session-state ${forward.state === "active" ? "connected" : "connecting"}`} />
+                      <div>
+                        <strong><code>{forward.bindHost}:{forward.bindPort}</code> <ChevronRight size={13} /> <code>{forward.targetHost}:{forward.targetPort}</code></strong>
+                        <small>经 {forward.routeHost}（{forward.routeHops} 跳） · 当前 {forward.activeConnections} · 已接收 {forward.acceptedConnections} · 已拒绝 {forward.rejectedConnections}</small>
+                      </div>
+                      <button className="icon-button compact danger" type="button" title="停止本地转发" aria-label="停止本地转发" disabled={nativeLocalForwardBusy} onClick={() => void stopNativeLocalForward(forward.forwardId)}><Square size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="local-forward-empty"><Cable size={18} /><span>没有运行中的本地转发</span></div>}
+            </>
+          ) : nativeForwardMode === "remote" ? (
+            <>
+              <form
+                id="remote-forward-form"
+                className="form-grid local-forward-form"
+                onSubmit={(event) => { event.preventDefault(); void startNativeRemoteForward(event.currentTarget); }}
+              >
+                <label className="field span-2"><span>远端端口</span><input name="bindPort" type="number" defaultValue="0" min="0" max="65535" required /></label>
+                <label className="field span-2"><span>远端监听</span><input value="127.0.0.1" readOnly /></label>
+                <label className="field span-2"><span>本机目标</span><input value="127.0.0.1" readOnly /></label>
+                <label className="field"><span>本机端口</span><input name="targetPort" type="number" defaultValue="3000" min="1" max="65535" required /></label>
+                <button className="primary-button local-forward-start" type="submit" disabled={nativeLocalForwardBusy}><Play size={14} /> 启动</button>
+              </form>
+              <div className="local-forward-heading"><strong>运行中的远端转发</strong><span>{nativeRemoteForwards.length} / 8</span></div>
+              {nativeRemoteForwards.length ? (
+                <div className="local-forward-list" aria-live="polite">
+                  {nativeRemoteForwards.map((forward) => (
+                    <div className="local-forward-row" key={forward.forwardId}>
+                      <span className={`session-state ${forward.state === "active" ? "connected" : "connecting"}`} />
+                      <div>
+                        <strong><code>{forward.bindHost}:{forward.bindPort}</code> <ChevronRight size={13} /> <code>{forward.targetHost}:{forward.targetPort}</code></strong>
+                        <small>位于 {forward.routeHost}（{forward.routeHops} 跳） · 当前 {forward.activeConnections} · 已接收 {forward.acceptedConnections} · 已拒绝 {forward.rejectedConnections} · 目标失败 {forward.failedConnections}</small>
+                      </div>
+                      <button className="icon-button compact danger" type="button" title="停止远端转发" aria-label="停止远端转发" disabled={nativeLocalForwardBusy} onClick={() => void stopNativeRemoteForward(forward.forwardId)}><Square size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="local-forward-empty"><RadioTower size={18} /><span>没有运行中的远端转发</span></div>}
+            </>
+          ) : (
+            <>
+              <form
+                id="dynamic-forward-form"
+                className="form-grid local-forward-form"
+                onSubmit={(event) => { event.preventDefault(); void startNativeDynamicForward(event.currentTarget); }}
+              >
+                <label className="field span-2"><span>SOCKS 端口</span><input name="bindPort" type="number" defaultValue="0" min="0" max="65535" required /></label>
+                <label className="field span-2"><span>监听地址</span><input value="127.0.0.1" readOnly /></label>
+                <label className="field span-2"><span>协议</span><input value="SOCKS5 CONNECT" readOnly /></label>
+                <button className="primary-button local-forward-start" type="submit" disabled={nativeLocalForwardBusy}><Play size={14} /> 启动</button>
+              </form>
+              <div className="local-forward-heading"><strong>运行中的 SOCKS5 转发</strong><span>{nativeDynamicForwards.length} / 8</span></div>
+              {nativeDynamicForwards.length ? (
+                <div className="local-forward-list" aria-live="polite">
+                  {nativeDynamicForwards.map((forward) => (
+                    <div className="local-forward-row" key={forward.forwardId}>
+                      <span className={`session-state ${forward.state === "active" ? "connected" : "connecting"}`} />
+                      <div>
+                        <strong><code>{forward.bindHost}:{forward.bindPort}</code> <ChevronRight size={13} /> 按请求连接</strong>
+                        <small>经 {forward.routeHost}（{forward.routeHops} 跳） · 当前 {forward.activeConnections} · 已接收 {forward.acceptedConnections} · 已拒绝 {forward.rejectedConnections}</small>
+                      </div>
+                      <button className="icon-button compact danger" type="button" title="停止 SOCKS5 转发" aria-label="停止 SOCKS5 转发" disabled={nativeLocalForwardBusy} onClick={() => void stopNativeDynamicForward(forward.forwardId)}><Square size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="local-forward-empty"><Network size={18} /><span>没有运行中的 SOCKS5 转发</span></div>}
+            </>
+          )}
+          {nativeLocalForwardError ? <p className="local-forward-error" role="alert"><AlertTriangle size={14} /> {nativeLocalForwardError}</p> : null}
+        </Dialog>
       ) : null}
 
       {dialog === "settings" ? (
         <SettingsDialog
           externalEditorPath={appState.settings.externalEditorPath}
           autoUploadEditedFiles={appState.settings.autoUploadEditedFiles}
+          monitorIntervalSeconds={appState.settings.monitorIntervalSeconds}
           onSave={(settings) => setAppState((current) => ({
             ...current,
             settings: { ...current.settings, ...settings },
           }))}
           onClose={() => setDialog(null)}
           showToast={showToast}
+          androidSecurity={isAndroidRuntime() ? androidSecurityStatus : undefined}
+          onAndroidBiometricChange={isAndroidRuntime() ? async (enabled) => {
+            try {
+              const status = await requestAndroidSecurity("setEnabled", enabled);
+              setAndroidSecurityStatus(status);
+              postAndroidVisibility(status.locked ? "failed" : "show");
+              return status;
+            } catch (error) {
+              const status = await requestAndroidSecurity("status").catch(() => null);
+              if (status) setAndroidSecurityStatus(status);
+              postAndroidVisibility(status?.locked === false ? "show" : "failed");
+              throw error;
+            }
+          } : undefined}
         />
       ) : null}
 
@@ -1819,6 +3464,10 @@ function App() {
             <label className="field"><span>环境</span><select name="environment" defaultValue="development"><option value="production">生产</option><option value="staging">基础设施</option><option value="development">测试</option></select></label>
             <label className="field"><span>分组</span><input name="group" defaultValue="我的主机" /></label>
             {!isAndroidRuntime() ? <label className="field full"><span>私钥路径</span><input name="identityFile" placeholder="使用系统 OpenSSH 路径（可选）" /></label> : null}
+            {!isAndroidRuntime() ? <label className="field full"><span>SHA256 主机指纹</span><input name="hostKeySha256" placeholder="SHA256:..." pattern="SHA256:[A-Za-z0-9+/]{43}" spellCheck={false} /></label> : null}
+            {!isAndroidRuntime() && appState.hosts.length ? (
+              <label className="field full"><span>跳板机</span><select name="jumpHostId" defaultValue=""><option value="">直连</option>{appState.hosts.map((host) => <option value={host.id} key={host.id}>{host.name} ({host.username}@{host.host})</option>)}</select></label>
+            ) : null}
             {isAndroidRuntime() ? (
               <>
                 <label className="field full"><span>Android 认证方式</span><select value={androidCredentialKind} onChange={(event) => setAndroidCredentialKind(event.target.value as "password" | "privateKey")}><option value="password">密码</option><option value="privateKey">OpenSSH 私钥</option></select></label>
@@ -1868,7 +3517,11 @@ function App() {
                 className="primary-button"
                 type="button"
                 disabled={!selectedCommand.command || (selectedCommand.parameters ?? []).some((parameter) => parameter.required && !commandParameters[parameter.name]?.trim())}
-                onClick={() => { setCommandInput(materializeCommand(selectedCommand)); setDialog(null); }}
+                onClick={() => {
+                  setCommandInput(materializeCommand(selectedCommand));
+                  rememberCommandParameters(selectedCommand);
+                  setDialog(null);
+                }}
               >
                 <Command size={14} /> 加入命令栏
               </button>
@@ -1882,10 +3535,48 @@ function App() {
           <div className="command-usage"><BookOpenText size={15} /><span>{selectedCommand.usage}</span></div>
           {(selectedCommand.parameters ?? []).length > 0 ? (
             <div className="form-grid command-parameters">
-              {selectedCommand.parameters?.map((parameter) => (
+              {appState.parameterHistory.some((item) => item.commandId === selectedCommand.id) ? (
+                <div className="group-title command-parameter-history-title">
+                  <History size={13} />
+                  <span>参数历史</span>
+                  <button
+                    type="button"
+                    title="清空此命令的参数历史"
+                    aria-label="清空此命令的参数历史"
+                    onClick={() => {
+                      if (!window.confirm("清空此命令的参数历史？")) return;
+                      setAppState((current) => ({
+                        ...current,
+                        parameterHistory: current.parameterHistory.filter((item) => item.commandId !== selectedCommand.id),
+                      }));
+                      setCommandParameters(Object.fromEntries((selectedCommand.parameters ?? []).map((parameter) => [parameter.name, parameter.defaultValue ?? ""])));
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ) : null}
+              {selectedCommand.parameters?.map((parameter, parameterIndex) => (
                 <label className="field span-2" key={parameter.name}>
                   <span>{parameter.label}</span>
-                  <input value={commandParameters[parameter.name] ?? ""} placeholder={parameter.placeholder} required={parameter.required} onChange={(event) => setCommandParameters((current) => ({ ...current, [parameter.name]: event.target.value }))} />
+                  <input
+                    type={isSensitiveCommandParameter(parameter) ? "password" : "text"}
+                    autoComplete="off"
+                    list={isSensitiveCommandParameter(parameter) ? undefined : `command-parameter-history-${parameterIndex}`}
+                    value={commandParameters[parameter.name] ?? ""}
+                    placeholder={parameter.placeholder}
+                    required={parameter.required}
+                    onChange={(event) => setCommandParameters((current) => ({ ...current, [parameter.name]: event.target.value }))}
+                  />
+                  {!isSensitiveCommandParameter(parameter) ? (
+                    <datalist id={`command-parameter-history-${parameterIndex}`}>
+                      {[...new Set(appState.parameterHistory
+                        .filter((item) => item.commandId === selectedCommand.id && item.parameterName === parameter.name)
+                        .map((item) => item.value))]
+                        .slice(0, 20)
+                        .map((value) => <option key={value} value={value} />)}
+                    </datalist>
+                  ) : null}
                 </label>
               ))}
             </div>
@@ -1895,7 +3586,117 @@ function App() {
       ) : null}
 
       {dialog === "sync" ? (
-        <Dialog title="加密同步（设计预览）" wide onClose={() => setDialog(null)} footer={<><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" onClick={saveSyncSettings}><ShieldCheck size={14} /> 保存草稿</button></>}>
+        <Dialog title={isAndroidRuntime() ? "同步状态" : "加密同步"} wide onClose={() => setDialog(null)} footer={isAndroidRuntime() ? <><button className="secondary-button" type="button" onClick={() => void refreshAndroidSyncStatus()}><RefreshCw size={14} /> 刷新</button><button className="primary-button" type="button" onClick={() => setDialog(null)}>关闭</button></> : desktopSyncStatus?.configured ? <><button className="secondary-button" type="button" disabled={desktopSyncBusy} onClick={() => void lockDesktopSync()}><KeyRound size={14} /> 锁定</button>{desktopSyncStatus.running ? <button className="danger-button" type="button" onClick={() => void cancelDesktopSync()}><Square size={14} /> 取消同步</button> : <button className="primary-button" type="button" disabled={desktopSyncBusy || appStoreStatus.saving || desktopSyncStatus.recoveryRequired} onClick={() => void runDesktopSyncOnce()}><RefreshCw size={14} /> 立即同步</button>}</> : <><button className="secondary-button" type="button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" type="button" disabled={desktopSyncBusy} onClick={() => void configureDesktopSync()}><ShieldCheck size={14} /> {syncSetupMode === "initialize" ? "初始化并解锁" : "解锁"}</button></>}>
+          {isAndroidRuntime() ? (
+            <div className="sync-readonly-status" aria-live="polite">
+              <div><span>协调阶段</span><strong>{androidSyncError ? "状态读取失败" : androidSyncStatus ? syncPhaseLabels[androidSyncStatus.phase] : "正在读取"}</strong></div>
+              <div><span>同步能力</span><strong>Android Preview 中禁用</strong></div>
+              <div><span>待发布对象</span><strong>{androidSyncStatus ? `${androidSyncStatus.pendingObjects} 项 / ${androidSyncStatus.pendingBytes.toLocaleString("zh-CN")} B` : "-"}</strong></div>
+              <div><span>合并状态</span><strong>{androidSyncStatus ? `revision ${androidSyncStatus.mergeRevision} / ${androidSyncStatus.openConflicts} 个冲突` : "-"}</strong></div>
+              <div><span>设备信任</span><strong>{androidSyncStatus?.deviceRegistryRevision ? `revision ${androidSyncStatus.deviceRegistryRevision} / ${androidSyncStatus.localDeviceAuthorized ? "本机已授权" : "本机未授权"}` : "未载入"}</strong></div>
+              <div><span>密钥轮换</span><strong>{androidSyncStatus?.keyRotationRequired ? "撤销后需要轮换" : "未触发"}</strong></div>
+              <div><span>恢复保护</span><strong>{androidSyncStatus?.recoveryRequired ? "需要人工核对" : "未触发"}</strong></div>
+              <div><span>最近周期</span><strong>{androidSyncStatus?.lastCompletedAtMs ? new Date(androidSyncStatus.lastCompletedAtMs).toLocaleString("zh-CN", { hour12: false }) : "尚未运行"}</strong></div>
+              {androidSyncStatus?.lastErrorCode ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {androidSyncStatus.lastErrorCode}</p> : null}
+              {androidSyncStatus?.recoveryNote ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {androidSyncStatus.recoveryNote}</p> : null}
+              {androidSyncError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {androidSyncError}</p> : null}
+            </div>
+          ) : <>
+          <div className="sync-readonly-status" aria-live="polite">
+            <div><span>协调阶段</span><strong>{desktopSyncError ? "状态读取失败" : desktopSyncStatus ? syncPhaseLabels[desktopSyncStatus.phase] : "正在读取"}</strong></div>
+            <div><span>运行状态</span><strong>{desktopSyncStatus?.running ? "单周期执行中" : desktopSyncStatus?.configured ? "vault 已解锁" : "vault 已锁定"}</strong></div>
+            <div><span>待发布对象</span><strong>{desktopSyncStatus ? `${desktopSyncStatus.pendingObjects} 项 / ${desktopSyncStatus.pendingBytes.toLocaleString("zh-CN")} B` : "-"}</strong></div>
+            <div><span>合并状态</span><strong>{desktopSyncStatus ? `revision ${desktopSyncStatus.mergeRevision} / ${desktopSyncStatus.openConflicts} 个冲突` : "-"}</strong></div>
+            <div><span>设备信任</span><strong>{desktopSyncStatus?.deviceRegistryRevision ? `revision ${desktopSyncStatus.deviceRegistryRevision} / ${desktopSyncStatus.localDeviceAuthorized ? "本机已授权" : "本机未授权"}` : "未载入"}</strong></div>
+            <div><span>密钥轮换</span><strong>{desktopSyncStatus?.keyRotationRequired ? "撤销后需要轮换" : "未触发"}</strong></div>
+            <div><span>最近周期</span><strong>{desktopSyncStatus?.lastCompletedAtMs ? new Date(desktopSyncStatus.lastCompletedAtMs).toLocaleString("zh-CN", { hour12: false }) : "尚未运行"}</strong></div>
+            <div><span>本周期对象</span><strong>{desktopSyncStatus ? `上传 ${desktopSyncStatus.lastUploadedObjects} / 下载 ${desktopSyncStatus.lastDownloadedObjects}` : "-"}</strong></div>
+            {desktopSyncStatus?.lastErrorCode ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncStatus.lastErrorCode}</p> : null}
+            {desktopSyncStatus?.recoveryNote ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncStatus.recoveryNote}</p> : null}
+            {desktopSyncError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncError}</p> : null}
+          </div>
+          {desktopSyncStatus?.configured && syncDevices ? (
+            <section className="sync-device-center" aria-live="polite">
+              <div className="sync-device-header">
+                <div><ShieldCheck size={16} /><strong>同步设备</strong><span>revision {syncDevices.revision}</span></div>
+                <select aria-label="撤销原因" value={syncRevocationReason} disabled={syncDeviceBusy} onChange={(event) => setSyncRevocationReason(event.target.value as SyncDeviceRevocationReason)}>
+                  <option value="retired">停用</option>
+                  <option value="lost">丢失</option>
+                  <option value="stolen">被盗</option>
+                  <option value="compromised">疑似泄漏</option>
+                </select>
+              </div>
+              {!desktopSyncStatus.localDeviceAuthorized ? (
+                <div className="sync-device-enrollment">
+                  <label className="field"><span>本机设备名称</span><input maxLength={128} value={syncDeviceLabel} disabled={syncDeviceBusy} onChange={(event) => setSyncDeviceLabel(event.target.value)} /></label>
+                  <button className="secondary-button" type="button" disabled={syncDeviceBusy || !syncDeviceLabel.trim()} onClick={() => void createSyncDeviceEnrollment()}><Plus size={14} /> 生成登记请求</button>
+                  {syncEnrollment ? <>
+                    <label className="field span-2"><span>登记请求 · {new Date(syncEnrollment.expiresAtMs).toLocaleTimeString("zh-CN", { hour12: false })} 到期</span><textarea readOnly rows={3} value={syncEnrollment.enrollmentRequest} /></label>
+                    <button className="secondary-button" type="button" onClick={() => void navigator.clipboard.writeText(syncEnrollment.enrollmentRequest).then(() => showToast("登记请求已复制")).catch(() => showToast("无法访问系统剪贴板"))}><Copy size={14} /> 复制请求</button>
+                  </> : null}
+                </div>
+              ) : (
+                <div className="sync-device-enrollment">
+                  <label className="field span-2"><span>批准设备登记请求</span><textarea rows={3} maxLength={4096} value={syncEnrollmentApproval} disabled={syncDeviceBusy} onChange={(event) => setSyncEnrollmentApproval(event.target.value)} /></label>
+                  <button className="secondary-button" type="button" disabled={syncDeviceBusy || !syncEnrollmentApproval.trim()} onClick={() => void approveSyncDeviceEnrollment()}><Plus size={14} /> 验证并登记</button>
+                </div>
+              )}
+              <div className="sync-device-list">
+                {syncDevices.devices.map((device) => {
+                  const active = device.status.state === "active";
+                  const isLocal = device.deviceId === syncDevices.localDeviceId;
+                  return <article className="sync-device-item" key={device.deviceId}>
+                    <div className="sync-device-identity">
+                      <input aria-label={`${device.label} 的设备名称`} maxLength={128} value={syncDeviceLabels[device.deviceId] ?? device.label} disabled={!active || syncDeviceBusy || !desktopSyncStatus.localDeviceAuthorized} onChange={(event) => setSyncDeviceLabels((current) => ({ ...current, [device.deviceId]: event.target.value }))} />
+                      <span>{device.deviceId.slice(0, 8)} · {isLocal ? "本机" : active ? "已授权" : "已撤销"}</span>
+                    </div>
+                    <button className="icon-button" type="button" title="保存设备名称" aria-label="保存设备名称" disabled={!active || syncDeviceBusy || !desktopSyncStatus.localDeviceAuthorized || !(syncDeviceLabels[device.deviceId] ?? "").trim() || (syncDeviceLabels[device.deviceId] ?? device.label) === device.label} onClick={() => void renameSyncDevice(device)}><Check size={15} /></button>
+                    <button className="icon-button danger" type="button" title="永久撤销设备" aria-label="永久撤销设备" disabled={!active || isLocal || syncDeviceBusy || !desktopSyncStatus.localDeviceAuthorized} onClick={() => void revokeSyncDevice(device)}><ShieldX size={15} /></button>
+                  </article>;
+                })}
+              </div>
+              {syncDeviceError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {syncDeviceError}</p> : null}
+            </section>
+          ) : null}
+          {desktopSyncStatus?.configured && !syncDevices && syncDeviceError ? <p className="sync-device-load-error"><AlertTriangle size={14} /> {syncDeviceError}</p> : null}
+          {desktopSyncStatus?.configured && desktopSyncStatus.openConflicts > 0 ? (
+            <section className="sync-conflict-center" aria-live="polite">
+              <div className="sync-conflict-header">
+                <div><AlertTriangle size={16} /><strong>冲突中心</strong><span>{syncConflictCenter?.total ?? desktopSyncStatus.openConflicts} 项</span></div>
+                <div className="sync-conflict-pagination">
+                  <button type="button" title="上一页" disabled={syncConflictOffset === 0 || Boolean(resolvingConflictId)} onClick={() => setSyncConflictOffset(Math.max(0, syncConflictOffset - SYNC_CONFLICT_PAGE_SIZE))}><ChevronLeft size={16} /></button>
+                  <span>{syncConflictCenter?.total ? `${syncConflictOffset + 1}-${Math.min(syncConflictOffset + syncConflictCenter.conflicts.length, syncConflictCenter.total)}` : "-"}</span>
+                  <button type="button" title="下一页" disabled={!syncConflictCenter || syncConflictOffset + syncConflictCenter.conflicts.length >= syncConflictCenter.total || Boolean(resolvingConflictId)} onClick={() => setSyncConflictOffset(syncConflictOffset + SYNC_CONFLICT_PAGE_SIZE)}><ChevronRight size={16} /></button>
+                </div>
+              </div>
+              {syncConflictError ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {syncConflictError}</p> : null}
+              <div className="sync-conflict-list">
+                {syncConflictCenter?.conflicts.map((conflict) => (
+                  <article className="sync-conflict-item" key={conflict.conflictId}>
+                    <div className="sync-conflict-identity">
+                      <strong>{syncConflictKindLabels[conflict.entityKind]} · {conflict.field}</strong>
+                      <span>{syncConflictReasonLabels[conflict.reason]} · {conflict.entityId.slice(0, 8)}</span>
+                    </div>
+                    <div className="sync-conflict-alternatives">
+                      {conflict.alternatives.map((alternative) => (
+                        <button
+                          type="button"
+                          key={alternative.index}
+                          disabled={Boolean(resolvingConflictId) || desktopSyncStatus?.running || desktopSyncStatus?.recoveryRequired || appStoreStatus.saving}
+                          onClick={() => void resolveSyncConflict(conflict.conflictId, alternative.index)}
+                        >
+                          <Check size={15} />
+                          <span>{syncConflictAlternativeLabel(alternative)}{alternative.truncated ? "…" : ""}</span>
+                          <small>{alternative.contentHash ? `${alternative.byteLength} B · ${alternative.contentHash.slice(0, 12)}` : "删除"}</small>
+                        </button>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
+          {!desktopSyncStatus?.configured ? <>
           <div className="provider-grid">
             {(Object.keys(providerLabels) as SyncProviderKind[]).map((provider) => (
               <button className={appState.sync.provider === provider ? "active" : ""} type="button" key={provider} onClick={() => setAppState((current) => ({ ...current, sync: { ...current.sync, provider } }))}>
@@ -1904,30 +3705,54 @@ function App() {
               </button>
             ))}
           </div>
+          <div className="sync-mode-switch" role="group" aria-label="同步存储模式">
+            <button type="button" className={syncSetupMode === "unlock" ? "active" : ""} onClick={() => setSyncSetupMode("unlock")}>解锁已有 vault</button>
+            <button type="button" className={syncSetupMode === "initialize" ? "active" : ""} onClick={() => setSyncSetupMode("initialize")}>初始化新 vault</button>
+          </div>
           <div className="form-grid sync-form">
-            <label className="field span-2"><span>同步地址</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder={appState.sync.provider === "local" ? "D:\\VPShellSync" : "https://example.com/dav/"} /></label>
-            <label className="field span-2"><span>远端目录</span><input value={appState.sync.remotePath} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, remotePath: event.target.value } }))} /></label>
-            <label className="field span-2"><span>账户</span><input value={appState.sync.username} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, username: event.target.value } }))} autoComplete="off" /></label>
-            <label className="field span-2"><span>二级同步密码</span><input type="password" value={syncPassword} onChange={(event) => setSyncPassword(event.target.value)} autoComplete="new-password" placeholder="用于端到端加密" /></label>
+            {appState.sync.provider !== "sftp" ? <label className="field span-2"><span>{appState.sync.provider === "local" ? "同步目录" : appState.sync.provider === "s3" ? "S3 endpoint" : appState.sync.provider === "gateway" ? "Gateway API endpoint" : "WebDAV endpoint"}</span><input value={appState.sync.endpoint} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, endpoint: event.target.value } }))} placeholder={appState.sync.provider === "local" ? "D:\\VPShellSync" : appState.sync.provider === "s3" ? "https://s3.example.com/" : appState.sync.provider === "gateway" ? "https://gateway.example.com/api/v1/" : "https://dav.example.com/vpshell/"} /></label> : <>
+              <label className="field span-2"><span>SFTP 主机</span><select value={appState.sync.providerHostId ?? ""} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, providerHostId: event.target.value || undefined } }))}><option value="">选择已保存主机</option>{appState.hosts.map((host) => <option key={host.id} value={host.id} disabled={!host.hostKeySha256}>{host.name} · {host.username}@{host.host}:{host.port}{host.hostKeySha256 ? "" : " · 未核验指纹"}</option>)}</select></label>
+              <label className="field span-2"><span>远端同步根目录</span><input value={appState.sync.remotePath} maxLength={1024} spellCheck={false} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, remotePath: event.target.value } }))} placeholder="/home/user/vpshell-sync" /></label>
+            </>}
+            {appState.sync.provider === "webdav" ? <>
+              <label className="field"><span>WebDAV 用户名</span><input maxLength={256} value={appState.sync.username} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, username: event.target.value } }))} autoComplete="username" placeholder="可留空使用无认证存储" /></label>
+              <label className="field"><span>WebDAV 密码</span><input type="password" maxLength={1024} value={webDavPassword} onChange={(event) => setWebDavPassword(event.target.value)} autoComplete="current-password" placeholder={appState.sync.providerCredentialRef ? "留空使用系统已保存密码" : "仅保存到系统凭据管理器"} /></label>
+              <label className="field span-2"><span>TLS 信任根</span><div className="path-picker"><input readOnly value={webDavCaLabel || (!webDavUseSystemCa && appState.sync.providerCaRef ? "已保存自定义 CA" : "系统 CA")} /><button className="secondary-button" type="button" onClick={() => void chooseWebDavCa()}><Upload size={14} /> 选择 PEM</button>{(webDavCaPath || appState.sync.providerCaRef) && !webDavUseSystemCa ? <button className="icon-button" type="button" title="改用系统 CA" aria-label="改用系统 CA" onClick={() => { setWebDavCaPath(""); setWebDavCaLabel(""); setWebDavUseSystemCa(true); }}><X size={15} /></button> : null}</div></label>
+            </> : null}
+            {appState.sync.provider === "s3" ? <>
+              <label className="field"><span>Region</span><input maxLength={128} spellCheck={false} value={appState.sync.s3Region} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, s3Region: event.target.value } }))} placeholder="us-east-1" /></label>
+              <label className="field"><span>Bucket</span><input maxLength={63} spellCheck={false} value={appState.sync.s3Bucket} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, s3Bucket: event.target.value } }))} placeholder="vpshell-sync" /></label>
+              <label className="field span-2"><span>对象前缀</span><input maxLength={512} spellCheck={false} value={appState.sync.s3Prefix} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, s3Prefix: event.target.value } }))} placeholder="vpshell" /></label>
+              <label className="credential-option span-2"><input type="checkbox" checked={appState.sync.s3PathStyle} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, s3PathStyle: event.target.checked } }))} /><span>Path-style bucket URL</span></label>
+              <label className="field"><span>Access Key ID</span><input type="password" maxLength={128} value={s3AccessKeyId} onChange={(event) => setS3AccessKeyId(event.target.value)} autoComplete="off" placeholder={appState.sync.providerCredentialRef?.startsWith("sync-s3-") ? "留空使用系统已保存凭据" : "仅保存到系统凭据管理器"} /></label>
+              <label className="field"><span>Secret Access Key</span><input type="password" maxLength={1024} value={s3SecretAccessKey} onChange={(event) => setS3SecretAccessKey(event.target.value)} autoComplete="off" placeholder={appState.sync.providerCredentialRef?.startsWith("sync-s3-") ? "留空使用系统已保存凭据" : "仅保存到系统凭据管理器"} /></label>
+              <label className="field span-2"><span>Session token</span><input type="password" maxLength={4096} value={s3SessionToken} onChange={(event) => setS3SessionToken(event.target.value)} autoComplete="off" placeholder="长期密钥可留空" /></label>
+              <label className="field span-2"><span>TLS 信任根</span><div className="path-picker"><input readOnly value={webDavCaLabel || (!webDavUseSystemCa && appState.sync.providerCaRef ? "已保存自定义 CA" : "系统 CA")} /><button className="secondary-button" type="button" onClick={() => void chooseWebDavCa()}><Upload size={14} /> 选择 PEM</button>{(webDavCaPath || appState.sync.providerCaRef) && !webDavUseSystemCa ? <button className="icon-button" type="button" title="改用系统 CA" aria-label="改用系统 CA" onClick={() => { setWebDavCaPath(""); setWebDavCaLabel(""); setWebDavUseSystemCa(true); }}><X size={15} /></button> : null}</div></label>
+            </> : null}
+            {appState.sync.provider === "gateway" ? <>
+              <label className="field span-2"><span>Gateway vault ID</span><input maxLength={36} spellCheck={false} value={appState.sync.gatewayVaultId} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, gatewayVaultId: event.target.value } }))} placeholder="00000000-0000-4000-8000-000000000000" /></label>
+              <label className="field"><span>Gateway 用户名</span><input maxLength={256} value={appState.sync.username} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, username: event.target.value } }))} autoComplete="username" /></label>
+              <label className="field"><span>Gateway 密码</span><input type="password" maxLength={1024} value={gatewayPassword} onChange={(event) => setGatewayPassword(event.target.value)} autoComplete="current-password" placeholder={appState.sync.providerCredentialRef?.startsWith("sync-gateway-") ? "留空使用系统已保存密码" : "仅保存到系统凭据管理器"} /></label>
+              <label className="credential-option span-2"><input type="checkbox" checked={appState.sync.totpEnabled} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, totpEnabled: event.target.checked } }))} /><span>登录需要 TOTP</span></label>
+              {appState.sync.totpEnabled ? <label className="field span-2"><span>当前 TOTP</span><input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={gatewayTotp} onChange={(event) => setGatewayTotp(event.target.value.replace(/\D/g, "").slice(0, 6))} autoComplete="one-time-code" /></label> : null}
+              <label className="field span-2"><span>TLS 信任根</span><div className="path-picker"><input readOnly value={webDavCaLabel || (!webDavUseSystemCa && appState.sync.providerCaRef ? "已保存自定义 CA" : "系统 CA")} /><button className="secondary-button" type="button" onClick={() => void chooseWebDavCa()}><Upload size={14} /> 选择 PEM</button>{(webDavCaPath || appState.sync.providerCaRef) && !webDavUseSystemCa ? <button className="icon-button" type="button" title="改用系统 CA" aria-label="改用系统 CA" onClick={() => { setWebDavCaPath(""); setWebDavCaLabel(""); setWebDavUseSystemCa(true); }}><X size={15} /></button> : null}</div></label>
+            </> : null}
+            <label className="field span-2"><span>二级同步密码</span><input type="password" minLength={8} maxLength={1024} value={syncPassword} onChange={(event) => setSyncPassword(event.target.value)} autoComplete="new-password" placeholder="用于端到端加密" /></label>
           </div>
-          <div className="sync-options">
-            <label><input type="checkbox" checked readOnly /><span><strong>同步全部自建内容</strong><small>主机、脚本、命令、路径、参数、背景和附件</small></span></label>
-            <label><input type="checkbox" checked={appState.sync.syncSecrets} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, syncSecrets: event.target.checked } }))} /><span><strong>同步主机凭据与私钥</strong><small>使用独立密钥域加密，默认关闭</small></span></label>
-            <label className={appState.sync.provider !== "gateway" ? "disabled" : ""}><input type="checkbox" disabled={appState.sync.provider !== "gateway"} checked={appState.sync.totpEnabled} onChange={(event) => setAppState((current) => ({ ...current, sync: { ...current.sync, totpEnabled: event.target.checked } }))} /><span><strong>Google Authenticator</strong><small>仅自建同步网关支持 TOTP 身份验证</small></span></label>
-          </div>
+          </> : null}
+          </>}
         </Dialog>
       ) : null}
 
       {dialog === "wallpaper" ? (
         <Dialog title="终端外观" wide onClose={() => setDialog(null)} footer={<button className="primary-button" type="button" onClick={() => setDialog(null)}>完成</button>}>
           <div className="wallpaper-options">
-            <label className={appState.wallpaper.source === "none" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "none"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "none", value: "" } })); }} /><span>纯色背景</span></label>
+            <label className={appState.wallpaper.source === "none" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "none"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "none", value: "", managedBlobId: undefined } })); }} /><span>纯色背景</span></label>
             <button className={appState.wallpaper.source === "local" ? "active" : ""} type="button" onClick={() => void chooseLocalWallpaper()}><Image size={15} /><span>本机图片</span></button>
-            <label className={appState.wallpaper.source === "url" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "url"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: "" } })); }} /><span>URL 图片</span></label>
+            <label className={appState.wallpaper.source === "url" ? "active" : ""}><input type="radio" name="wallpaper" checked={appState.wallpaper.source === "url"} onChange={() => { setRenderedWallpaper(""); setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: "", managedBlobId: undefined } })); }} /><span>URL 图片</span></label>
           </div>
-          <label className="field full"><span>图片地址</span><div className="path-picker"><input type="url" disabled={appState.wallpaper.source !== "url"} value={appState.wallpaper.source === "url" ? appState.wallpaper.value : ""} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: event.target.value } }))} placeholder="https://image.example.com/background.webp" /><button className="secondary-button" type="button" disabled={appState.wallpaper.source !== "url" || !appState.wallpaper.value.trim()} onClick={() => void applyRemoteWallpaper()}><Download size={14} /> 应用</button></div></label>
+          <label className="field full"><span>图片地址</span><div className="path-picker"><input type="url" disabled={appState.wallpaper.source !== "url"} value={appState.wallpaper.source === "url" ? appState.wallpaper.value : ""} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, source: "url", value: event.target.value, managedBlobId: undefined } }))} placeholder="https://image.example.com/background.png" /><button className="secondary-button" type="button" disabled={appState.wallpaper.source !== "url" || !appState.wallpaper.value.trim()} onClick={() => void applyRemoteWallpaper()}><Download size={14} /> 应用</button></div></label>
           <label className="slider-field"><span>背景可见度</span><input type="range" min="0.05" max="0.65" step="0.05" value={appState.wallpaper.opacity} onChange={(event) => setAppState((current) => ({ ...current, wallpaper: { ...current.wallpaper, opacity: Number(event.target.value) } }))} /><output>{Math.round(appState.wallpaper.opacity * 100)}%</output></label>
-          <label className="sync-wallpaper"><input type="checkbox" disabled /><span>加密同步接通后可选择同步</span></label>
           <div className="appearance-divider" />
           <div className="appearance-heading"><Type size={16} /><strong>终端字体</strong>{appState.terminalAppearance.customFontName ? <small>{appState.terminalAppearance.customFontName}</small> : null}</div>
           <div className="font-controls">

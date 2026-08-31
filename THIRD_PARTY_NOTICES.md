@@ -20,18 +20,34 @@ snapshot and replacing the local event store implementation.
 
 VPShell uses `argon2` 0.5.3, `chacha20poly1305` 0.10.1 and `hkdf` 0.12.4 from RustCrypto, plus
 `getrandom` 0.3.4 from the rust-random project. These crates are distributed under MIT or
-Apache-2.0. Argon2's pure-Rust `blake2` and `password-hash` dependencies retain the same upstream
-dual-license boundary. Default features are disabled and only the alloc/zeroize features recorded
-in `docs/DEVELOPMENT.md` are enabled. No third-party source was copied into VPShell; the crates are
-used through their public APIs and remain independently replaceable through the versioned v1
-format and fixed compatibility vectors.
+Apache-2.0. VPShell also uses `ed25519-dalek` 3.0.0 from dalek-cryptography under BSD-3-Clause
+through its public strict Ed25519 signing and verification APIs; default features are disabled and
+only `alloc` and `zeroize` are enabled. Argon2's pure-Rust `blake2` and `password-hash`
+dependencies retain the same upstream dual-license boundary. The RustCrypto sync crates use the
+default-feature and feature boundaries recorded in `docs/DEVELOPMENT.md`. The self-hosted Relay
+reference also uses the already locked
+`hmac` 0.12.1 crate through its public API for challenge-bound HMAC-SHA256 proofs and S3 SigV4
+signing; it does not terminate SSH or add a TLS/transport implementation. The S3 client also reuses
+the already locked `sha2`, `reqwest` and `quick-xml` public APIs; no AWS SDK or new dependency was
+added. No third-party source was copied into VPShell;
+the crates are used through their public APIs and remain independently replaceable through the
+versioned v1 format and fixed compatibility vectors.
 
 ## Sync provider parsing
 
 VPShell directly uses `quick-xml` 0.41.0 and `percent-encoding` 2.3.2, both distributed under the
-MIT license, for bounded WebDAV multistatus parsing and validated href decoding. Both packages
+MIT license, for bounded WebDAV multistatus and S3 ListObjectsV2 XML parsing plus validated href
+decoding. Both packages
 were already present as transitive dependencies of the locked Tauri/reqwest graph; their default
 features remain disabled. No third-party WebDAV implementation or source code was copied.
+
+## PNG decoding and canonical encoding
+
+VPShell directly uses `png` 0.17.16 from image-rs through its public decoder and encoder APIs to
+bound, decode and canonicalize syncable wallpaper images. The crate is distributed under MIT or
+Apache-2.0 and was already present in the locked dependency graph. No upstream source, examples,
+fixtures or assets were copied. Removing managed PNG wallpaper synchronization removes this direct
+dependency without changing other sync object formats.
 
 ## Android SSH compatibility transport
 
@@ -52,6 +68,46 @@ SharedPreferences vault. It adds JNI/Android context access but no Android permi
 telemetry or backup surface. The dependency can be removed when VPShell owns an equivalent audited
 Keystore adapter behind the same opaque-reference boundary; credential values must be deleted or
 migrated explicitly before such removal.
+
+## Android biometric access gate
+
+VPShell uses `tauri-plugin-biometric` 2.3.2 through its public Rust API. The plugin is distributed
+under MIT or Apache-2.0 and uses Apache-2.0 AndroidX Biometric transitively on Android. It adds no
+Android runtime permission and receives no SSH credential material; Rust calls it only to gate the
+Android lifecycle before local credential-backed operations are authorized. The plugin currently
+allows Android `BIOMETRIC_WEAK` and an optional device-credential fallback, so VPShell does not
+claim a strong-biometric guarantee. It can be removed together with the optional access gate
+without changing stored SSH credential formats. No plugin or AndroidX source or asset was copied
+into VPShell.
+
+## russh desktop native SSH/SFTP path
+
+VPShell uses `russh` 0.62.7 and `russh-sftp` 2.4.0 through their public Rust APIs on Linux, macOS
+and Windows. Both are distributed under Apache-2.0. `russh` default features are disabled; only the
+`ring` cryptographic backend and RSA compatibility feature are enabled. The dependencies add no
+telemetry, external process or Tauri permission and receive network access only for the SSH target
+selected by the user. No upstream source was copied. The integration performs a bounded, explicit
+SSH/SFTP readiness check, an opt-in long-lived PTY/Shell terminal and a bounded file-panel directory
+browser that reuses one authenticated native connection. Application-managed routes use russh's public
+`direct-tcpip` channel stream and `connect_stream` APIs to establish a separately pinned and authenticated
+SSH session for each hop. Public channel and forwarding APIs carry independently implemented local,
+remote and dynamic forwarding: local and SOCKS5 listeners are Rust-owned `127.0.0.1` sockets, while
+remote requests and client targets are both fixed to `127.0.0.1`; each has explicit capacity and
+cancellation. The SOCKS5 parser supports only no-authentication CONNECT and is VPShell-owned.
+VPShell independently owns endpoint validation, route, listener/channel and connection lifecycle.
+Large transfers, external editing and remote
+mutations remain on independent compatibility connections; the integration does not replace the default
+system OpenSSH engine. Both crates remain removable with that isolated module and its desktop-only capabilities.
+
+## Optional external Mosh program
+
+VPShell can launch a separately installed `mosh` client for an explicit desktop direct terminal mode.
+Mosh is GPL-3.0 and is not a linked dependency or bundled component of VPShell; this repository does not
+contain or adapt its source, protocol implementation, assets or tests. Users and distributors install and
+license Mosh independently, and the remote host must separately provide `mosh-server`. Removing the
+`start_mosh_session` command and its UI option removes this integration without changing VPShell data or
+credential formats. The integration supplies only fixed SSH bootstrap policy and UDP port-range arguments;
+it does not redistribute Mosh or alter its license obligations.
 
 Projects reviewed only for behavior or architecture are not third-party code dependencies. Their
 license boundaries and the decisions derived from that review are recorded in

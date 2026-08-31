@@ -810,6 +810,24 @@ pub(crate) fn connect(connection: &ConnectionSpec) -> Result<Session, String> {
     Ok(session)
 }
 
+pub(crate) fn connect_pinned(
+    connection: &ConnectionSpec,
+    expected_host_key_sha256: &str,
+) -> Result<Session, String> {
+    validate_connection(connection)?;
+    validate_host_key_sha256(expected_host_key_sha256)?;
+    let session = open_session(&connection.host, connection.port)?;
+    verify_known_host(&session, &connection.host, connection.port)?;
+    let (host_key, _) = session
+        .host_key()
+        .ok_or_else(|| "SSH 服务器未提供主机密钥".to_string())?;
+    if host_key_fingerprint(host_key) != expected_host_key_sha256 {
+        return Err("SSH 主机指纹与所选主机的本机 pin 不匹配，已拒绝认证".to_string());
+    }
+    authenticate(&session, connection)?;
+    Ok(session)
+}
+
 fn connect_for_transfer(
     connection: &ConnectionSpec,
     reporter: &ProgressReporter,
@@ -1031,6 +1049,20 @@ fn host_key_fingerprint(key: &[u8]) -> String {
         "SHA256:{}",
         BASE64_STANDARD_NO_PAD.encode(Sha256::digest(key))
     )
+}
+
+pub(crate) fn validate_host_key_sha256(value: &str) -> Result<(), String> {
+    let encoded = value
+        .strip_prefix("SHA256:")
+        .ok_or_else(|| "SSH 主机指纹必须使用 SHA256 格式".to_string())?;
+    if encoded.len() != 43
+        || BASE64_STANDARD_NO_PAD
+            .decode(encoded)
+            .map_or(true, |bytes| bytes.len() != 32)
+    {
+        return Err("SSH 主机指纹必须是完整的 SHA256 摘要".to_string());
+    }
+    Ok(())
 }
 
 fn trust_host_key_blocking(
@@ -3088,6 +3120,19 @@ mod tests {
         let mut connection = valid_connection();
         connection.credential_ref = Some("wrong-reference".to_string());
         assert!(validate_connection(&connection).is_err());
+    }
+
+    #[test]
+    fn pinned_host_key_requires_canonical_sha256_fingerprint() {
+        assert!(validate_host_key_sha256(&format!("SHA256:{}", "A".repeat(43))).is_ok());
+        for invalid in [
+            String::new(),
+            "MD5:00:11".to_string(),
+            "SHA256:not-base64".to_string(),
+            format!("SHA256:{}=", "A".repeat(43)),
+        ] {
+            assert!(validate_host_key_sha256(&invalid).is_err());
+        }
     }
 
     #[test]

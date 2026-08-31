@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chacha20poly1305::{
@@ -25,10 +27,13 @@ const MAX_OBJECT_ID_BYTES: usize = 256;
 const MAX_PLAINTEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_KEYSLOT_BYTES: usize = 16 * 1024;
 const MAX_ENVELOPE_BYTES: usize = 24 * 1024 * 1024;
+const MAX_ROTATION_OBJECTS: usize = 10_000;
+const MAX_ROTATION_PLAINTEXT_BYTES: usize = 256 * 1024 * 1024;
 const ARGON2_VERSION: u32 = 0x13;
 const KEYSLOT_ALGORITHM: &str = "argon2id+xchacha20poly1305";
 const OBJECT_ALGORITHM: &str = "xchacha20poly1305";
 const RECOVERY_KEYSLOT_ALGORITHM: &str = "hkdf-sha256+xchacha20poly1305";
+const CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM: &str = "hkdf-sha256+xchacha20poly1305";
 const CREDENTIAL_KEYSLOT_ALGORITHM: &str = "argon2id+xchacha20poly1305";
 const RECOVERY_KEY_PREFIX: &str = "VPS1";
 
@@ -40,6 +45,10 @@ impl VaultKey {
         getrandom::fill(&mut bytes)
             .map_err(|_| "无法从操作系统安全随机源生成同步主密钥".to_string())?;
         Ok(Self(bytes))
+    }
+
+    pub(crate) fn same_material(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 
     #[cfg(test)]
@@ -150,6 +159,49 @@ pub(crate) struct RecoveryKeyslot {
     algorithm: String,
     nonce: String,
     wrapped_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CredentialRecoveryKeyslot {
+    format_version: u32,
+    vault_id: String,
+    slot_id: String,
+    key_domain: String,
+    algorithm: String,
+    nonce: String,
+    wrapped_key: String,
+}
+
+impl CredentialRecoveryKeyslot {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
+        validate_credential_recovery_keyslot(self)?;
+        let encoded =
+            serde_json::to_vec(self).map_err(|_| "无法序列化凭据恢复 keyslot".to_string())?;
+        if encoded.len() > MAX_KEYSLOT_BYTES {
+            return Err("凭据恢复 keyslot 超过 16 KiB 上限".to_string());
+        }
+        Ok(encoded)
+    }
+
+    pub(crate) fn decode(encoded: &[u8]) -> Result<Self, String> {
+        if encoded.is_empty() || encoded.len() > MAX_KEYSLOT_BYTES {
+            return Err("凭据恢复 keyslot 为空或超过 16 KiB 上限".to_string());
+        }
+        let keyslot: Self = serde_json::from_slice(encoded)
+            .map_err(|_| "凭据恢复 keyslot JSON 损坏或字段不受支持".to_string())?;
+        validate_credential_recovery_keyslot(&keyslot)?;
+        decode_exact::<NONCE_BYTES>(&keyslot.nonce, "凭据恢复 keyslot nonce")?;
+        decode_exact::<{ KEY_BYTES + TAG_BYTES }>(
+            &keyslot.wrapped_key,
+            "凭据恢复 keyslot wrapped key",
+        )?;
+        Ok(keyslot)
+    }
+
+    pub(crate) fn vault_id(&self) -> &str {
+        &self.vault_id
+    }
 }
 
 impl RecoveryKeyslot {
@@ -268,7 +320,7 @@ impl Argon2Parameters {
     }
 
     #[cfg(test)]
-    fn minimum_for_tests() -> Self {
+    pub(crate) fn minimum_for_tests() -> Self {
         Self {
             memory_kib: MIN_MEMORY_KIB,
             iterations: MIN_ITERATIONS,
@@ -313,6 +365,10 @@ impl PasswordKeyslot {
 
     pub(crate) fn vault_id(&self) -> &str {
         &self.vault_id
+    }
+
+    pub(crate) fn slot_id(&self) -> &str {
+        &self.slot_id
     }
 }
 
@@ -657,6 +713,87 @@ pub(crate) fn open_recovery_keyslot(
     Ok(VaultKey(bytes))
 }
 
+pub(crate) fn create_credential_recovery_keyslot(
+    recovery_key: &RecoveryKey,
+    vault_id: &str,
+    credential_key: &CredentialVaultKey,
+) -> Result<CredentialRecoveryKeyslot, String> {
+    let mut nonce = [0_u8; NONCE_BYTES];
+    getrandom::fill(&mut nonce)
+        .map_err(|_| "无法从操作系统安全随机源生成凭据恢复 keyslot nonce".to_string())?;
+    create_credential_recovery_keyslot_with_nonce(
+        recovery_key,
+        vault_id,
+        &uuid::Uuid::new_v4().to_string(),
+        credential_key,
+        nonce,
+    )
+}
+
+fn create_credential_recovery_keyslot_with_nonce(
+    recovery_key: &RecoveryKey,
+    vault_id: &str,
+    slot_id: &str,
+    credential_key: &CredentialVaultKey,
+    nonce: [u8; NONCE_BYTES],
+) -> Result<CredentialRecoveryKeyslot, String> {
+    validate_uuid(vault_id, "vault")?;
+    validate_uuid(slot_id, "credential recovery keyslot")?;
+    let kek = derive_credential_recovery_key(recovery_key, vault_id, slot_id)?;
+    let aad = credential_recovery_keyslot_aad(vault_id, slot_id, KEY_BYTES + TAG_BYTES)?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(kek.as_ref()));
+    let wrapped_key = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &credential_key.0,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| "无法使用恢复密钥包裹凭据 vault 密钥".to_string())?;
+    Ok(CredentialRecoveryKeyslot {
+        format_version: FORMAT_VERSION,
+        vault_id: vault_id.to_string(),
+        slot_id: slot_id.to_string(),
+        key_domain: "credential-recovery".to_string(),
+        algorithm: CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM.to_string(),
+        nonce: URL_SAFE_NO_PAD.encode(nonce),
+        wrapped_key: URL_SAFE_NO_PAD.encode(wrapped_key),
+    })
+}
+
+pub(crate) fn open_credential_recovery_keyslot(
+    recovery_key: &RecoveryKey,
+    keyslot: &CredentialRecoveryKeyslot,
+) -> Result<CredentialVaultKey, String> {
+    validate_credential_recovery_keyslot(keyslot)?;
+    let nonce = decode_exact::<NONCE_BYTES>(&keyslot.nonce, "凭据恢复 keyslot nonce")?;
+    let wrapped = decode_exact::<{ KEY_BYTES + TAG_BYTES }>(
+        &keyslot.wrapped_key,
+        "凭据恢复 keyslot wrapped key",
+    )?;
+    let kek = derive_credential_recovery_key(recovery_key, &keyslot.vault_id, &keyslot.slot_id)?;
+    let aad = credential_recovery_keyslot_aad(&keyslot.vault_id, &keyslot.slot_id, wrapped.len())?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(kek.as_ref()));
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &wrapped,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| "同步凭据恢复密钥错误或 keyslot 已被篡改".to_string())?,
+    );
+    if plaintext.len() != KEY_BYTES {
+        return Err("凭据恢复 keyslot 解包后的密钥长度无效".to_string());
+    }
+    let mut bytes = [0_u8; KEY_BYTES];
+    bytes.copy_from_slice(&plaintext);
+    Ok(CredentialVaultKey(bytes))
+}
+
 pub(crate) fn encrypt_sync_object(
     vault_key: &VaultKey,
     vault_id: &str,
@@ -766,6 +903,82 @@ pub(crate) fn decrypt_sync_object(
         .map_err(|_| "同步对象认证失败：密文、身份或域已被篡改".to_string())
 }
 
+pub(crate) fn reencrypt_sync_object(
+    old_vault_key: &VaultKey,
+    new_vault_key: &VaultKey,
+    object: &EncryptedSyncObject,
+) -> Result<EncryptedSyncObject, String> {
+    if old_vault_key.0 == new_vault_key.0 {
+        return Err("新旧同步主密钥必须不同".to_string());
+    }
+    let plaintext = Zeroizing::new(decrypt_sync_object(old_vault_key, object)?);
+    encrypt_sync_object(
+        new_vault_key,
+        &object.vault_id,
+        object.object_kind.clone(),
+        &object.object_id,
+        object.device_id.as_deref(),
+        object.sequence,
+        plaintext.as_ref(),
+    )
+}
+
+pub(crate) fn reencrypt_sync_objects(
+    old_vault_key: &VaultKey,
+    new_vault_key: &VaultKey,
+    objects: &[EncryptedSyncObject],
+) -> Result<Vec<EncryptedSyncObject>, String> {
+    if old_vault_key.0 == new_vault_key.0 {
+        return Err("新旧同步主密钥必须不同".to_string());
+    }
+    if objects.is_empty() || objects.len() > MAX_ROTATION_OBJECTS {
+        return Err("同步对象轮换批次必须为 1 至 10000 项".to_string());
+    }
+
+    let vault_id = objects[0].vault_id.as_str();
+    let mut identities = BTreeSet::new();
+    let mut total_plaintext_bytes = 0usize;
+    let mut plaintexts = Vec::with_capacity(objects.len());
+    for object in objects {
+        if object.vault_id != vault_id {
+            return Err("同步对象轮换批次不能跨 vault".to_string());
+        }
+        if !identities.insert((object.object_kind.domain_label(), object.object_id.as_str())) {
+            return Err("同步对象轮换批次包含重复身份".to_string());
+        }
+        let plaintext = Zeroizing::new(decrypt_sync_object(old_vault_key, object)?);
+        total_plaintext_bytes =
+            checked_rotation_plaintext_total(total_plaintext_bytes, plaintext.len())?;
+        plaintexts.push(plaintext);
+    }
+
+    objects
+        .iter()
+        .zip(plaintexts.iter())
+        .map(|(object, plaintext)| {
+            encrypt_sync_object(
+                new_vault_key,
+                &object.vault_id,
+                object.object_kind.clone(),
+                &object.object_id,
+                object.device_id.as_deref(),
+                object.sequence,
+                plaintext.as_ref(),
+            )
+        })
+        .collect()
+}
+
+fn checked_rotation_plaintext_total(current: usize, next: usize) -> Result<usize, String> {
+    let total = current
+        .checked_add(next)
+        .ok_or_else(|| "同步对象轮换批次总明文长度溢出".to_string())?;
+    if total > MAX_ROTATION_PLAINTEXT_BYTES {
+        return Err("同步对象轮换批次总明文超过 256 MiB".to_string());
+    }
+    Ok(total)
+}
+
 fn validate_keyslot(keyslot: &PasswordKeyslot) -> Result<(), String> {
     if keyslot.format_version != FORMAT_VERSION
         || keyslot.key_domain != "business"
@@ -787,6 +1000,17 @@ fn validate_recovery_keyslot(keyslot: &RecoveryKeyslot) -> Result<(), String> {
     }
     validate_uuid(&keyslot.vault_id, "vault")?;
     validate_uuid(&keyslot.slot_id, "recovery keyslot")
+}
+
+fn validate_credential_recovery_keyslot(keyslot: &CredentialRecoveryKeyslot) -> Result<(), String> {
+    if keyslot.format_version != FORMAT_VERSION
+        || keyslot.key_domain != "credential-recovery"
+        || keyslot.algorithm != CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM
+    {
+        return Err("凭据恢复 keyslot 格式版本、密钥域或算法不受支持".to_string());
+    }
+    validate_uuid(&keyslot.vault_id, "vault")?;
+    validate_uuid(&keyslot.slot_id, "credential recovery keyslot")
 }
 
 fn validate_credential_keyslot(keyslot: &CredentialKeyslot) -> Result<(), String> {
@@ -900,6 +1124,22 @@ fn derive_recovery_key(
     Ok(output)
 }
 
+fn derive_credential_recovery_key(
+    recovery_key: &RecoveryKey,
+    vault_id: &str,
+    slot_id: &str,
+) -> Result<Zeroizing<[u8; KEY_BYTES]>, String> {
+    validate_uuid(vault_id, "vault")?;
+    validate_uuid(slot_id, "credential recovery keyslot")?;
+    let salt = format!("vpshell-sync-v1/credential-recovery/{vault_id}");
+    let info = format!("vpshell-sync-v1/credential-recovery-keyslot/{slot_id}");
+    let hkdf = Hkdf::<Sha256>::new(Some(salt.as_bytes()), &recovery_key.0);
+    let mut output = Zeroizing::new([0_u8; KEY_BYTES]);
+    hkdf.expand(info.as_bytes(), output.as_mut())
+        .map_err(|_| "凭据恢复 KEK 派生失败".to_string())?;
+    Ok(output)
+}
+
 fn keyslot_aad(
     vault_id: &str,
     slot_id: &str,
@@ -931,6 +1171,20 @@ fn recovery_keyslot_aad(
     push_field(&mut aad, slot_id.as_bytes())?;
     push_field(&mut aad, b"business-recovery")?;
     push_field(&mut aad, RECOVERY_KEYSLOT_ALGORITHM.as_bytes())?;
+    aad.extend_from_slice(&(wrapped_length as u64).to_be_bytes());
+    Ok(aad)
+}
+
+fn credential_recovery_keyslot_aad(
+    vault_id: &str,
+    slot_id: &str,
+    wrapped_length: usize,
+) -> Result<Vec<u8>, String> {
+    let mut aad = b"VPSHELL-CREDENTIAL-RECOVERY-KEYSLOT-V1".to_vec();
+    push_field(&mut aad, vault_id.as_bytes())?;
+    push_field(&mut aad, slot_id.as_bytes())?;
+    push_field(&mut aad, b"credential-recovery")?;
+    push_field(&mut aad, CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM.as_bytes())?;
     aad.extend_from_slice(&(wrapped_length as u64).to_be_bytes());
     Ok(aad)
 }
@@ -1236,5 +1490,167 @@ mod tests {
             contains_separator.0,
             RecoveryKey::parse(&exported).unwrap().0
         );
+    }
+
+    #[test]
+    fn credential_recovery_keyslot_is_domain_separated_and_round_trips() {
+        let recovery = RecoveryKey::from_bytes([0x64; KEY_BYTES]);
+        let credential = CredentialVaultKey::from_bytes([0x27; KEY_BYTES]);
+        let slot = create_credential_recovery_keyslot_with_nonce(
+            &recovery,
+            VAULT_ID,
+            "55555555-5555-4555-8555-555555555555",
+            &credential,
+            [0x66; NONCE_BYTES],
+        )
+        .expect("create credential recovery keyslot");
+        assert_eq!(slot.key_domain, "credential-recovery");
+        assert_eq!(slot.algorithm, CREDENTIAL_RECOVERY_KEYSLOT_ALGORITHM);
+        let encoded = slot.encode().expect("encode credential recovery keyslot");
+        assert_eq!(CredentialRecoveryKeyslot::decode(&encoded).unwrap(), slot);
+        let opened = open_credential_recovery_keyslot(&recovery, &slot)
+            .expect("open credential recovery keyslot");
+        assert_eq!(opened.key_material(), credential.key_material());
+
+        let wrong = RecoveryKey::from_bytes([0x65; KEY_BYTES]);
+        assert!(open_credential_recovery_keyslot(&wrong, &slot).is_err());
+
+        let mut tampered = slot.clone();
+        tampered.key_domain = "business-recovery".to_string();
+        assert!(tampered.encode().is_err());
+        assert!(RecoveryKeyslot::decode(&encoded).is_err());
+
+        let mut identity_tampered = slot.clone();
+        identity_tampered.vault_id = "22222222-2222-4222-8222-222222222222".to_string();
+        assert!(open_credential_recovery_keyslot(&recovery, &identity_tampered).is_err());
+
+        let mut wrapped_tampered = slot;
+        let mut wrapped = URL_SAFE_NO_PAD
+            .decode(&wrapped_tampered.wrapped_key)
+            .expect("decode wrapped key");
+        wrapped[0] ^= 0x01;
+        wrapped_tampered.wrapped_key = URL_SAFE_NO_PAD.encode(wrapped);
+        assert!(open_credential_recovery_keyslot(&recovery, &wrapped_tampered).is_err());
+    }
+
+    #[test]
+    fn reencrypt_sync_object_authenticates_old_key_and_preserves_identity() {
+        let old_key = VaultKey::from_bytes([0x11; KEY_BYTES]);
+        let new_key = VaultKey::from_bytes([0x22; KEY_BYTES]);
+        let object = encrypt_sync_object_with_nonce(
+            &old_key,
+            VAULT_ID,
+            SyncObjectKind::Event,
+            "event-rotate",
+            Some(DEVICE_ID),
+            Some(9),
+            b"rotation payload",
+            [0x71; NONCE_BYTES],
+        )
+        .unwrap();
+        let rotated = reencrypt_sync_object(&old_key, &new_key, &object).unwrap();
+        assert_eq!(rotated.vault_id, object.vault_id);
+        assert_eq!(rotated.object_id, object.object_id);
+        assert_eq!(rotated.object_kind, object.object_kind);
+        assert_eq!(rotated.device_id, object.device_id);
+        assert_eq!(rotated.sequence, object.sequence);
+        assert_ne!(rotated.nonce, object.nonce);
+        assert_eq!(
+            decrypt_sync_object(&new_key, &rotated).unwrap(),
+            b"rotation payload"
+        );
+        assert!(decrypt_sync_object(&old_key, &rotated).is_err());
+        let wrong = VaultKey::from_bytes([0x33; KEY_BYTES]);
+        assert!(reencrypt_sync_object(&wrong, &new_key, &object).is_err());
+        assert!(reencrypt_sync_object(&old_key, &old_key, &object).is_err());
+    }
+
+    #[test]
+    fn reencrypt_sync_object_batch_authenticates_every_item_before_rotation() {
+        assert_eq!(
+            checked_rotation_plaintext_total(MAX_ROTATION_PLAINTEXT_BYTES - 1, 1).unwrap(),
+            MAX_ROTATION_PLAINTEXT_BYTES
+        );
+        assert!(checked_rotation_plaintext_total(MAX_ROTATION_PLAINTEXT_BYTES, 1).is_err());
+        assert!(checked_rotation_plaintext_total(usize::MAX, 1).is_err());
+
+        let old_key = VaultKey::from_bytes([0x41; KEY_BYTES]);
+        let new_key = VaultKey::from_bytes([0x42; KEY_BYTES]);
+        let first = encrypt_sync_object_with_nonce(
+            &old_key,
+            VAULT_ID,
+            SyncObjectKind::Event,
+            "event-batch-rotate",
+            Some(DEVICE_ID),
+            Some(21),
+            b"first rotation payload",
+            [0x51; NONCE_BYTES],
+        )
+        .unwrap();
+        let second = encrypt_sync_object_with_nonce(
+            &old_key,
+            VAULT_ID,
+            SyncObjectKind::Blob,
+            "blob-batch-rotate",
+            None,
+            None,
+            b"second rotation payload",
+            [0x52; NONCE_BYTES],
+        )
+        .unwrap();
+
+        let rotated =
+            reencrypt_sync_objects(&old_key, &new_key, &[first.clone(), second.clone()]).unwrap();
+        assert_eq!(rotated.len(), 2);
+        assert_eq!(rotated[0].object_id, first.object_id);
+        assert_eq!(rotated[1].object_id, second.object_id);
+        assert_ne!(rotated[0].nonce, first.nonce);
+        assert_ne!(rotated[1].nonce, second.nonce);
+        assert_eq!(
+            decrypt_sync_object(&new_key, &rotated[0]).unwrap(),
+            b"first rotation payload"
+        );
+        assert_eq!(
+            decrypt_sync_object(&new_key, &rotated[1]).unwrap(),
+            b"second rotation payload"
+        );
+        assert!(decrypt_sync_object(&old_key, &rotated[0]).is_err());
+        assert!(decrypt_sync_object(&old_key, &rotated[1]).is_err());
+
+        let wrong_key = VaultKey::from_bytes([0x43; KEY_BYTES]);
+        let late_wrong_key = encrypt_sync_object_with_nonce(
+            &wrong_key,
+            VAULT_ID,
+            SyncObjectKind::Index,
+            "index-wrong-key",
+            None,
+            None,
+            b"wrong key payload",
+            [0x53; NONCE_BYTES],
+        )
+        .unwrap();
+        assert!(
+            reencrypt_sync_objects(&old_key, &new_key, &[first.clone(), late_wrong_key]).is_err()
+        );
+        assert!(
+            reencrypt_sync_objects(&old_key, &new_key, &[first.clone(), first.clone()]).is_err()
+        );
+        let oversized = vec![first.clone(); MAX_ROTATION_OBJECTS + 1];
+        assert!(reencrypt_sync_objects(&old_key, &new_key, &oversized).is_err());
+
+        let other_vault = encrypt_sync_object_with_nonce(
+            &old_key,
+            "22222222-2222-4222-8222-222222222222",
+            SyncObjectKind::Blob,
+            "blob-other-vault",
+            None,
+            None,
+            b"other vault payload",
+            [0x54; NONCE_BYTES],
+        )
+        .unwrap();
+        assert!(reencrypt_sync_objects(&old_key, &new_key, &[first, other_vault]).is_err());
+        assert!(reencrypt_sync_objects(&old_key, &new_key, &[]).is_err());
+        assert!(reencrypt_sync_objects(&old_key, &old_key, &[second]).is_err());
     }
 }

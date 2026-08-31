@@ -320,6 +320,7 @@ export function HostOverview({
               onChange={(event) => onIntervalChange?.(Number(event.target.value))}
               style={{ maxWidth: 74, padding: "2px 3px", fontSize: 10 }}
             >
+              {![5, 15, 30, 60, 120].includes(intervalSeconds) ? <option value={intervalSeconds}>{intervalSeconds} 秒</option> : null}
               {[5, 15, 30, 60, 120].map((seconds) => <option key={seconds} value={seconds}>{seconds} 秒</option>)}
             </select>
             <button

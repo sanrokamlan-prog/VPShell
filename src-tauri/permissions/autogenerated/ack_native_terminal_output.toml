@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ack-native-terminal-output"
+description = "Enables the ack_native_terminal_output command without any pre-configured scope."
+commands.allow = ["ack_native_terminal_output"]
+
+[[permission]]
+identifier = "deny-ack-native-terminal-output"
+description = "Denies the ack_native_terminal_output command without any pre-configured scope."
+commands.deny = ["ack_native_terminal_output"]

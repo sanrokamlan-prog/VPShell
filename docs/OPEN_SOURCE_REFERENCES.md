@@ -29,10 +29,17 @@ Actual third-party code used or adapted by VPShell is listed separately in
 | [openFinalShell](https://github.com/kexue-aihao/openfinalshell) | No repository-level license detected on 2026-08-01 | FinalShell migration behavior and familiar desktop layout | Behavior reference only; no copied code; never treated as a credential-decoding authority |
 | [FinalShell password decoder](https://github.com/qurikuduo/finalshellPasswordDecoder) | Apache-2.0 | Legacy FinalShell DES import compatibility | Clean Rust port; see `THIRD_PARTY_NOTICES.md` |
 | [rusqlite](https://github.com/rusqlite/rusqlite) | MIT or Apache-2.0 | Local schema-v1 SQLite transaction/event store | Dependency used with `bundled`, no copied source; version/feature and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
-| [RustCrypto password-hashes/AEADs/KDFs](https://github.com/RustCrypto) | MIT or Apache-2.0 | Argon2id key wrapping, XChaCha20-Poly1305 envelopes and HKDF domain separation | Stable crates used through public APIs; no copied source; exact versions/features and replacement plan recorded in `THIRD_PARTY_NOTICES.md` and development docs |
+| [RustCrypto password-hashes/AEADs/KDFs/MACs](https://github.com/RustCrypto) | MIT or Apache-2.0 | Argon2id key wrapping, XChaCha20-Poly1305 envelopes, HKDF domain separation and Relay HMAC-SHA256 proofs | Stable crates used through public APIs; no copied source; exact versions/features and replacement plan recorded in `THIRD_PARTY_NOTICES.md` and development docs |
+| [ed25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek/tree/ed25519-3.0.0/ed25519-dalek) | BSD-3-Clause | Strict Ed25519 device-operation signing and active-registry public-key verification | Existing locked 3.0.0 crate promoted to a direct dependency with default features disabled; public APIs only, no source, examples, vectors or protocol text copied |
 | [quick-xml](https://github.com/tafia/quick-xml) and [percent-encoding](https://github.com/servo/rust-url) | MIT | Bounded WebDAV XML parsing and href decoding | Existing locked packages promoted to direct dependencies; public APIs only, no copied source or provider implementation |
+| Amazon S3 REST API: [SigV4](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sig-v4-header-based-auth.html), [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html), [PutObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html) | AWS protocol documentation | S3 canonical request/signing scope, continuation token and `If-None-Match: *` behavior | Protocol behavior only; no AWS SDK, source, examples, fixtures, prose or assets copied |
+| [image-rs/image-png](https://github.com/image-rs/image-png/tree/fbf256669ff23594bf4c618b61fde6a52b79e088) | MIT or Apache-2.0 | Bounded PNG decoding and canonical re-encoding for managed wallpaper blobs | Locked 0.17.16 crate promoted to a direct dependency and used only through public APIs; no source, example, fixture or asset copied |
 | [ssh2-rs](https://github.com/alexcrichton/ssh2-rs), libssh2 and OpenSSL | MIT or Apache-2.0 / BSD-style / Apache-2.0 | Android-compatible SSH/SFTP transport without a system executable | Existing dependency used through public APIs; vendored OpenSSL only enables NDK cross-compilation; no copied source |
 | [android-native-keyring-store](https://github.com/open-source-cooperative/android-native-keyring-store) and keyring-core | MIT or Apache-2.0 | Android Keystore-backed opaque credential references | Dependencies used through public APIs; no copied source; platform scope and removal plan recorded in `THIRD_PARTY_NOTICES.md` |
+| [Tauri Biometric plugin](https://github.com/tauri-apps/plugins-workspace/tree/db9c5998feff9384f9cbbefcbe0d45937c00a1fc/plugins/biometric) and AndroidX Biometric | MIT or Apache-2.0 / Apache-2.0 | Rust-owned system biometric/device-credential prompt and capability checks | Plugin 2.3.2 used through its public Rust API; AndroidX is transitive; no source copied; access-gate and removal boundaries recorded in `THIRD_PARTY_NOTICES.md` |
+| [russh](https://github.com/Eugeny/russh/tree/a3766cca2223f851df786e88f823ea08dabfbdea) and [russh-sftp](https://github.com/AspectUnk/russh-sftp/tree/e145c1f7ece99f41f558949ef59731f2cd1a9dfe) | Apache-2.0 / Apache-2.0 | Pure Rust desktop SSH handshake/authentication, mandatory host-key callback, PTY/Shell, SFTP, nested `direct-tcpip` streams and bounded local/remote/dynamic forwarding | Exact 0.62.7/2.4.0 dependencies used through public APIs; no source copied; scope is an explicit bounded probe, opt-in route terminal, shared directory browser and loopback-only local/remote/SOCKS5 CONNECT forwards, while system OpenSSH remains the default |
+| [MaidKit](https://github.com/Solsynth/MaidKit/tree/eaf4922072960158f04021ed866323e6c17209cd) | AGPL-3.0 | SSH-only non-intrusive management, dual-pane SFTP, services/containers/databases, jump/forwarding, audit, scripts and explicit agent action approval | Behavior and product decomposition reference only; no source, assets, text or implementation copied/adapted into Apache-2.0 VPShell |
+| [Mosh](https://github.com/mobile-shell/mosh/tree/decd9b705eb81626f694335b8d5940538beb06da) | GPL-3.0 | Separate interactive roaming terminal, SSH bootstrap, remote helper and bounded UDP port selection | Optional external executable and behavior reference only; no source, protocol implementation, assets or text copied/linked/bundled into Apache-2.0 VPShell |
 
 ## Adopted decisions
 
@@ -76,6 +83,67 @@ inventory and per-item partial results. No reviewed project's file-manager code 
 - 2026-08-09: Rechecked remote file-operation and visual chmod behavior before the independent
   preview-token/batch implementation; no new third-party code or dependency was added.
 - 2026-08-10: Enabled the existing ssh2/libssh2 vendored OpenSSL build path for Android NDK
+- 2026-08-19: Inspected `ssh2-rs` 0.9.6 commit `011cfc4bb6040928c6827c7b821dddd132f7cfc8` public SFTP APIs for exclusive create, fsync, close and rename flags while implementing the independent SFTP sync transport; no source or assets were copied
   cross-compilation and recorded its dependency boundary; no upstream implementation was copied.
 - 2026-08-10: Added the maintained Android-native keyring store through its public Rust API and
   recorded its Keystore/SharedPreferences, license and removal boundaries; no upstream source was copied.
+- 2026-08-17: Reviewed Tauri plugins-workspace biometric implementation at commit
+  `db9c5998feff9384f9cbbefcbe0d45937c00a1fc` and AndroidX documentation; used plugin 2.3.2's
+  public Rust API and recorded its weak-biometric/device-credential contract without copying source.
+- 2026-08-17: Reviewed MaidKit README at commit
+  `eaf4922072960158f04021ed866323e6c17209cd`; its AGPL-3.0 code/assets remain outside VPShell,
+  and only the abstract SSH-only module split, dual-pane operations, audit and approval patterns
+  were recorded for later independent design.
+- 2026-08-17: Reviewed russh 0.62.7 at tag commit
+  `a3766cca2223f851df786e88f823ea08dabfbdea` and russh-sftp 2.4.0 at commit
+  `e145c1f7ece99f41f558949ef59731f2cd1a9dfe`; the Apache-2.0 crates are used only through public
+  APIs for the independently implemented bounded desktop readiness and terminal paths. For the terminal
+  expansion, only russh's public interactive-client example and channel/client API signatures at that
+  exact commit were rechecked; no implementation, text, test fixture or asset was copied.
+- 2026-08-17: Rechecked only the public `Handle::channel_open_session`, `SftpSession::new`,
+  `canonicalize`, `symlink_metadata`, `read_dir` and `close` signatures at the same exact commits for
+  the independently implemented long-lived directory actor; no upstream implementation or test code was copied.
+- 2026-08-17: Rechecked only russh tag `v0.62.7` public `Handle::channel_open_direct_tcpip`,
+  `Channel::into_stream` and `client::connect_stream` signatures for the independently implemented
+  nested route connector. The connection-chain ownership, timeout/error policy, frontend route model and
+  two-sshd fixture were designed in VPShell; no upstream implementation, example, fixture or text was copied.
+- 2026-08-17: Reused the same reviewed `Handle::channel_open_direct_tcpip` and `Channel::into_stream`
+  public APIs for an independently designed loopback-only local forward. Listener ownership, capacity,
+  cancellation, counters, IPC/UI and restricted OpenSSH fixture are VPShell code; no upstream forwarding
+  implementation, example, fixture or text was copied.
+- 2026-08-17: Rechecked russh tag `v0.62.7` commit
+  `a3766cca2223f851df786e88f823ea08dabfbdea`, its Apache-2.0 `LICENSE.txt`, and only the public
+  `Handle::tcpip_forward`, `Handle::cancel_tcpip_forward`, `Handler::server_channel_open_forwarded_tcpip`
+  and `ChannelOpenHandle` contracts for loopback-only remote forwarding. VPShell independently designed
+  endpoint matching, pre-accept capacity rejection, route ownership, counters, cancellation, IPC/UI and
+  the restricted two-sshd test; no upstream implementation, example, fixture, text or asset was copied.
+- 2026-08-18: Reused the already reviewed russh tag `v0.62.7` public
+  `Handle::channel_open_direct_tcpip` and `Channel::into_stream` APIs for independently designed
+  loopback-only SOCKS5 CONNECT forwarding. The bounded no-authentication parser, address validation,
+  listener/route ownership, counters, cancellation, IPC/UI and two-sshd fixture are VPShell code; no
+  upstream SOCKS implementation, example, fixture, text or asset was copied and no new dependency was added.
+- 2026-08-18: Verified RustCrypto/MACs tag `hmac-v0.12.1` commit
+  `46797e3b44973a30edb9d7f3a3ebb41810061d90`; its crate manifest declares MIT OR Apache-2.0 and a
+  single public `digest` dependency. VPShell promotes the already locked crate to a direct dependency
+  with default features disabled and uses only its public `Mac` API for independently specified Relay
+  v1 request/response proofs. No upstream source, examples, vectors, protocol text or assets were copied.
+- 2026-08-18: Reviewed Mosh README/manual and wrapper interface at commit
+  `decd9b705eb81626f694335b8d5940538beb06da`; upstream is GPL-3.0. VPShell only launches the user's
+  separately installed `mosh` executable with independently constructed fixed arguments. No Mosh source,
+  protocol code, examples, tests, assets or documentation text was copied, adapted, linked or bundled.
+- 2026-08-19: Verified image-png tag `v0.17.16` commit
+  `fbf256669ff23594bf4c618b61fde6a52b79e088` and its MIT/Apache-2.0 license files. VPShell promotes
+  the already locked crate to a direct dependency and uses only its public decoder/encoder APIs for
+  independently specified PNG limits and canonicalization; no source, examples, fixtures or assets
+  were copied.
+- 2026-08-19: Verified the official `ed25519-dalek` tag `ed25519-3.0.0` at commit
+  `07bef73ff85998a206cd2cea7f2605c801d0d1c9`, its manifest, public signing/verification APIs and
+  BSD-3-Clause license declaration. VPShell promotes the already locked crate to a direct dependency
+  with default features disabled and uses only its public strict signing/verification APIs for an
+  independently specified domain-separated operation envelope. No source, examples, vectors,
+  protocol text or assets were copied.
+- 2026-08-19: Reviewed the official Amazon S3 SigV4 header-authentication, ListObjectsV2 and
+  PutObject API references. VPShell independently implements only the bounded REST subset needed by
+  immutable encrypted objects using already locked `reqwest`, `hmac`, `sha2` and `quick-xml` public
+  APIs. No AWS SDK, source, sample implementation, fixture, documentation text or asset was copied;
+  the repository fixture is independently written and only checks observable protocol behavior.

@@ -7,8 +7,12 @@
   "platforms": ["android"],
   "permissions": [
     "allow-android-preview-status",
+    "allow-android-sync-status",
+    "allow-android-security-status",
+    "allow-android-unlock",
+    "allow-android-set-biometric-enabled",
     "allow-android-inspect-host-key",
-    "allow-android-set-lifecycle",
+    "allow-android-enter-background",
     "allow-android-connect-host",
     "allow-android-disconnect-host",
     "allow-android-list-remote-files",

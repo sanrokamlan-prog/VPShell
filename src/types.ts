@@ -17,6 +17,7 @@ export interface HostProfile {
   androidKeyRef?: string;
   androidKeyPassphraseRef?: string;
   hostKeySha256?: string;
+  jumpRoute?: string[];
   source?: "manual" | "finalshell" | "openssh" | "putty" | "xshell" | "securecrt" | "mobaxterm" | "tabby" | "termius";
   lastPath?: string;
   latency?: number;
@@ -27,6 +28,7 @@ export interface TerminalSession {
   hostId: string;
   title: string;
   state: ConnectionState;
+  engine: "openssh" | "russh" | "mosh";
   currentPath: string;
   reportedHostname?: string;
   contextSource: "profile" | "shell-integration";
@@ -55,6 +57,7 @@ export interface CommandParameter {
   placeholder?: string;
   defaultValue?: string;
   required?: boolean;
+  sensitive?: boolean;
 }
 
 export interface CommandRecipe {
@@ -89,11 +92,25 @@ export interface CommandHistoryItem {
   createdAt: string;
 }
 
+export interface ParameterHistoryItem {
+  id: string;
+  commandId: string;
+  parameterName: string;
+  value: string;
+  createdAt: string;
+}
+
 export interface ConnectionHistoryItem {
   id: string;
   hostId: string;
   connectedAt: string;
   path: string;
+}
+
+export interface PathHistoryItem {
+  id: string;
+  path: string;
+  createdAt: string;
 }
 
 export interface DeletedHostItem {
@@ -103,7 +120,7 @@ export interface DeletedHostItem {
   expiresAt: string;
   commandHistory: CommandHistoryItem[];
   connectionHistory: ConnectionHistoryItem[];
-  pathHistory: string[];
+  pathHistory: PathHistoryItem[];
 }
 
 export interface SyncSettings {
@@ -112,6 +129,14 @@ export interface SyncSettings {
   endpoint: string;
   remotePath: string;
   username: string;
+  providerHostId?: string;
+  providerCredentialRef?: string;
+  providerCaRef?: string;
+  s3Region: string;
+  s3Bucket: string;
+  s3Prefix: string;
+  s3PathStyle: boolean;
+  gatewayVaultId: string;
   lastSyncedAt?: string;
   totpEnabled: boolean;
   syncSecrets: boolean;
@@ -121,6 +146,7 @@ export interface WallpaperSettings {
   source: "none" | "local" | "url";
   value: string;
   opacity: number;
+  managedBlobId?: string;
 }
 
 export interface TerminalAppearanceSettings {
@@ -134,6 +160,7 @@ export interface ApplicationSettings {
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
   packageTransfersEnabled: boolean;
+  monitorIntervalSeconds: number;
 }
 
 export interface AppState {
@@ -143,8 +170,9 @@ export interface AppState {
   commands: CommandRecipe[];
   sshKeys: SshKeyProfile[];
   commandHistory: CommandHistoryItem[];
+  parameterHistory: ParameterHistoryItem[];
   connectionHistory: ConnectionHistoryItem[];
-  pathHistory: Record<string, string[]>;
+  pathHistory: Record<string, PathHistoryItem[]>;
   sync: SyncSettings;
   wallpaper: WallpaperSettings;
   terminalAppearance: TerminalAppearanceSettings;

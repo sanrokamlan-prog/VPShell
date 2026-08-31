@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-revoke-sync-device"
+description = "Enables the revoke_sync_device command without any pre-configured scope."
+commands.allow = ["revoke_sync_device"]
+
+[[permission]]
+identifier = "deny-revoke-sync-device"
+description = "Denies the revoke_sync_device command without any pre-configured scope."
+commands.deny = ["revoke_sync_device"]

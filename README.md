@@ -18,7 +18,7 @@
 ![VPShell 工作台](docs/assets/workspace.png)
 
 > [!IMPORTANT]
-> `v0.1.0-alpha.9` 是 Windows-first 技术预览版。本版包含跨重启传输恢复、远程文件操作、Linux 监控、Shell Integration、配置迁移和同步协议核心预览；Android 仅为独立预览工程。端到端同步、跳板机、中继加速和 Android 真机验收仍未完成。当前版本不应作为生产密码或私钥管理器。
+> `v0.1.0-alpha.9` 是 Windows-first 技术预览版。本版包含跨重启传输恢复、远程文件操作、Linux 监控、Shell Integration、配置迁移和同步协议核心预览；Android 仅为独立预览工程。当前源码工作区已加入原生跳板、回环限定的本地/远端/SOCKS5 CONNECT 转发、原生 route 滚动评估、自建 Relay 参考服务与部署/轮换基线；桌面 Local Folder、HTTPS WebDAV 与固定 host-key 的 SFTP vault 已有显式初始化/解锁、手动单周期和解锁期间的 Rust 自动调度，WebDAV 可选择由 Rust 导入的本机 PEM CA。真实部署、完整端到端同步和 Android 真机验收尚未完成。当前版本不应作为生产密码或私钥管理器。
 
 ## 参与 Alpha 测试
 
@@ -38,15 +38,15 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 
 | 运维痛点 | VPShell 方向 | `v0.1.0-alpha.7` |
 | --- | --- | :---: |
-| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **内部基础层**：密码学、恢复/导出、设备 registry、Local/WebDAV provider、持久 outbox/replay 与确定性 merge 已实现并测试；协调器和设置接线未实现，应用仍不能执行同步 |
+| 多设备配置被厂商云锁定 | Local Folder、WebDAV、SFTP、S3、自建 Gateway，上传前端到端加密 | **部分接线**：密码学、恢复/导出、设备 registry、五类 provider、持久 outbox/replay、确定性 merge 与 Rust 协调器内核已实现；桌面五种 provider 可显式初始化/解锁并运行手动或自动单周期，WebDAV/S3/Gateway 凭据及 SFTP 认证材料只从本机系统凭据/已保存主机读取；主机公开字段、安全自建脚本、五个固定设置实体、公开命令/路径/非敏感参数/已认证连接历史、PNG/JPEG/WebP 背景 blob、活动设备确认式 blob GC、冲突中心及受控设备登记/改名/撤销已接入，SFTP/S3/Gateway 不支持条件删除而保守保留旧密文，Android 只读同步状态已接通但运行和设备管理能力保持禁用；密钥轮换、真实外部 Gateway 与多设备矩阵仍未完成 |
 | 大量小文件/目录传输缓慢 | 自动探测 `tar + zstd`，缺少远端能力时回退 SFTP | **已实现**：直连后端 |
-| 命令、路径和参数反复复制 | 不设产品条数上限的事件历史、快速检索和参数模板 | **部分实现**：本地历史与最近连接 |
+| 命令、路径和参数反复复制 | 不设产品条数上限的事件历史、快速检索和参数模板 | **部分实现**：公开命令、每主机最近路径、模板非敏感参数和 Rust 证明的已认证连接历史已具备加密同步与删除；旧版或前端自行构造的连接尝试只留本机 |
 | 操作时忘记当前主机 | 常驻配置 IP、环境标记、Shell Integration 上报 hostname/cwd | **v0.2 工作区**：显式 bash/zsh 探针与 8 层自报上下文栈 |
 | 多机操作效率低且容易误发 | Compose 广播、目标清单、生产/危险命令保护 | **v0.2 工作区**：Rust 冻结预览、生产确认与危险广播拦截 |
 | 常用运维脚本四处散落 | 有来源、版本、风险和参数的可同步脚本中心 | **部分实现**：本地脚本中心 |
 | 不知道该运行什么排障命令 | 中文意图匹配、参数表单、风险分级和执行前预览 | **已实现**：22 项本地命令/工具 |
 | 本机与 VPS 线路难量化 | 路由追踪、限量 HTTP 下载、双向 UDP 吞吐/抖动/丢包 | **已实现**：本机网络诊断 |
-| 海外 SSH 高延迟 | 跳板/代理/自建中继测速选路，可选 Mosh | **未实现**：当前仅直连 |
+| 海外 SSH 高延迟 | 跳板/代理/自建中继测速选路，可选 Mosh | **部分实现**：原生终端支持已固定逐跳身份的应用内跳板和自建 Relay；路线评估可比较直连与已配置跳板的完整 SSH/SFTP readiness；桌面直连可显式选择系统 Mosh，但没有真实区域指标、自动切换或加速承诺 |
 | 终端外观受限 | 本机或 URL 背景、可见度调节并随资料库同步 | **已实现**：本机/URL 背景 |
 
 ## 当前可用能力
@@ -64,18 +64,20 @@ VPShell 是 **Apache-2.0 开源、local-first 的 VPS/SSH 运维工作台**。�
 - v0.2 工作树提供 OpenSSH、PuTTY、Xshell、SecureCRT、MobaXterm、Tabby 和 Termius 的显式来源迁移预览；Rust 只读扫描并逐字段报告映射、跳过和失败，密码、Token、私钥内容及其他应用 vault 不进入 IPC。
 - 连接前通过无凭据的系统 OpenSSH 握手和 `ssh-keygen` 检查 `known_hosts`，并只启用当前 `ssh` 二进制实际报告支持的安全 KEX；未知主机显示算法和 SHA256 指纹供明确确认，确认时只进行一次远端复核并在本地验证写入，已变化指纹硬拒绝，终端、SFTP 与采样共享信任结果。
 - Ed25519/RSA4096 密钥生成、OpenSSH 口令加密，以及把所选公钥安装到当前已连接主机。
+- 桌面原生 `russh` route 可显式启动固定 `127.0.0.1` 的本地、远端和 SOCKS5 动态转发；动态转发只实现无认证 CONNECT，拒绝 BIND、UDP ASSOCIATE、未知地址类型和无效目标，最多 8 条且每条最多 32 个连接。源码已通过 Actions 的真实双 sshd fixture，真实多服务器兼容仍需外部验收，系统 OpenSSH 继续是默认引擎。
+- 桌面直连标签可显式选择 Mosh 独立交互模式。Rust 以固定参数启动本机 `mosh`，SSH bootstrap 继续强制本机 `known_hosts`、安全 KEX 和受限 AskPass，远端 helper 固定为 `mosh-server`，UDP 固定为 60000–61000。它不支持 VPShell 跳板 route，不复用 SFTP 或转发；本机/远端安装、UDP firewall、漫游和长时间断网恢复需用户在自有节点验收。
 - 多终端 Compose 命令栏、命令历史检索和路径快捷输入。
 - 连接后可显式启用 bash/zsh Shell Integration；带随机会话令牌的有界控制帧上报 hostname/user/cwd，Rust 维护最多 8 层嵌套上下文，退出嵌套 shell 后回退到已知祖先。它是远端自报状态，不替代主机密钥验证。
 - Compose 安全广播由 Rust 冻结命令、目标会话和 Shell 上下文代际，两分钟单次预览后才发送；生产目标持续标记，认证交互与已知破坏性命令禁止广播，目标变化逐项跳过并分别报告成功/失败/跳过。Raw input 广播仍未实现。
 - 本机 PNG/JPEG/WebP 壁纸、TTF/OTF/WOFF 字体由 Rust 按魔数、大小和符号链接边界读取并原子缓存；HTTPS 壁纸禁止凭据/query/fragment、禁止重定向，WebView 只接收受管 data URL，业务状态不再写入 localStorage/IndexedDB。
-- 22 项命令/工具的本地中文意图搜索、参数填写、风险提示和执行前预览。
+- 22 项命令/工具的本地中文意图搜索、参数填写、最近非敏感参数值预填、风险提示和执行前预览；显式敏感字段和敏感名称永不进入参数历史。
 - 脚本来源、风险提示、复制/加入命令栏和用户自建配方。
 - 本机路由追踪、指定 URL 限量下载测速，以及本机与自建 VPS 之间的 iperf3 UDP 双向测速。
 - 本机 PNG/JPEG/WebP 或 URL 终端背景。
 - 首次启动自动显示分步使用指南，逐项标明添加、导入、连接、SFTP、广播、密钥、设置和升级按钮；右上角问号可随时重新打开。
 - 删除的主机、历史和路径进入 30 天回收站，可恢复或永久删除；关联系统凭据仅在永久删除或到期且未被其他主机引用时清理。
 
-当前连接和传输只支持直连；取消会在安全检查点停止工作并清理已知临时路径，最终提交阶段可能已经来不及取消。`v0.1.0-alpha.7` 发布产物仍不支持暂停、断点续传、应用重启后的持久任务恢复或文件坞变更操作；当前 v0.2 工作区已实现跨重启恢复、带 Rust 预览令牌和二次确认的文件坞操作，以及 Rust 管理的有界 Linux 监控历史与暂停/频率控制，等待下一版发布。远端监控仍仅支持 Linux，历史只保留在当前应用进程中。同步设置仍是本地草稿。完整边界见 [架构文档](docs/ARCHITECTURE.md#2-v010-已实现)。
+当前连接和传输只支持直连；取消会在安全检查点停止工作并清理已知临时路径，最终提交阶段可能已经来不及取消。`v0.1.0-alpha.7` 发布产物仍不支持暂停、断点续传、应用重启后的持久任务恢复或文件坞变更操作；当前 v0.2 工作区已实现跨重启恢复、带 Rust 预览令牌和二次确认的文件坞操作，以及 Rust 管理的有界 Linux 监控历史与暂停/频率控制，等待下一版发布。远端监控仍仅支持 Linux，采样历史只保留在当前应用进程中。Local Folder 同步在桌面显式解锁后由 Rust 统一处理启动/业务变化防抖、周期和失败复查，也保留手动单周期；当前接通主机公开字段、安全自建脚本、终端字体族/字号/行高、背景可见度、自动上传编辑文件/包传输两个行为偏好、规范化 PNG、结构校验 JPEG/WebP 背景 blob、活动设备确认式远端回收及通过严格验证的命令/路径/非敏感参数/已认证连接历史。GC 仅删除已通过 30 天确认保留且重新认证的 blob，provider 不支持条件删除时保守保留；编辑器路径、自定义字体资产/名称仍未接线，调度也不是应用关闭后的系统后台服务。完整边界见 [架构文档](docs/ARCHITECTURE.md#2-v010-已实现)。
 
 ## 下载与安装
 
@@ -155,19 +157,23 @@ iperf3 -s -p 5201
 
 同步目标设计为不可信对象存储。完整方案不会上传 SQLite 整库，而是把本地 operation 分段、压缩、加密后上传；二级同步密码通过 Argon2id 包裹随机 Vault Master Key，数据对象使用 XChaCha20-Poly1305。
 
-Google Authenticator/TOTP 只用于未来自建 Gateway 的账户登录，不能替代二级同步密码或恢复密钥。Local Folder、WebDAV、SFTP 和 S3 不虚构一层本地 TOTP。完整边界见 [SYNC.md](docs/SYNC.md)。
+Google Authenticator/TOTP 只用于自建 Gateway 的账户登录，不能替代二级同步密码或恢复密钥。Local Folder、WebDAV、SFTP 和 S3 不虚构一层本地 TOTP。完整边界见 [SYNC.md](docs/SYNC.md)。
 
 ## “智能加速”的边界
 
 调整 SSH keepalive、压缩或复用连接并不等于海外线路加速。真正的跨境选路需要中继节点、持续测速和可解释的路线选择。
 
-VPShell 当前只实现 `Direct`。后续路线是：
+VPShell 当前源码实现 `Direct`、用户显式配置的原生逐跳 route、两端均限制回环的本地/远端端口转发，以及固定本机回环监听的 SOCKS5 CONNECT 动态转发。后续路线是：
 
 ```text
-Direct -> ProxyJump -> SOCKS/HTTP -> 用户自建 Relay -> 可选托管节点
+Direct -> ProxyJump -> SOCKS5 -> HTTP CONNECT -> 用户自建 Relay -> 可选托管节点
 ```
 
-中继只转发到目标的 SSH 密文字节，不终止最终 SSH，也不读取凭据。没有实际中继和公开实测指标前，项目不会把普通客户端优化宣传成“海外智能加速”。
+`vpshell-relay` 现在提供可运行的自建参考服务与本机回环 client：服务端用随机挑战/HMAC-SHA256 认证、精确目标 allowlist、连接/字节/时长限额和无敏感值 JSONL 审计，只转发最终 SSH 密文字节，不终止 SSH 或读取凭据。服务端支持最多 4 个 token 的有界重叠轮换，仓库提供 hardened systemd/logrotate 基线以及协议升级、撤销、回退和故障恢复演练；协议控制面仍不加密，真实 TLS/VPN、firewall、日志轮换执行和多区域部署由运维者外部验收。没有真实部署和公开实测指标前，项目不会把它宣传成“海外智能加速”。部署和限制见 [docs/RELAY.md](docs/RELAY.md)。
+
+网络诊断的“路线评估”由 Rust 在用户显式启动后执行。它最多比较 4 个原生 route；当前界面为同一目标生成直连和已配置跳板两种候选，每轮都完成逐跳认证、host-key pin 和最终 SFTP readiness。单个 campaign 限 30–300 秒间隔、3–20 轮滚动窗口和最多 120 轮；评分由成功率、中位数、P95 与失败惩罚组成，80% 成功率以下不推荐，15% 切换滞后避免小幅波动反复改变建议。快照只返回候选 ID、统计量和稳定错误码，关闭对话框即取消。它不自动修改 route，也不代表 UDP 丢包、吞吐、地域质量或“加速”效果。
+
+Mosh 是终端顶部的独立桌面直连模式，不是路线评估结果或自动回退。使用前需自行安装本机 `mosh` 和远端 `mosh-server`，并在自有服务器 firewall 放行 UDP 60000–61000；VPShell 不安装软件或修改 firewall。首次连接仍先经过结构化 SSH host-key 检查，Mosh 的 SSH bootstrap 随后强制严格主机密钥策略。文件坞、上传下载、外部编辑和端口转发继续使用各自 SSH/SFTP 路径。
 
 ## 本地开发
 
@@ -205,6 +211,7 @@ docs/ARCHITECTURE.md    SSH、终端、传输、历史、脚本和中继设计
 docs/DEVELOPMENT.md     模块边界、IPC、安全、测试与发布准入标准
 docs/MIGRATION.md       FinalShell 导入与其他客户端迁移边界
 docs/OPEN_SOURCE_REFERENCES.md  开源参考、许可证边界与已采纳设计
+docs/RELAY.md           自建 Relay 协议、运行边界、限流与审计
 docs/SYNC.md            加密同步、冲突、恢复和 TOTP 边界
 scripts/                本地开发辅助脚本
 ```
@@ -218,6 +225,7 @@ VPShell 会持续审计成熟公开项目的模块边界和用户工作流，但
 - [WindTerm](https://github.com/kingToolbox/WindTerm)：认证完成后再按顺序启动 Shell、SFTP 和系统监控，减少并发失败与重复提示；
 - [Termora](https://github.com/TermoraDev/termora)：有界并发传输、远端互传、权限编辑和分层主机工作流；其 AGPL-3.0 实现只作行为参考；
 - [openFinalShell](https://github.com/kexue-aihao/openfinalshell)：仅用于核对 FinalShell 数据迁移和桌面工作流，不把兼容代码作为安全事实来源。
+- [Mosh](https://github.com/mobile-shell/mosh)：只参考独立交互模式和公开命令边界，并调用用户另行安装的程序；GPL-3.0 源码未复制、链接或打包。
 
 所有吸收项都要重新按 VPShell 的 Rust/Tauri 安全边界实现，并经过本项目测试与许可证检查。逐项目的许可证边界、代码复用状态和已采纳设计见 [OPEN_SOURCE_REFERENCES.md](docs/OPEN_SOURCE_REFERENCES.md)；实际使用或改编的第三方代码只记录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -230,7 +238,7 @@ VPShell 会持续审计成熟公开项目的模块边界和用户工作流，但
 | Alpha | 真实 SSH/SFTP 工作流与可安装预览版 | 首个技术预览 |
 | v0.2 | 传输可靠性、上下文识别与安全批量运维 | 进行中：跨重启恢复、文件坞移动/递归权限与安全批量任务已实现，等待发布与平台验收 |
 | v0.3 | 用户自控的端到端加密同步 | 内部协议原语分批实现中，尚不是可用产品功能 |
-| Android Preview | 移动终端、SFTP、凭据与同步 | Android 壳及 Rust/libssh2 连接、终端、只读 SFTP 浏览和 Keystore 凭据已接线；同步协调器、生物识别与设备验收待完成 |
+| Android Preview | 移动终端、SFTP、凭据与同步 | Android 壳及 Rust/libssh2 连接、终端、只读 SFTP、Keystore 凭据和可选系统验证访问门已接线；只读显示 Rust 同步协调器状态但 Sync capability 仍禁用，设备验收待完成 |
 | 后续 | 原生 SSH 引擎、可验证中继和可选托管服务 | 研究方向 |
 
 ### Alpha 当前阶段
@@ -260,14 +268,14 @@ Alpha 发布后的重点验证：
 ### v0.3 - 用户自控的加密同步
 
 - Rust 密码学基础层已实现版本化 keyslot/对象信封、Argon2id、XChaCha20-Poly1305、HKDF 域分离、严格有界解析和固定向量测试；
-- Rust `list/get/put` provider 边界与 Local Folder/WebDAV 不可变对象实现已经具备有界 I/O、无覆盖提交、超时、取消和协议测试；
-- schema v1 SQLite 同步 journal 已实现 operation/outbox 原子事务、租约恢复、暂停、最多六次有界退避、发布终态、AEAD 后幂等应用和设备序号/对象身份重放保护；它尚未由后台协调器或设置 UI 调用；
+- Rust `list/get/put` provider 边界与 Local Folder/WebDAV/SFTP/S3-compatible 不可变对象实现已经具备有界 I/O、无覆盖提交、超时、取消和协议测试；SFTP 复用已保存主机的本机凭据/私钥、known_hosts 与精确 SHA256 pin，拒绝观察到的符号链接/特殊文件，并在私有暂存目录完整持久化后以无覆盖 rename 发布；S3 使用 HTTPS/no redirect、SigV4 签名、ListObjectsV2、GET 与 `If-None-Match: *` 条件 PUT，访问密钥只保存到系统凭据管理器；
+- schema v1 SQLite 同步 journal 已实现 operation/outbox 原子事务、租约恢复、暂停、最多六次有界退避、发布终态、AEAD 后幂等应用和设备序号/对象身份重放保护；桌面 Local Folder 使用不可变 bootstrap 显式初始化或解锁 Argon2id keyslot，并可由 Rust 调度器或手动调用协调器的有界单周期 push/pull 与 merge；
 - 主机、公开命令/参数/远端路径历史、脚本、白名单设置和受管背景引用已有 Rust 确定性字段合并、tombstone 因果与持久冲突中心；敏感历史、凭据引用、主机 trust pin 和本机路径拒绝进入 operation；
 - 独立 256-bit 恢复密钥使用带校验码的可打印格式和独立 HKDF/XChaCha recovery keyslot；加密导出包只包含 keyslot、认证密文和校验清单，最多 10,000 对象/256 MiB 密文，以无覆盖原子文件写入，并可离线解密、解析全部 event/device registry 完成恢复演练；
-- 设备 registry 最多 32 台，只记录公开签名键和非敏感标签；撤销单调、最后活动设备不可撤销、已撤销设备不能发布 registry。撤销不能抹除已复制的 VMK，疑似泄露时仍必须轮换主密钥并全量重加密；设备 operation 签名、协调器和管理 UI 尚未接线；
-- 独立凭据 vault 策略默认关闭，需活动设备显式启用并逐设备授权；CVK 与业务 VMK 分离，使用 `credentials` keyslot/AAD/HKDF 域。SSH 密码、私钥口令、OpenSSH 私钥和 access token 只进入 Rust 内存中的清零载荷与认证密文，本机 credential reference 不进入对象、错误、日志或事件；系统钥匙串写回、CVK 恢复/轮换和 UI 尚未接线；
-- SFTP、S3-compatible 与自建 Gateway 已通过专用 Rust transport trait 接入同一不可变 provider：严格配置、分页/key/大小、取消、条件创建、同名核对和提交后回读由公共适配层强制。SFTP 配置必须固定 host-key SHA-256，S3/Gateway endpoint 必须 HTTPS；Gateway 密码/TOTP 只传入一次登录调用，provider 会话不保存 TOTP。真实 SFTP 会话、S3 SigV4、Gateway HTTP 客户端与外部兼容矩阵仍未接线；
-- Local Folder + WebDAV 的端到端协调、自动同步和冲突中心 UI；
+- 设备 registry 最多 32 台，只记录公开签名键和非敏感标签；撤销单调、最后活动设备不可撤销、已撤销设备不能发布 registry。撤销不能抹除已复制的 VMK，疑似泄露时仍必须轮换主密钥并全量重加密；本机 outbox 使用系统凭据中的 Ed25519 私钥签署 operation 严格封套，远端签名 registry revision 链、SQLite 防回滚水位及协调器上传/下载授权验签已接线。桌面可生成 15 分钟、vault-bound 且由新设备私钥自签的登记请求，由现有活动设备按 expected revision 批准、改名或撤销并发布下一不可变 registry；当前发布设备不能自撤销。Android 仍只读显示 revision/本机授权/轮换提示且无管理 capability；Rust 已提供单对象及最多 10,000 项/256 MiB 的两阶段 VMK/CVK 批量重加密原语，但 provider 发布、keyslot 原子切换、恢复写入、防回滚提交和真实多设备矩阵仍未完成；
+- 独立凭据 vault 策略默认关闭，需活动设备显式启用并逐设备授权；CVK 与业务 VMK 分离，使用 `credentials` keyslot/AAD/HKDF 域，并具备独立 `credential-recovery` HKDF/XChaCha 恢复 keyslot 原语。SSH 密码、私钥口令、OpenSSH 私钥和 access token 只进入 Rust 内存中的清零载荷与认证密文，本机 credential reference 不进入对象、错误、日志或事件。内部恢复写回只在策略授权与 AEAD 认证成功后，为 SSH 密码/私钥口令分配新的 `ssh-`/`key-` 系统钥匙串引用，预检不覆盖并回读验证；缺少安全安装目标的私钥正文/access token 明确拒绝。provider/outbox、协调器/UI、CVK 批量恢复写回及 VMK/CVK 轮换发布/提交仍未接线，应用尚不会同步凭据；
+- SFTP、S3-compatible 与自建 Gateway 通过专用 Rust transport trait 复用同一不可变 provider 契约。桌面 SFTP 已接入真实 `ssh2` 会话、已保存主机选择、认证前 known_hosts/精确 SHA256 双重校验、逐级 `lstat`、有界读/列举，以及暂存 `EXCLUSIVE` 创建、`fsync`、无覆盖 rename 与提交后回读；Linux Actions 使用一次性 OpenSSH/SFTP fixture。桌面 S3 已接入受限 SigV4 HTTP transport、系统凭据引用、path-style/virtual-hosted URL 和同一协调器，Linux Actions 使用独立验签的自建 HTTPS 协议 fixture；AWS/MinIO/其他兼容实现矩阵仍需外部验收。Gateway 已接入版本化 HTTPS login/session 与 list/get/条件 put 客户端、系统密码引用、可选受管 CA 和同一协调器；密码和可选 TOTP 只进入一次登录调用，session 只持有短期 token。SFTP/S3/Gateway 条件删除及真实外部兼容矩阵仍未接线；
+- AppState 主机公开字段、安全自建脚本、五个固定设置实体和通过严格验证的命令/路径/非敏感参数/已认证连接历史已接入 operation/outbox 事务入队与合并结果回写；四类历史使用稳定实体 ID 与 tombstone，清空会同步删除。连接记录只由 Rust 在原生/Android SSH 完成 host-key 与认证后签发；系统 OpenSSH/Mosh 先运行同策略有界认证检查，进程仅启动不再算成功。含明显密码/Token/私钥/credential reference 的记录、敏感或未知参数、没有真实时间的旧路径以及没有 Rust 事实的旧/伪造连接只留本机。背景可见度同步 5%–65% 的数值；Rust 会对 PNG 解码、限制像素、重新编码，并对 JPEG/WebP 做结构校验，再以随机 ID、256 KiB 独立 AEAD 分块和 manifest 同步缓存位图，远端完整认证安装后才写回引用。原始 URL 不上传；活动设备确认式 GC 已接线，SFTP/S3/Gateway 因未提供条件删除继续保守保留。桌面解锁期间的启动/变更防抖/周期/失败复查调度及持久冲突解决 UI 已接线；WebDAV HTTPS/basic-auth、SFTP、S3 与 Gateway 产品入口复用同一协调器，provider 凭据、本机 pin/私钥路径和 PEM CA 都不进入同步包；编辑器路径和自定义字体资产/名称保持本机，真实 Gateway 服务与多设备矩阵仍待验收；
 - TOTP 只保护 Gateway 登录，不替代二级同步密码、恢复密钥或 E2EE 数据密钥。
 
 ### Android Preview - 移动端
@@ -276,13 +284,13 @@ Alpha 发布后的重点验证：
 - 复用 React/xterm.js 工作台、主机/历史/命令/脚本数据模型和端到端加密同步协议，针对触屏、软键盘、安全区和小屏重新编排交互；
 - Android Preview 的 Rust transport 直接使用 `ssh2`/libssh2 API、固定 SHA-256 host-key、有界终端 I/O 和只读 SFTP 列表，不依赖系统 `ssh` 可执行文件；真实服务器算法、文件上传下载与 Android arm64 兼容矩阵仍待后续验收；
 - 首个预览范围只包含主机连接、终端、SFTP、密码/密钥凭据和同步；广播、外部编辑、常驻监控及后台长连接在完成移动端安全与耗电评估后再开放；
-- 密码、OpenSSH 私钥和可选私钥口令只经具名 IPC 写入 Android Keystore-backed store，不进入业务状态；manifest 禁止备份与明文网络，Activity 设置 `FLAG_SECURE`。可选生物识别、剪贴板策略和真机生命周期验证尚未完成；
+- 密码、OpenSSH 私钥和可选私钥口令只经具名 IPC 写入 Android Keystore-backed store，不进入业务状态；manifest 禁止备份与明文网络，Activity 设置 `FLAG_SECURE`。设置中可选启用 Rust 调用的 Tauri Biometric 系统生物识别/设备凭据访问门；开关同样保存在 Keystore-backed store，后台立即隐藏 WebView、清空 Rust 会话，认证成功前保持 `Locked`。前端只有有界可见性消息，不能自行解锁；WebView 还禁用长按选择、autofill/content-capture、文件/内容访问。该访问门不等同于逐凭据硬件绑定，真机截图、剪贴板与生命周期验证仍待完成；
 - Linux VPS 已生成并校验本地 `aarch64` debug APK/AAB；它们只使用 Android Debug 自签名证书，不是发布物，也未上传。emulator/instrumentation、arm64 真机、网络切换、休眠恢复和软键盘仍是外部验收。
 
 ### 后续 - 原生引擎与可验证中继
 
-- 在能够为每一跳分别绑定凭据并通过安全测试后，恢复 `russh` 原生 SSH/SFTP/跳板/端口转发，并长期保留系统 OpenSSH 兼容回退；
-- 用户自建 Relay、持续测速与可解释选路，以及可选 Mosh；
+- 桌面端已接通用户显式选择的长期 `russh` 终端：认证前固定 host-key，Rust-only 解析凭据，PTY 输入/输出、resize、取消、Shell Integration 与安全广播复用现有工作流；同一已认证连接按需保持原生 SFTP 子系统供文件坞浏览，具备有界队列、超时、取消和代际保护。probe、终端与本地/远端/SOCKS5 转发使用最多四跳的有序 route；首跳 TCP 连接，后续逐跳通过上一会话的 `direct-tcpip` tunnel 建立独立 SSH 握手、SHA256 pin 与认证，整条连接链统一关闭。添加主机界面当前可选择一台既有跳板，底层 route 支持最多三台跳板。三类转发均受回环、数量、并发、协议、取消和代际硬边界约束。大传输、外部编辑和远端变更继续使用独立兼容连接且尚未走跳板，系统 OpenSSH 仍是默认兼容路径；单跳原生终端仅在 Rust 明确报告密钥格式或 RSA SHA-2 协商兼容性错误时回退到相同目标 OpenSSH，主机密钥/认证/超时/取消失败及多跳路线保持 fail closed；
+- 自建 Relay 参考服务已实现版本化认证、硬限流、脱敏审计和 loopback client；Rust-owned 完整 route readiness 滚动评估与可解释推荐已接线并等待 Actions，可选 Mosh、自动切换、真实区域指标与部署仍待完成；
 - 可选的托管中继、团队协作与审计、企业支持；开源客户端与自建链路继续独立可用；
 - 只有中继真实部署并有公开测试数据后，才会使用“线路加速”表述。
 
