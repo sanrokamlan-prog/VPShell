@@ -6,7 +6,7 @@
 //! revalidates both snapshots, publishes a new password keyslot, then commits
 //! one current-key-authenticated revision marker as the logical switch point.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,6 +20,7 @@ use crate::{
         create_password_keyslot, decrypt_sync_object, encrypt_sync_object, open_password_keyslot,
         reencrypt_sync_objects,
     },
+    sync_outbox::SyncJournal,
     sync_provider::{
         ProviderCancellation, ProviderErrorCode, PutObjectOutcome, SyncObjectMetadata,
         SyncObjectProvider, validate_key, validate_object_bytes,
@@ -372,6 +373,143 @@ pub(crate) fn open_vault_rotation_activation(
         activation_hash,
         vault_key: new_vault_key,
     })
+}
+
+/// Discover and verify the newest contiguous activation chain. The journal
+/// watermark is advanced only after every marker and its successor payload
+/// has been authenticated, so remote rollback or a fork cannot silently move
+/// the active VMK backwards.
+pub(crate) fn discover_vault_rotation_activation(
+    provider: &dyn SyncObjectProvider,
+    current_vault_key: &VaultKey,
+    vault_id: &str,
+    bootstrap_activation_hash: &str,
+    password: &[u8],
+    journal: &SyncJournal,
+    cancellation: &ProviderCancellation,
+    now_ms: i64,
+) -> Result<Option<OpenedRotationActivation>, String> {
+    validate_activation_lineage(vault_id, 1, bootstrap_activation_hash)?;
+    if !is_hash(bootstrap_activation_hash) {
+        return Err("protocol".to_string());
+    }
+    let prefix = format!("vpshell/v1/{vault_id}/activations/");
+    let mut metadata = Vec::new();
+    list_all(provider, &prefix, cancellation, &mut metadata)?;
+    let mut markers = BTreeMap::new();
+    for item in metadata {
+        let relative = item
+            .key
+            .strip_prefix(&prefix)
+            .and_then(|value| value.strip_suffix(".orac"))
+            .ok_or_else(|| "protocol".to_string())?;
+        let revision = relative.parse::<u64>().map_err(|_| "protocol".to_string())?;
+        if revision == 0
+            || relative != format!("{revision:020}")
+            || markers.insert(revision, item).is_some()
+        {
+            return Err("protocol".to_string());
+        }
+    }
+    let trusted = journal
+        .trusted_rotation_activation(vault_id)
+        .map_err(rotation_journal_code)?;
+    if markers.is_empty() {
+        if trusted.is_some() {
+            return Err("rotation-rollback".to_string());
+        }
+        return Ok(None);
+    }
+    let highest = *markers.keys().next_back().ok_or_else(|| "protocol".to_string())?;
+    let trusted = trusted;
+    if trusted.as_ref().is_some_and(|value| value.revision > highest) {
+        return Err("rotation-rollback".to_string());
+    }
+    if !markers.contains_key(&1) {
+        return Err("rotation-rollback".to_string());
+    }
+    let mut revision = 1_u64;
+    let previous_hash = bootstrap_activation_hash.to_string();
+    let mut opened = open_vault_rotation_activation(
+        provider,
+        current_vault_key,
+        vault_id,
+        revision,
+        &previous_hash,
+        password,
+        cancellation,
+    )?;
+    if trusted.as_ref().is_some_and(|value| {
+        value.revision == revision && value.activation_hash != opened.activation_hash
+    }) {
+        return Err("rotation-rollback".to_string());
+    }
+    if trusted.is_none() {
+        journal
+            .advance_trusted_rotation_activation(
+                vault_id,
+                None,
+                revision,
+                &opened.activation_hash,
+                now_ms,
+            )
+            .map_err(rotation_journal_code)?;
+    }
+    while revision < highest {
+        let next_revision = revision
+            .checked_add(1)
+            .ok_or_else(|| "resource-limit".to_string())?;
+        if !markers.contains_key(&next_revision) {
+            return Err("rotation-rollback".to_string());
+        }
+        let next = open_vault_rotation_activation(
+            provider,
+            &opened.vault_key,
+            vault_id,
+            next_revision,
+            &opened.activation_hash,
+            password,
+            cancellation,
+        )?;
+        if trusted
+            .as_ref()
+            .is_none_or(|value| next_revision > value.revision)
+        {
+            journal
+                .advance_trusted_rotation_activation(
+                    vault_id,
+                    Some((revision, &opened.activation_hash)),
+                    next_revision,
+                    &next.activation_hash,
+                    now_ms,
+                )
+                .map_err(rotation_journal_code)?;
+        } else if trusted.as_ref().is_some_and(|value| {
+            value.revision == next_revision && value.activation_hash != next.activation_hash
+        }) {
+            return Err("rotation-rollback".to_string());
+        }
+        opened = next;
+        revision = next_revision;
+    }
+    if trusted.as_ref().is_some_and(|value| {
+        value.revision == revision && value.activation_hash != opened.activation_hash
+    }) {
+        return Err("rotation-rollback".to_string());
+    }
+    Ok(Some(opened))
+}
+
+fn rotation_journal_code(error: crate::sync_outbox::JournalError) -> String {
+    use crate::sync_outbox::JournalErrorCode;
+    match error.code {
+        JournalErrorCode::Replay => "rotation-rollback",
+        JournalErrorCode::Conflict => "conflict",
+        JournalErrorCode::InvalidInput => "protocol",
+        JournalErrorCode::SafetyBlocked => "reconcile-required",
+        _ => "storage",
+    }
+    .to_string()
 }
 
 fn load_rotation_manifest(
@@ -1117,6 +1255,97 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn discovery_advances_journal_and_rejects_remote_rollback() {
+        let provider = MemoryProvider::new(false);
+        let cancellation = ProviderCancellation::default();
+        let journal_root = TempDir::new("activation-discovery");
+        let journal = SyncJournal::open(journal_root.0.clone()).unwrap();
+        let current = VaultKey::generate().unwrap();
+        let next = VaultKey::generate().unwrap();
+        let newest = VaultKey::generate().unwrap();
+        let password = b"rotation-password";
+        let source_key = format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg");
+        provider
+            .put(&source_key, &event(&current, 1, b"one"), &cancellation)
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &next, VAULT_ID, &cancellation).unwrap();
+        let bootstrap_hash = "aa".repeat(32);
+        let activation = activate_vault_rotation(
+            &provider,
+            &current,
+            &next,
+            VAULT_ID,
+            &publication,
+            1,
+            &bootstrap_hash,
+            password,
+            Argon2Parameters::minimum_for_tests(),
+            &cancellation,
+        )
+        .unwrap();
+        provider
+            .objects
+            .lock()
+            .unwrap()
+            .insert(source_key, event(&next, 1, b"one"));
+        let second_publication =
+            publish_vault_rotation(&provider, &next, &newest, VAULT_ID, &cancellation).unwrap();
+        let second_activation = activate_vault_rotation(
+            &provider,
+            &next,
+            &newest,
+            VAULT_ID,
+            &second_publication,
+            2,
+            &activation.activation_hash,
+            password,
+            Argon2Parameters::minimum_for_tests(),
+            &cancellation,
+        )
+        .unwrap();
+        let discovered = discover_vault_rotation_activation(
+            &provider,
+            &current,
+            VAULT_ID,
+            &bootstrap_hash,
+            password,
+            &journal,
+            &cancellation,
+            10,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(discovered.vault_key.same_material(&newest));
+        assert_eq!(discovered.activation_hash, second_activation.activation_hash);
+        assert_eq!(
+            journal
+                .trusted_rotation_activation(VAULT_ID)
+                .unwrap()
+                .unwrap()
+                .revision,
+            2
+        );
+        provider
+            .objects
+            .lock()
+            .unwrap()
+            .remove(&second_activation.activation_key);
+        let rollback = discover_vault_rotation_activation(
+            &provider,
+            &current,
+            VAULT_ID,
+            &bootstrap_hash,
+            password,
+            &journal,
+            &cancellation,
+            11,
+        )
+        .err();
+        assert_eq!(rollback.as_deref(), Some("rotation-rollback"));
     }
 
     #[test]

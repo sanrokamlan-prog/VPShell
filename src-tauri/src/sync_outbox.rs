@@ -25,7 +25,7 @@ use crate::{
     sync_recovery::DeviceRegistry,
 };
 
-const JOURNAL_SCHEMA_VERSION: i64 = 4;
+const JOURNAL_SCHEMA_VERSION: i64 = 5;
 const MAX_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PENDING_OBJECTS: i64 = 10_000;
 const MAX_STORED_OBJECTS: i64 = 50_000;
@@ -242,6 +242,13 @@ pub(crate) struct TrustedDeviceRegistrySnapshot {
     pub(crate) signed_envelope: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TrustedRotationActivationSnapshot {
+    pub(crate) vault_id: String,
+    pub(crate) revision: u64,
+    pub(crate) activation_hash: String,
+}
+
 fn map_merge_error(error: MergeError) -> JournalError {
     let code = match error.code {
         MergeErrorCode::Replay => JournalErrorCode::Replay,
@@ -449,6 +456,23 @@ fn migrate_schema(connection: &mut Connection) -> JournalResult<()> {
                 JournalError::new(
                     JournalErrorCode::Storage,
                     "无法创建设备 registry 信任水位 schema",
+                )
+            })?;
+    }
+    if version < 5 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_rotation_activation_trust (
+                    vault_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    activation_hash TEXT NOT NULL,
+                    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+                );",
+            )
+            .map_err(|_| {
+                JournalError::new(
+                    JournalErrorCode::Storage,
+                    "无法创建轮换 activation 信任水位 schema",
                 )
             })?;
     }
@@ -992,6 +1016,144 @@ impl SyncJournal {
                 revision,
                 envelope_hash: envelope_hash.to_string(),
                 signed_envelope: signed_envelope.to_vec(),
+            })
+        })
+    }
+
+    pub(crate) fn trusted_rotation_activation(
+        &self,
+        vault_id: &str,
+    ) -> JournalResult<Option<TrustedRotationActivationSnapshot>> {
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "vault ID 无效"))?
+            .to_string();
+        self.transaction(|transaction| {
+            transaction
+                .query_row(
+                    "SELECT revision, activation_hash
+                     FROM sync_rotation_activation_trust WHERE vault_id = ?1",
+                    params![vault_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法读取轮换 activation 信任水位",
+                    )
+                })?
+                .map(|(revision, activation_hash)| {
+                    let revision = u64::try_from(revision).map_err(|_| {
+                        JournalError::new(
+                            JournalErrorCode::Storage,
+                            "轮换 activation revision 已损坏",
+                        )
+                    })?;
+                    if revision == 0 || !is_lowercase_hash(&activation_hash) {
+                        return Err(JournalError::new(
+                            JournalErrorCode::Storage,
+                            "轮换 activation 信任水位已损坏",
+                        ));
+                    }
+                    Ok(TrustedRotationActivationSnapshot {
+                        vault_id: vault_id.clone(),
+                        revision,
+                        activation_hash,
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    pub(crate) fn advance_trusted_rotation_activation(
+        &self,
+        vault_id: &str,
+        expected: Option<(u64, &str)>,
+        revision: u64,
+        activation_hash: &str,
+        now_ms: i64,
+    ) -> JournalResult<TrustedRotationActivationSnapshot> {
+        validate_now(now_ms)?;
+        let vault_id = Uuid::parse_str(vault_id)
+            .map_err(|_| JournalError::new(JournalErrorCode::InvalidInput, "vault ID 无效"))?
+            .to_string();
+        if revision == 0
+            || revision > i64::MAX as u64
+            || !is_lowercase_hash(activation_hash)
+            || expected.is_some_and(|(expected_revision, expected_hash)| {
+                expected_revision == 0 || !is_lowercase_hash(expected_hash)
+            })
+        {
+            return Err(JournalError::new(
+                JournalErrorCode::InvalidInput,
+                "轮换 activation 信任水位输入无效",
+            ));
+        }
+        self.transaction(|transaction| {
+            let current: Option<(i64, String)> = transaction
+                .query_row(
+                    "SELECT revision, activation_hash
+                     FROM sync_rotation_activation_trust WHERE vault_id = ?1",
+                    params![vault_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法核对轮换 activation 信任水位",
+                    )
+                })?;
+            match (current.as_ref(), expected) {
+                (None, None) if revision == 1 => {}
+                (Some((current_revision, current_hash)), _)
+                    if *current_revision == revision as i64 && current_hash == activation_hash =>
+                {
+                    return Ok(TrustedRotationActivationSnapshot {
+                        vault_id: vault_id.clone(),
+                        revision,
+                        activation_hash: activation_hash.to_string(),
+                    });
+                }
+                (Some((current_revision, current_hash)), Some((expected_revision, expected_hash)))
+                    if *current_revision == expected_revision as i64
+                        && current_hash == expected_hash
+                        && revision == expected_revision.saturating_add(1) =>
+                {}
+                (Some((current_revision, _)), _) if *current_revision >= revision as i64 => {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Replay,
+                        "轮换 activation revision 回退或同 revision 分叉",
+                    ));
+                }
+                _ => {
+                    return Err(JournalError::new(
+                        JournalErrorCode::Conflict,
+                        "轮换 activation 信任水位发生并发冲突",
+                    ));
+                }
+            }
+            transaction
+                .execute(
+                    "INSERT INTO sync_rotation_activation_trust(
+                        vault_id, revision, activation_hash, updated_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(vault_id) DO UPDATE SET
+                        revision = excluded.revision,
+                        activation_hash = excluded.activation_hash,
+                        updated_at_ms = excluded.updated_at_ms",
+                    params![vault_id, revision as i64, activation_hash, now_ms],
+                )
+                .map_err(|_| {
+                    JournalError::new(
+                        JournalErrorCode::Storage,
+                        "无法保存轮换 activation 信任水位",
+                    )
+                })?;
+            Ok(TrustedRotationActivationSnapshot {
+                vault_id,
+                revision,
+                activation_hash: activation_hash.to_string(),
             })
         })
     }
@@ -3060,6 +3222,55 @@ mod tests {
                 .code,
             JournalErrorCode::Replay
         );
+    }
+
+    #[test]
+    fn rotation_activation_trust_watermark_persists_and_rejects_rollback_or_fork() {
+        let root = TempDir::new("rotation-trust");
+        let journal = SyncJournal::open(root.0.clone()).unwrap();
+        let hash_one = "a".repeat(64);
+        let hash_two = "b".repeat(64);
+        journal
+            .advance_trusted_rotation_activation(VAULT_ID, None, 1, &hash_one, 1)
+            .unwrap();
+        assert_eq!(
+            journal
+                .advance_trusted_rotation_activation(VAULT_ID, None, 1, &hash_one, 2)
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(
+            journal
+                .advance_trusted_rotation_activation(
+                    VAULT_ID,
+                    Some((1, &hash_one)),
+                    1,
+                    &hash_two,
+                    2,
+                )
+                .unwrap_err()
+                .code,
+            JournalErrorCode::Replay
+        );
+        journal
+            .advance_trusted_rotation_activation(
+                VAULT_ID,
+                Some((1, &hash_one)),
+                2,
+                &hash_two,
+                3,
+            )
+            .unwrap();
+        drop(journal);
+        let reopened = SyncJournal::open(root.0.clone()).unwrap();
+        let trusted = reopened
+            .trusted_rotation_activation(VAULT_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(trusted.vault_id, VAULT_ID);
+        assert_eq!(trusted.revision, 2);
+        assert_eq!(trusted.activation_hash, hash_two);
     }
 
     #[test]
