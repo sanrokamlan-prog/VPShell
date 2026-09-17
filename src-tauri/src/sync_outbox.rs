@@ -1115,11 +1115,12 @@ impl SyncJournal {
                         activation_hash: activation_hash.to_string(),
                     });
                 }
-                (Some((current_revision, current_hash)), Some((expected_revision, expected_hash)))
-                    if *current_revision == expected_revision as i64
-                        && current_hash == expected_hash
-                        && revision == expected_revision.saturating_add(1) =>
-                {}
+                (
+                    Some((current_revision, current_hash)),
+                    Some((expected_revision, expected_hash)),
+                ) if *current_revision == expected_revision as i64
+                    && current_hash == expected_hash
+                    && revision == expected_revision.saturating_add(1) => {}
                 (Some((current_revision, _)), _) if *current_revision >= revision as i64 => {
                     return Err(JournalError::new(
                         JournalErrorCode::Replay,
@@ -3254,13 +3255,7 @@ mod tests {
             JournalErrorCode::Replay
         );
         journal
-            .advance_trusted_rotation_activation(
-                VAULT_ID,
-                Some((1, &hash_one)),
-                2,
-                &hash_two,
-                3,
-            )
+            .advance_trusted_rotation_activation(VAULT_ID, Some((1, &hash_one)), 2, &hash_two, 3)
             .unwrap();
         drop(journal);
         let reopened = SyncJournal::open(root.0.clone()).unwrap();

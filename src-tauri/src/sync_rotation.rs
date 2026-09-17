@@ -403,7 +403,9 @@ pub(crate) fn discover_vault_rotation_activation(
             .strip_prefix(&prefix)
             .and_then(|value| value.strip_suffix(".orac"))
             .ok_or_else(|| "protocol".to_string())?;
-        let revision = relative.parse::<u64>().map_err(|_| "protocol".to_string())?;
+        let revision = relative
+            .parse::<u64>()
+            .map_err(|_| "protocol".to_string())?;
         if revision == 0
             || relative != format!("{revision:020}")
             || markers.insert(revision, item).is_some()
@@ -420,9 +422,15 @@ pub(crate) fn discover_vault_rotation_activation(
         }
         return Ok(None);
     }
-    let highest = *markers.keys().next_back().ok_or_else(|| "protocol".to_string())?;
+    let highest = *markers
+        .keys()
+        .next_back()
+        .ok_or_else(|| "protocol".to_string())?;
     let trusted = trusted;
-    if trusted.as_ref().is_some_and(|value| value.revision > highest) {
+    if trusted
+        .as_ref()
+        .is_some_and(|value| value.revision > highest)
+    {
         return Err("rotation-rollback".to_string());
     }
     if !markers.contains_key(&1) {
@@ -1320,7 +1328,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(discovered.vault_key.same_material(&newest));
-        assert_eq!(discovered.activation_hash, second_activation.activation_hash);
+        assert_eq!(
+            discovered.activation_hash,
+            second_activation.activation_hash
+        );
         assert_eq!(
             journal
                 .trusted_rotation_activation(VAULT_ID)
