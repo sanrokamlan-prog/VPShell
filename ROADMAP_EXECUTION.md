@@ -1,6 +1,6 @@
 # VPShell 路线图执行账本
 
-更新时间：2026-08-21（UTC）
+更新时间：2026-09-18（UTC）
 
 本文件记录 `/root/projects/vpshell/VPShell` 未提交工作树中路线图实现的真实状态。它不是发布说明，也不能替代代码、测试、平台验收或安全审计。
 
@@ -134,7 +134,7 @@
 | 完成 | VMK/CVK 单对象轮换原语：旧密钥先完成 AEAD 认证，再用新密钥和新 nonce 重加密并保留 vault/object 或 item 身份；错误旧密钥不产生输出。格式修复提交 `7523df4` 的 PR #1 run `33314785227` 六项全部 `COMPLETED/SUCCESS` |
 | 完成 | VMK/CVK 有界批量重加密原语：同一 vault 最多 10,000 个非重复对象/凭据 item、认证明文总量最多 256 MiB；先完整认证全部旧密文并清零暂存，全部成功后才按输入顺序生成新 nonce/密文。格式修复提交 `0f1d7e4` 的 PR #1 run `33316426381` 六项全部 `COMPLETED/SUCCESS`；provider 全量枚举/发布、keyslot 原子切换、恢复写入、协调器/UI、回滚保护和真实多设备流程仍待实现 |
 | 完成 | provider 全量枚举/轮换暂存发布：分页认证现役 vault 对象，一次调用有界 VMK 批量重加密后写入隔离 `rotations/{rotation_id}/` namespace，最后发布新密钥认证 manifest；格式修复提交 `463a063` 的 PR #1 run `33324733621` 六项全部 `COMPLETED/SUCCESS` |
-| 完成 | VMK 轮换不可变 activation/password keyslot 原子切换与连续发现：重验新旧完整快照，先发布新 keyslot，最后以当前 VMK 认证的连续 revision marker 作为唯一逻辑切换点；Rust-only 发现器逐页验证连续 marker，并将已认证最高 revision/hash 持久写入 journal 防回滚水位；协调器跟随与并发写冻结仍待后续项 |
+| 完成 | VMK 轮换不可变 activation/password+recovery 双 keyslot 原子切换与连续发现：重验新旧完整快照，先发布并绑定两个 keyslot，最后以当前 VMK 认证的连续 revision marker 作为唯一逻辑切换点；密码或恢复打开均重验完整轮换对象，Rust-only 发现器将已认证最高 revision/hash 持久写入 journal 防回滚水位；旧 v1 password-only marker 只读兼容，协调器跟随与并发写冻结仍待后续项 |
 
 Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 WebDAV/SFTP/S3/Gateway 测试。B1–B8 桌面源码与协议回归、Local Folder/HTTPS WebDAV 产品入口（含显式 PEM CA）、主机公开字段、安全自建脚本、固定设置实体、桌面持久冲突中心、自动调度及公开命令/路径/非敏感参数/已认证连接历史均已通过 Actions；PNG 背景已在 `32225659322`、JPEG/WebP 已在 `32256446076` 通过 Actions，活动设备确认式 blob GC 已在 `32264835549` 通过 Actions 并对无条件删除 provider 保守保留。SFTP 产品入口与单一 Linux OpenSSH fixture 已在 `32274011250` 全绿，S3 产品入口与独立 SigV4 HTTPS fixture 已在 `32280932435` 全绿，Gateway 产品入口已在 `32286301875` 全绿，远端 registry 授权锚与防回滚链已在 `32296587857` 全绿，设备管理已在 `32454051006` 全绿。广泛外部 provider、凭据完整产品接线/恢复轮换和真实多设备仍未完成。
 
@@ -388,7 +388,9 @@ Phase B 完成时必须重跑桌面全量命令并增加协议兼容、真实 We
 | 2026-08-31 | B9 activation 连续发现与 journal 防回滚本机轻量门禁 | 新增 schema-v5 `sync_rotation_activation_trust` journal 水位及严格 expected revision/hash CAS；Rust-only 发现器分页枚举 `activations/<revision>.orac`，以 bootstrap/前序 marker 哈希验证连续链，逐个通过当前 VMK、keyslot、新 VMK manifest/对象完整认证后推进水位，远端缺失、跳号、回退、同 revision 分叉 fail closed。聚焦测试覆盖水位持久化/CAS/replay 与发现成功后远端 marker 回滚；`git diff --check`、四份配置 JSON、激活顺序/敏感边界/产物检查通过。VPS 无 Cargo/rustc/rustfmt，未下载工具链、依赖或 SDK；待 supervisor 提交后由 PR #1 Actions 执行完整六项矩阵。并发写冻结、recovery keyslot、孤儿清理、协调器/UI 与真实多设备仍未伪装为完成。 |
 | 2026-09-17 | B9 activation 连续发现 CI 格式修复 | PR #1 run `33413869686` 的 frontend/Android 成功，五个 Rust job 均仅因 `cargo fmt --check` 的 6 处排版差异失败；按 runner diff 对齐 `sync_outbox`/`sync_rotation`，并将架构当前 journal 描述同步为 schema-v5。本轮无行为变更；`git diff --check`、配置 JSON、激活顺序/敏感边界/产物与交接残留检查通过。VPS 无 Cargo/rustc/rustfmt，未下载工具链、依赖或 SDK；待 supervisor 提交后由 PR #1 Actions 重跑完整矩阵。 |
 | 2026-09-18 | B9 activation 连续发现 CI Android setup 修复 | 格式修复提交 `1015785` 的 PR #1 run `35229964889` 中 frontend 与 Ubuntu/Windows/macOS Intel/arm 的 locked fmt/check/test 全部成功；Android 首轮及 failed-job 重试均在业务构建前的 `android-actions/setup-android@v3` 失败。原始 job 日志确认 action 默认请求 Google repository 已移除的 legacy `tools` 包并报 `Failed to find package 'tools'`；工作流现显式设 `packages: ''`，保留 command-line tools/许可证初始化，再由下一步继续安装固定 `platforms;android-36`、`build-tools;36.0.0` 与 `ndk;27.0.12077973`。workflow YAML/四份配置 JSON 解析、固定包断言、废弃包引用、`git diff --check`、交接残留与构建产物检查通过；本轮不改产品代码、不下载本机 SDK，待 supervisor 提交后重跑完整矩阵。 |
+| 2026-09-18 | B9 activation 连续发现与 Android setup 修复 Actions 完成 | Android setup 修复提交 `14a4e99` 的 PR #1 run `35307392717` 已确认 frontend、Ubuntu/Windows/macOS Intel/macOS arm locked fmt/check/test、Linux 真实 fixture及 Android aarch64 debug APK/Gradle gate 六项全部 `COMPLETED/SUCCESS`；PR #1 保持 Draft/Open，branch head 与 remote head 一致。 |
+| 2026-09-18 | B9 VMK rotation recovery keyslot/恢复打开本机轻量门禁 | `sync_rotation` 将 activation commit 升级为 schema v2：任何激活 marker 前发布并绑定随机 password 与 recovery 两个不可变 keyslot，marker 同时认证其路径和 SHA-256；密码/恢复两条读取路径都先要求两个 keyslot 完整存在且 vault/slot 路径/哈希匹配，再用对应密钥解包新 VMK 并重验 manifest 与全部目标密文。旧 schema-v1 password-only marker 继续可读但不能提供恢复打开；缺失 recovery keyslot 会让 v2 密码打开也 fail closed，错误恢复密钥或任一 keyslot 篡改均不返回 VMK。聚焦测试覆盖两个 keyslot 都先于 marker、密码与恢复成功打开、错误恢复密钥、双向依赖篡改/缺失、旧 v1 解码验证、连续发现和 marker 失败仅留惰性孤儿 keyslot；`git diff --check`、调用签名/协议版本/静态安全边界、无 `.codex-roadmap-complete`/`node_modules`/`target` 检查通过。VPS 无 Cargo/rustc/rustfmt，未下载工具链、依赖或 SDK；完整四平台 locked fmt/check/test、Linux fixture、frontend 与 Android 构建交给本项提交后的 PR #1 Actions。并发写冻结、孤儿清理、协调器自动切换、UI 与真实多设备仍未伪装为完成。 |
 
 ## 下一个动作
 
-等待 supervisor 提交 activation 连续发现与 journal 防回滚。下一轮必须先等待该提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复当前项；全绿后再进入 recovery keyslot/恢复写入、并发写冻结或协调器切换，仍按独立项拆分。当前 marker-last/发现原语不等于产品协调器已自动启用新 VMK；并发写冻结、孤儿暂存/旧对象回收、恢复写回、协调器/UI 与真实多设备流程仍未接线。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收。
+等待 supervisor 提交 VMK rotation recovery keyslot/恢复打开。下一轮必须先等待该提交的 PR #1 Actions 全部进入 `COMPLETED/SUCCESS`，失败则继续定位并修复当前项；全绿后再进入并发写冻结、孤儿清理或协调器切换，仍按独立项拆分。当前 marker-last/发现/恢复打开原语不等于产品协调器已自动启用新 VMK；并发写冻结、孤儿暂存/旧对象回收、协调器/UI 与真实多设备流程仍未接线。平台网络变化直接触发、应用关闭后的系统后台行为、真实 WebDAV/SFTP/S3/Gateway/代理/断网/多设备矩阵均如实保留为后续或外部验收；C4 真机泄漏矩阵、Mosh 真实网络、路线评估真实双路径长时间测试、Relay 真实公网/多区域/TLS-VPN/运维演练保持外部验收。

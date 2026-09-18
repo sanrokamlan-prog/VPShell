@@ -3,8 +3,9 @@
 //! Rotation never overwrites active objects. It authenticates the complete
 //! provider snapshot first, publishes re-encrypted objects below a fresh
 //! rotation namespace, and writes an encrypted manifest last. Activation
-//! revalidates both snapshots, publishes a new password keyslot, then commits
-//! one current-key-authenticated revision marker as the logical switch point.
+//! revalidates both snapshots, publishes new password and recovery keyslots,
+//! then commits one current-key-authenticated revision marker as the logical
+//! switch point.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,8 +17,9 @@ use zeroize::Zeroizing;
 use crate::{
     sync_blob::object_key_matches_blob_envelope,
     sync_crypto::{
-        Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
-        create_password_keyslot, decrypt_sync_object, encrypt_sync_object, open_password_keyslot,
+        Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, RecoveryKey, RecoveryKeyslot,
+        SyncObjectKind, VaultKey, create_password_keyslot, create_recovery_keyslot,
+        decrypt_sync_object, encrypt_sync_object, open_password_keyslot, open_recovery_keyslot,
         reencrypt_sync_objects,
     },
     sync_outbox::SyncJournal,
@@ -28,6 +30,8 @@ use crate::{
 };
 
 const ROTATION_FORMAT_VERSION: u16 = 1;
+const ROTATION_ACTIVATION_FORMAT_VERSION: u16 = 2;
+const LEGACY_ROTATION_ACTIVATION_FORMAT_VERSION: u16 = 1;
 const LIST_PAGE_SIZE: usize = 250;
 const MAX_ROTATION_OBJECTS: usize = 10_000;
 const MAX_ROTATION_PLAINTEXT_BYTES: u64 = 256 * 1024 * 1024;
@@ -50,6 +54,7 @@ pub(crate) struct RotationActivation {
     pub(crate) activation_key: String,
     pub(crate) activation_hash: String,
     pub(crate) password_keyslot_key: String,
+    pub(crate) recovery_keyslot_key: String,
 }
 
 pub(crate) struct OpenedRotationActivation {
@@ -90,6 +95,10 @@ struct RotationActivationCommit {
     manifest_hash: String,
     password_keyslot_key: String,
     password_keyslot_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_keyslot_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_keyslot_hash: Option<String>,
     staged_objects: u32,
 }
 
@@ -228,6 +237,7 @@ pub(crate) fn activate_vault_rotation(
     previous_activation_hash: &str,
     new_password: &[u8],
     kdf: Argon2Parameters,
+    recovery_key: &RecoveryKey,
     cancellation: &ProviderCancellation,
 ) -> Result<RotationActivation, String> {
     validate_activation_lineage(vault_id, activation_revision, previous_activation_hash)?;
@@ -253,15 +263,29 @@ pub(crate) fn activate_vault_rotation(
         password_keyslot.slot_id()
     );
     validate_key(&password_keyslot_key).map_err(|_| "protocol".to_string())?;
+    let recovery_keyslot = create_recovery_keyslot(recovery_key, vault_id, new_vault_key)?;
+    let recovery_keyslot_encoded = recovery_keyslot.encode()?;
+    let recovery_keyslot_key = format!(
+        "vpshell/v1/{vault_id}/rotations/{}/recovery-keyslots/{}.json",
+        publication.rotation_id,
+        recovery_keyslot.slot_id()
+    );
+    validate_key(&recovery_keyslot_key).map_err(|_| "protocol".to_string())?;
     publish_staged(
         provider,
         &password_keyslot_key,
         &password_keyslot_encoded,
         cancellation,
     )?;
+    publish_staged(
+        provider,
+        &recovery_keyslot_key,
+        &recovery_keyslot_encoded,
+        cancellation,
+    )?;
 
     let commit = RotationActivationCommit {
-        format_version: ROTATION_FORMAT_VERSION,
+        format_version: ROTATION_ACTIVATION_FORMAT_VERSION,
         vault_id: vault_id.to_string(),
         rotation_id: publication.rotation_id.clone(),
         activation_revision,
@@ -270,6 +294,8 @@ pub(crate) fn activate_vault_rotation(
         manifest_hash: publication.manifest_hash.clone(),
         password_keyslot_key: password_keyslot_key.clone(),
         password_keyslot_hash: sha256_hex(&password_keyslot_encoded),
+        recovery_keyslot_key: Some(recovery_keyslot_key.clone()),
+        recovery_keyslot_hash: Some(sha256_hex(&recovery_keyslot_encoded)),
         staged_objects: publication.published_objects,
     };
     let commit_plaintext = encode_activation_commit(&commit)?;
@@ -292,6 +318,7 @@ pub(crate) fn activate_vault_rotation(
         activation_key,
         activation_hash: sha256_hex(&activation_encoded),
         password_keyslot_key,
+        recovery_keyslot_key,
     })
 }
 
@@ -304,6 +331,66 @@ pub(crate) fn open_vault_rotation_activation(
     password: &[u8],
     cancellation: &ProviderCancellation,
 ) -> Result<OpenedRotationActivation, String> {
+    let (commit, activation_hash) = load_rotation_activation_commit(
+        provider,
+        current_vault_key,
+        vault_id,
+        activation_revision,
+        expected_previous_activation_hash,
+        cancellation,
+    )?;
+    let (password_keyslot, _) =
+        load_bound_rotation_keyslots(provider, vault_id, &commit, cancellation)?;
+    let new_vault_key = open_password_keyslot(password, &password_keyslot)?;
+    finish_opened_rotation_activation(
+        provider,
+        vault_id,
+        commit,
+        activation_hash,
+        new_vault_key,
+        cancellation,
+    )
+}
+
+pub(crate) fn open_vault_rotation_activation_with_recovery(
+    provider: &dyn SyncObjectProvider,
+    current_vault_key: &VaultKey,
+    vault_id: &str,
+    activation_revision: u64,
+    expected_previous_activation_hash: &str,
+    recovery_key: &RecoveryKey,
+    cancellation: &ProviderCancellation,
+) -> Result<OpenedRotationActivation, String> {
+    let (commit, activation_hash) = load_rotation_activation_commit(
+        provider,
+        current_vault_key,
+        vault_id,
+        activation_revision,
+        expected_previous_activation_hash,
+        cancellation,
+    )?;
+    let (_, recovery_keyslot) =
+        load_bound_rotation_keyslots(provider, vault_id, &commit, cancellation)?;
+    let recovery_keyslot = recovery_keyslot.ok_or_else(|| "recovery-unavailable".to_string())?;
+    let new_vault_key = open_recovery_keyslot(recovery_key, &recovery_keyslot)?;
+    finish_opened_rotation_activation(
+        provider,
+        vault_id,
+        commit,
+        activation_hash,
+        new_vault_key,
+        cancellation,
+    )
+}
+
+fn load_rotation_activation_commit(
+    provider: &dyn SyncObjectProvider,
+    current_vault_key: &VaultKey,
+    vault_id: &str,
+    activation_revision: u64,
+    expected_previous_activation_hash: &str,
+    cancellation: &ProviderCancellation,
+) -> Result<(RotationActivationCommit, String), String> {
     validate_activation_lineage(
         vault_id,
         activation_revision,
@@ -334,27 +421,71 @@ pub(crate) fn open_vault_rotation_activation(
         activation_revision,
         expected_previous_activation_hash,
     )?;
+    Ok((commit, activation_hash))
+}
 
-    let password_keyslot_encoded = provider
+fn load_bound_rotation_keyslots(
+    provider: &dyn SyncObjectProvider,
+    vault_id: &str,
+    commit: &RotationActivationCommit,
+    cancellation: &ProviderCancellation,
+) -> Result<(PasswordKeyslot, Option<RecoveryKeyslot>), String> {
+    let password_encoded = provider
         .get(&commit.password_keyslot_key, cancellation)
         .map_err(provider_code)?;
-    validate_object_bytes(&password_keyslot_encoded).map_err(|_| "resource-limit".to_string())?;
-    if sha256_hex(&password_keyslot_encoded) != commit.password_keyslot_hash {
+    validate_object_bytes(&password_encoded).map_err(|_| "resource-limit".to_string())?;
+    if sha256_hex(&password_encoded) != commit.password_keyslot_hash {
         return Err("integrity".to_string());
     }
     let password_keyslot =
-        PasswordKeyslot::decode(&password_keyslot_encoded).map_err(|_| "integrity".to_string())?;
-    let expected_keyslot_key = format!(
+        PasswordKeyslot::decode(&password_encoded).map_err(|_| "integrity".to_string())?;
+    let expected_password_key = format!(
         "vpshell/v1/{vault_id}/rotations/{}/keyslots/{}.json",
         commit.rotation_id,
         password_keyslot.slot_id()
     );
     if password_keyslot.vault_id() != vault_id
-        || commit.password_keyslot_key != expected_keyslot_key
+        || commit.password_keyslot_key != expected_password_key
     {
         return Err("integrity".to_string());
     }
-    let new_vault_key = open_password_keyslot(password, &password_keyslot)?;
+
+    let recovery_keyslot = match (
+        commit.recovery_keyslot_key.as_deref(),
+        commit.recovery_keyslot_hash.as_deref(),
+    ) {
+        (None, None) => None,
+        (Some(key), Some(expected_hash)) => {
+            let encoded = provider.get(key, cancellation).map_err(provider_code)?;
+            validate_object_bytes(&encoded).map_err(|_| "resource-limit".to_string())?;
+            if sha256_hex(&encoded) != expected_hash {
+                return Err("integrity".to_string());
+            }
+            let keyslot =
+                RecoveryKeyslot::decode(&encoded).map_err(|_| "integrity".to_string())?;
+            let expected_key = format!(
+                "vpshell/v1/{vault_id}/rotations/{}/recovery-keyslots/{}.json",
+                commit.rotation_id,
+                keyslot.slot_id()
+            );
+            if keyslot.vault_id() != vault_id || key != expected_key {
+                return Err("integrity".to_string());
+            }
+            Some(keyslot)
+        }
+        _ => return Err("integrity".to_string()),
+    };
+    Ok((password_keyslot, recovery_keyslot))
+}
+
+fn finish_opened_rotation_activation(
+    provider: &dyn SyncObjectProvider,
+    vault_id: &str,
+    commit: RotationActivationCommit,
+    activation_hash: String,
+    new_vault_key: VaultKey,
+    cancellation: &ProviderCancellation,
+) -> Result<OpenedRotationActivation, String> {
     let publication = RotationPublication {
         rotation_id: commit.rotation_id.clone(),
         manifest_key: commit.manifest_key.clone(),
@@ -684,7 +815,18 @@ fn validate_activation_commit(
     activation_revision: u64,
     previous_activation_hash: &str,
 ) -> Result<(), String> {
-    if commit.format_version != ROTATION_FORMAT_VERSION
+    let valid_keyslots = match commit.format_version {
+        LEGACY_ROTATION_ACTIVATION_FORMAT_VERSION => {
+            commit.recovery_keyslot_key.is_none() && commit.recovery_keyslot_hash.is_none()
+        }
+        ROTATION_ACTIVATION_FORMAT_VERSION => commit
+            .recovery_keyslot_key
+            .as_deref()
+            .zip(commit.recovery_keyslot_hash.as_deref())
+            .is_some_and(|(key, hash)| validate_key(key).is_ok() && is_hash(hash)),
+        _ => false,
+    };
+    if !valid_keyslots
         || commit.vault_id != vault_id
         || commit.activation_revision != activation_revision
         || commit.previous_activation_hash != previous_activation_hash
@@ -1185,6 +1327,7 @@ mod tests {
         let cancellation = ProviderCancellation::default();
         let current = VaultKey::generate().unwrap();
         let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
         let password = b"rotation-password";
         let source_key = format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg");
         provider
@@ -1203,6 +1346,7 @@ mod tests {
             &previous_hash,
             password,
             Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
             &cancellation,
         )
         .unwrap();
@@ -1217,7 +1361,12 @@ mod tests {
             .iter()
             .position(|key| key == &activation.activation_key)
             .unwrap();
+        let recovery_index = puts
+            .iter()
+            .position(|key| key == &activation.recovery_keyslot_key)
+            .unwrap();
         assert!(keyslot_index < activation_index);
+        assert!(recovery_index < activation_index);
         assert_eq!(activation.activation_revision, 1);
         assert_eq!(activation.rotation_id, publication.rotation_id);
 
@@ -1234,6 +1383,30 @@ mod tests {
         assert!(opened.vault_key.same_material(&new));
         assert_eq!(opened.rotation_id, activation.rotation_id);
         assert_eq!(opened.activation_hash, activation.activation_hash);
+        let recovered = open_vault_rotation_activation_with_recovery(
+            &provider,
+            &current,
+            VAULT_ID,
+            1,
+            &previous_hash,
+            &recovery_key,
+            &cancellation,
+        )
+        .unwrap();
+        assert!(recovered.vault_key.same_material(&new));
+        let wrong_recovery_key = RecoveryKey::generate().unwrap();
+        assert!(
+            open_vault_rotation_activation_with_recovery(
+                &provider,
+                &current,
+                VAULT_ID,
+                1,
+                &previous_hash,
+                &wrong_recovery_key,
+                &cancellation,
+            )
+            .is_err()
+        );
         assert!(
             open_vault_rotation_activation(
                 &provider,
@@ -1247,10 +1420,12 @@ mod tests {
             .is_err()
         );
 
-        let mut objects = provider.objects.lock().unwrap();
-        let keyslot = objects.get_mut(&activation.password_keyslot_key).unwrap();
-        keyslot[0] ^= 1;
-        drop(objects);
+        let recovery_keyslot = provider
+            .objects
+            .lock()
+            .unwrap()
+            .remove(&activation.recovery_keyslot_key)
+            .unwrap();
         assert!(
             open_vault_rotation_activation(
                 &provider,
@@ -1263,6 +1438,126 @@ mod tests {
             )
             .is_err()
         );
+        provider
+            .objects
+            .lock()
+            .unwrap()
+            .insert(activation.recovery_keyslot_key.clone(), recovery_keyslot);
+        let mut objects = provider.objects.lock().unwrap();
+        let password_keyslot = objects.get_mut(&activation.password_keyslot_key).unwrap();
+        password_keyslot[0] ^= 1;
+        drop(objects);
+        assert!(
+            open_vault_rotation_activation_with_recovery(
+                &provider,
+                &current,
+                VAULT_ID,
+                1,
+                &previous_hash,
+                &recovery_key,
+                &cancellation,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_password_only_activation_commit_remains_readable() {
+        let provider = MemoryProvider::new(false);
+        let cancellation = ProviderCancellation::default();
+        let current = VaultKey::generate().unwrap();
+        let new = VaultKey::generate().unwrap();
+        let password = b"legacy-rotation-password";
+        provider
+            .put(
+                &format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg"),
+                &event(&current, 1, b"one"),
+                &cancellation,
+            )
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &new, VAULT_ID, &cancellation).unwrap();
+        let password_keyslot = create_password_keyslot(
+            password,
+            VAULT_ID,
+            &new,
+            Argon2Parameters::minimum_for_tests(),
+        )
+        .unwrap();
+        let password_keyslot_encoded = password_keyslot.encode().unwrap();
+        let password_keyslot_key = format!(
+            "vpshell/v1/{VAULT_ID}/rotations/{}/keyslots/{}.json",
+            publication.rotation_id,
+            password_keyslot.slot_id()
+        );
+        provider
+            .put(
+                &password_keyslot_key,
+                &password_keyslot_encoded,
+                &cancellation,
+            )
+            .unwrap();
+        let previous_hash = "66".repeat(32);
+        let commit = RotationActivationCommit {
+            format_version: LEGACY_ROTATION_ACTIVATION_FORMAT_VERSION,
+            vault_id: VAULT_ID.to_string(),
+            rotation_id: publication.rotation_id.clone(),
+            activation_revision: 1,
+            previous_activation_hash: previous_hash.clone(),
+            manifest_key: publication.manifest_key.clone(),
+            manifest_hash: publication.manifest_hash.clone(),
+            password_keyslot_key,
+            password_keyslot_hash: sha256_hex(&password_keyslot_encoded),
+            recovery_keyslot_key: None,
+            recovery_keyslot_hash: None,
+            staged_objects: publication.published_objects,
+        };
+        let activation = encrypt_sync_object(
+            &current,
+            VAULT_ID,
+            SyncObjectKind::Index,
+            "rotation-activation-1",
+            None,
+            None,
+            &encode_activation_commit(&commit).unwrap(),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider
+            .put(
+                &activation_object_key(VAULT_ID, 1),
+                &activation,
+                &cancellation,
+            )
+            .unwrap();
+
+        let opened = open_vault_rotation_activation(
+            &provider,
+            &current,
+            VAULT_ID,
+            1,
+            &previous_hash,
+            password,
+            &cancellation,
+        )
+        .unwrap();
+        assert!(opened.vault_key.same_material(&new));
+        let recovery_key = RecoveryKey::generate().unwrap();
+        assert_eq!(
+            open_vault_rotation_activation_with_recovery(
+                &provider,
+                &current,
+                VAULT_ID,
+                1,
+                &previous_hash,
+                &recovery_key,
+                &cancellation,
+            )
+            .err()
+            .as_deref(),
+            Some("recovery-unavailable")
+        );
     }
 
     #[test]
@@ -1274,6 +1569,7 @@ mod tests {
         let current = VaultKey::generate().unwrap();
         let next = VaultKey::generate().unwrap();
         let newest = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
         let password = b"rotation-password";
         let source_key = format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg");
         provider
@@ -1292,6 +1588,7 @@ mod tests {
             &bootstrap_hash,
             password,
             Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
             &cancellation,
         )
         .unwrap();
@@ -1312,6 +1609,7 @@ mod tests {
             &activation.activation_hash,
             password,
             Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
             &cancellation,
         )
         .unwrap();
@@ -1365,6 +1663,7 @@ mod tests {
         let cancellation = ProviderCancellation::default();
         let current = VaultKey::generate().unwrap();
         let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
         provider
             .put(
                 &format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg"),
@@ -1393,6 +1692,7 @@ mod tests {
                 &"22".repeat(32),
                 b"rotation-password",
                 Argon2Parameters::minimum_for_tests(),
+                &recovery_key,
                 &cancellation,
             )
             .is_err()
@@ -1406,6 +1706,7 @@ mod tests {
         let cancellation = ProviderCancellation::default();
         let current = VaultKey::generate().unwrap();
         let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
         provider
             .put(
                 &format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg"),
@@ -1428,6 +1729,7 @@ mod tests {
                 &"33".repeat(32),
                 b"rotation-password",
                 Argon2Parameters::minimum_for_tests(),
+                &recovery_key,
                 &cancellation,
             )
             .is_err()
@@ -1441,6 +1743,7 @@ mod tests {
         let cancellation = ProviderCancellation::default();
         let current = VaultKey::generate().unwrap();
         let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
         let previous_hash = "44".repeat(32);
         provider
             .put(
@@ -1462,12 +1765,17 @@ mod tests {
                 &previous_hash,
                 b"rotation-password",
                 Argon2Parameters::minimum_for_tests(),
+                &recovery_key,
                 &cancellation,
             )
             .is_err()
         );
         let puts = provider.put_keys();
         assert!(puts.iter().any(|key| key.contains("/keyslots/")));
+        assert!(
+            puts.iter()
+                .any(|key| key.contains("/recovery-keyslots/"))
+        );
         assert!(!puts.iter().any(|key| key.contains("/activations/")));
         assert!(
             open_vault_rotation_activation(

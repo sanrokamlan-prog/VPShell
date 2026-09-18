@@ -233,6 +233,10 @@ impl RecoveryKeyslot {
     pub(crate) fn vault_id(&self) -> &str {
         &self.vault_id
     }
+
+    pub(crate) fn slot_id(&self) -> &str {
+        &self.slot_id
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
