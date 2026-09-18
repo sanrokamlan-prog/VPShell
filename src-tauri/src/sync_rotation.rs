@@ -461,8 +461,7 @@ fn load_bound_rotation_keyslots(
             if sha256_hex(&encoded) != expected_hash {
                 return Err("integrity".to_string());
             }
-            let keyslot =
-                RecoveryKeyslot::decode(&encoded).map_err(|_| "integrity".to_string())?;
+            let keyslot = RecoveryKeyslot::decode(&encoded).map_err(|_| "integrity".to_string())?;
             let expected_key = format!(
                 "vpshell/v1/{vault_id}/rotations/{}/recovery-keyslots/{}.json",
                 commit.rotation_id,
@@ -1772,10 +1771,7 @@ mod tests {
         );
         let puts = provider.put_keys();
         assert!(puts.iter().any(|key| key.contains("/keyslots/")));
-        assert!(
-            puts.iter()
-                .any(|key| key.contains("/recovery-keyslots/"))
-        );
+        assert!(puts.iter().any(|key| key.contains("/recovery-keyslots/")));
         assert!(!puts.iter().any(|key| key.contains("/activations/")));
         assert!(
             open_vault_rotation_activation(
