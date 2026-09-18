@@ -88,10 +88,12 @@ impl Default for AndroidPreviewManifest {
                 .into_iter()
                 .map(|capability| AndroidPreviewCapabilityStatus {
                     enabled: enabled.contains(&capability),
-                    reason: if enabled.contains(&capability) {
-                        "首版预览支持".to_string()
-                    } else {
-                        "Android Preview 首版明确不支持，需单独验收".to_string()
+                    reason: match capability {
+                        _ if enabled.contains(&capability) => "首版预览支持".to_string(),
+                        AndroidPreviewCapability::Sync => {
+                            "仅展示 Rust 协调器状态，自动同步仍禁用".to_string()
+                        }
+                        _ => "Android Preview 首版明确不支持，需单独验收".to_string(),
                     },
                     capability,
                 })
@@ -238,6 +240,7 @@ pub enum AndroidPreviewOperation {
     Connect,
     Terminal,
     Sftp,
+    CredentialVault,
     Sync,
     Broadcast,
     ExternalEditor,
@@ -251,6 +254,7 @@ impl AndroidPreviewOperation {
             Self::Connect => AndroidPreviewCapability::HostConnection,
             Self::Terminal => AndroidPreviewCapability::Terminal,
             Self::Sftp => AndroidPreviewCapability::Sftp,
+            Self::CredentialVault => AndroidPreviewCapability::CredentialVault,
             Self::Sync => AndroidPreviewCapability::Sync,
             Self::Broadcast => AndroidPreviewCapability::Broadcast,
             Self::ExternalEditor => AndroidPreviewCapability::ExternalEditor,
@@ -272,7 +276,7 @@ impl Default for AndroidPreviewRuntime {
     fn default() -> Self {
         Self {
             manifest: AndroidPreviewManifest::default(),
-            lifecycle: AndroidLifecycle::Foreground,
+            lifecycle: AndroidLifecycle::Locked,
             generation: 0,
             sessions: BTreeSet::new(),
         }
@@ -372,7 +376,13 @@ mod tests {
         let manifest = AndroidPreviewManifest::default();
         manifest.validate().unwrap();
         assert!(manifest.allows(AndroidPreviewCapability::Terminal));
+        assert!(manifest.allows(AndroidPreviewCapability::CredentialVault));
         assert!(!manifest.allows(AndroidPreviewCapability::Sync));
+        assert!(manifest.capabilities.iter().any(|status| {
+            status.capability == AndroidPreviewCapability::Sync
+                && !status.enabled
+                && status.reason.contains("仅展示")
+        }));
         assert!(!manifest.allows(AndroidPreviewCapability::Broadcast));
         assert!(!manifest.background_long_connections);
 
@@ -412,6 +422,9 @@ mod tests {
     #[test]
     fn lifecycle_requires_foreground_and_clears_sessions_when_locked() {
         let mut runtime = AndroidPreviewRuntime::default();
+        assert_eq!(runtime.lifecycle(), AndroidLifecycle::Locked);
+        assert!(runtime.open_session(&request("ssh-")).is_err());
+        runtime.set_lifecycle(AndroidLifecycle::Foreground);
         let host_request = request("ssh-");
         runtime.open_session(&host_request).unwrap();
         assert_eq!(runtime.session_count(), 1);

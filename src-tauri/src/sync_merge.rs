@@ -1,9 +1,14 @@
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::sync_operation_signature::decode_signed_or_legacy_operation;
 
 const FORMAT_VERSION: u32 = 1;
 const MAX_OPERATION_BYTES: usize = 1024 * 1024;
@@ -12,6 +17,8 @@ const MAX_FIELDS_PER_PATCH: usize = 64;
 const MAX_ENTITIES: usize = 10_000;
 const MAX_HISTORY_EVENTS: usize = 50_000;
 const MAX_CONFLICTS: usize = 1_000;
+const MAX_CONFLICT_PAGE: usize = 50;
+const MAX_CONFLICT_PREVIEW_BYTES: usize = 2_048;
 const MAX_APPLIED_OPERATIONS: usize = 50_000;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
 
@@ -89,6 +96,7 @@ pub(crate) enum EntityKind {
     Script,
     Setting,
     Background,
+    History,
 }
 
 impl EntityKind {
@@ -98,6 +106,7 @@ impl EntityKind {
             Self::Script => "script",
             Self::Setting => "setting",
             Self::Background => "background",
+            Self::History => "history",
         }
     }
 }
@@ -111,6 +120,19 @@ pub(crate) enum FieldValue {
     TextList(Vec<String>),
     BlobRef(String),
     Clear,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LocalEntityMutation {
+    Patch(BTreeMap<String, FieldValue>),
+    Delete,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergedEntityProjection {
+    pub(crate) entity_id: String,
+    pub(crate) fields: Option<BTreeMap<String, FieldValue>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -240,6 +262,155 @@ impl MergeOperation {
             operation_id: self.operation_id.clone(),
         }
     }
+
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+}
+
+pub(crate) fn build_local_entity_operation(
+    state: &MergeState,
+    operation_id: &str,
+    device_id: &str,
+    sequence: u64,
+    physical_ms: i64,
+    logical: u16,
+    entity_kind: EntityKind,
+    entity_id: &str,
+    mutation: LocalEntityMutation,
+) -> MergeResult<MergeOperation> {
+    let record = state.entities.get(&entity_key(&entity_kind, entity_id));
+    let payload = match mutation {
+        LocalEntityMutation::Patch(fields) => {
+            let observed_fields = fields
+                .keys()
+                .map(|field| {
+                    (
+                        field.clone(),
+                        record
+                            .and_then(|record| record.fields.get(field))
+                            .map(|register| register.stamp.clone()),
+                    )
+                })
+                .collect();
+            MergePayload::Patch(PatchPayload {
+                entity_kind: entity_kind.clone(),
+                entity_id: entity_id.to_string(),
+                fields,
+                observed_fields,
+                observed_tombstone: record.and_then(|record| record.tombstone.clone()),
+            })
+        }
+        LocalEntityMutation::Delete => MergePayload::Delete(DeletePayload {
+            entity_kind,
+            entity_id: entity_id.to_string(),
+            observed_fields: record
+                .map(|record| {
+                    record
+                        .fields
+                        .iter()
+                        .map(|(field, register)| (field.clone(), register.stamp.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            observed_tombstone: record.and_then(|record| record.tombstone.clone()),
+        }),
+    };
+    let operation = MergeOperation {
+        format_version: FORMAT_VERSION,
+        operation_id: operation_id.to_string(),
+        device_id: device_id.to_string(),
+        sequence,
+        hlc: HybridLogicalClock {
+            physical_ms,
+            logical,
+        },
+        payload,
+    };
+    validate_operation(&operation)?;
+    Ok(operation)
+}
+
+pub(crate) fn advance_local_hlc(
+    state: &MergeState,
+    candidate_physical_ms: i64,
+    candidate_logical: u16,
+) -> MergeResult<(i64, u16)> {
+    if candidate_physical_ms < 0 {
+        return Err(MergeError::new(
+            MergeErrorCode::InvalidInput,
+            "本机同步 HLC 时间无效",
+        ));
+    }
+    let mut maximum: Option<(i64, u16)> = None;
+    let mut observe = |stamp: &MergeStamp| {
+        let value = (stamp.hlc.physical_ms, stamp.hlc.logical);
+        if maximum.is_none_or(|current| value > current) {
+            maximum = Some(value);
+        }
+    };
+    for record in state.entities.values() {
+        for register in record.fields.values() {
+            observe(&register.stamp);
+        }
+        if let Some(stamp) = &record.tombstone {
+            observe(stamp);
+        }
+    }
+    for event in state.histories.values() {
+        observe(&event.stamp);
+    }
+    for conflict in state.conflicts.values() {
+        for alternative in &conflict.alternatives {
+            observe(&alternative.stamp);
+        }
+        if let Some(stamp) = &conflict.resolution_stamp {
+            observe(stamp);
+        }
+    }
+    let Some(maximum) = maximum else {
+        return Ok((candidate_physical_ms, candidate_logical));
+    };
+    if (candidate_physical_ms, candidate_logical) > maximum {
+        return Ok((candidate_physical_ms, candidate_logical));
+    }
+    if maximum.1 < u16::MAX {
+        Ok((maximum.0, maximum.1 + 1))
+    } else {
+        Ok((
+            maximum
+                .0
+                .checked_add(1)
+                .ok_or_else(|| MergeError::new(MergeErrorCode::LimitExceeded, "同步 HLC 已耗尽"))?,
+            0,
+        ))
+    }
+}
+
+pub(crate) fn local_entity_operation_matches(
+    encoded: &[u8],
+    operation_id: &str,
+    entity_kind: &EntityKind,
+    entity_id: &str,
+    mutation: &LocalEntityMutation,
+) -> bool {
+    let Ok(operation) = decode_signed_or_legacy_operation(encoded) else {
+        return false;
+    };
+    if operation.operation_id != operation_id {
+        return false;
+    }
+    match (&operation.payload, mutation) {
+        (MergePayload::Patch(payload), LocalEntityMutation::Patch(fields)) => {
+            payload.entity_kind == *entity_kind
+                && payload.entity_id == entity_id
+                && payload.fields == *fields
+        }
+        (MergePayload::Delete(payload), LocalEntityMutation::Delete) => {
+            payload.entity_kind == *entity_kind && payload.entity_id == entity_id
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -270,6 +441,28 @@ pub(crate) struct MergeConflict {
     reason: ConflictReason,
     alternatives: [ConflictAlternative; 2],
     resolution_stamp: Option<MergeStamp>,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConflictAlternativeSnapshot {
+    pub(crate) index: u8,
+    pub(crate) value_type: String,
+    pub(crate) preview: Option<String>,
+    pub(crate) byte_length: u64,
+    pub(crate) content_hash: Option<String>,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergeConflictSnapshot {
+    pub(crate) conflict_id: String,
+    pub(crate) entity_kind: EntityKind,
+    pub(crate) entity_id: String,
+    pub(crate) field: String,
+    pub(crate) reason: ConflictReason,
+    pub(crate) alternatives: [ConflictAlternativeSnapshot; 2],
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
@@ -351,7 +544,8 @@ pub(crate) fn apply_persisted_operation(
             "持久同步 merge 时间不能为负数",
         ));
     }
-    let operation = MergeOperation::decode(encoded_operation)?;
+    let operation = decode_signed_or_legacy_operation(encoded_operation)
+        .map_err(|message| MergeError::new(MergeErrorCode::InvalidInput, message))?;
     let (revision, mut state) = load_persisted_state(transaction)?;
     if revision != expected_revision {
         return Err(MergeError::new(
@@ -467,6 +661,65 @@ impl MergeState {
             .collect()
     }
 
+    pub(crate) fn background_blob_references(&self) -> MergeResult<Vec<String>> {
+        let mut references = BTreeSet::new();
+        for entity in self.background_projection()? {
+            if let Some(FieldValue::BlobRef(blob_id)) = entity
+                .fields
+                .as_ref()
+                .and_then(|fields| fields.get("blobId"))
+            {
+                references.insert(blob_id.clone());
+            }
+        }
+        for conflict in self.conflicts.values().filter(|conflict| {
+            conflict.resolution_stamp.is_none()
+                && conflict.entity_kind == EntityKind::Background
+                && conflict.field == "blobId"
+        }) {
+            for alternative in &conflict.alternatives {
+                if let Some(FieldValue::BlobRef(blob_id)) = &alternative.value {
+                    references.insert(blob_id.clone());
+                }
+            }
+        }
+        Ok(references.into_iter().collect())
+    }
+
+    pub(crate) fn conflict_snapshot(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> MergeResult<(usize, Vec<MergeConflictSnapshot>)> {
+        if offset > MAX_CONFLICTS || limit == 0 || limit > MAX_CONFLICT_PAGE {
+            return Err(MergeError::new(
+                MergeErrorCode::InvalidInput,
+                "同步冲突分页范围无效",
+            ));
+        }
+        let open = self.open_conflicts();
+        let total = open.len();
+        let snapshots = open
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|conflict| {
+                Ok(MergeConflictSnapshot {
+                    conflict_id: conflict.conflict_id,
+                    entity_kind: conflict.entity_kind,
+                    entity_id: conflict.entity_id,
+                    field: conflict.field,
+                    reason: conflict.reason,
+                    alternatives: [
+                        conflict_alternative_snapshot(0, &conflict.alternatives[0])?,
+                        conflict_alternative_snapshot(1, &conflict.alternatives[1])?,
+                    ],
+                })
+            })
+            .collect::<MergeResult<Vec<_>>>()?;
+        Ok((total, snapshots))
+    }
+
     pub(crate) fn history(&self) -> Vec<HistoryEvent> {
         let mut events = self.histories.values().cloned().collect::<Vec<_>>();
         events.sort_by(|left, right| {
@@ -498,6 +751,44 @@ impl MergeState {
                 .map(|(field, register)| (field.clone(), register.value.clone()))
                 .collect(),
         )
+    }
+
+    fn entity_projection(
+        &self,
+        projected_kind: EntityKind,
+    ) -> MergeResult<Vec<MergedEntityProjection>> {
+        let mut projection = Vec::new();
+        for key in self.entities.keys() {
+            let (kind, entity_id) = parse_entity_key(key)?;
+            if kind != projected_kind {
+                continue;
+            }
+            projection.push(MergedEntityProjection {
+                entity_id: entity_id.to_string(),
+                fields: self.entity_fields(&kind, entity_id),
+            });
+        }
+        Ok(projection)
+    }
+
+    pub(crate) fn host_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::Host)
+    }
+
+    pub(crate) fn script_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::Script)
+    }
+
+    pub(crate) fn setting_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::Setting)
+    }
+
+    pub(crate) fn background_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::Background)
+    }
+
+    pub(crate) fn history_entity_projection(&self) -> MergeResult<Vec<MergedEntityProjection>> {
+        self.entity_projection(EntityKind::History)
     }
 
     fn apply_patch(&mut self, payload: &PatchPayload, stamp: MergeStamp) -> MergeResult<()> {
@@ -753,6 +1044,109 @@ impl MergeState {
     }
 }
 
+fn bounded_conflict_preview(value: &str) -> (String, bool) {
+    if value.len() <= MAX_CONFLICT_PREVIEW_BYTES {
+        return (value.to_string(), false);
+    }
+    let mut end = MAX_CONFLICT_PREVIEW_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
+}
+
+fn conflict_alternative_snapshot(
+    index: u8,
+    alternative: &ConflictAlternative,
+) -> MergeResult<ConflictAlternativeSnapshot> {
+    let Some(value) = &alternative.value else {
+        return Ok(ConflictAlternativeSnapshot {
+            index,
+            value_type: "deleted".to_string(),
+            preview: None,
+            byte_length: 0,
+            content_hash: None,
+            truncated: false,
+        });
+    };
+    let encoded = serde_json::to_vec(value)
+        .map_err(|_| MergeError::new(MergeErrorCode::CorruptState, "无法编码同步冲突候选"))?;
+    let (value_type, display) = match value {
+        FieldValue::Text(value) => ("text", Some(value.clone())),
+        FieldValue::Integer(value) => ("integer", Some(value.to_string())),
+        FieldValue::Flag(value) => ("flag", Some(value.to_string())),
+        FieldValue::TextList(value) => (
+            "text-list",
+            Some(serde_json::to_string(value).map_err(|_| {
+                MergeError::new(MergeErrorCode::CorruptState, "无法编码同步冲突列表候选")
+            })?),
+        ),
+        FieldValue::BlobRef(value) => ("blob-ref", Some(value.clone())),
+        FieldValue::Clear => ("clear", None),
+    };
+    let (preview, truncated) = display
+        .as_deref()
+        .map(bounded_conflict_preview)
+        .map(|(preview, truncated)| (Some(preview), truncated))
+        .unwrap_or((None, false));
+    Ok(ConflictAlternativeSnapshot {
+        index,
+        value_type: value_type.to_string(),
+        preview,
+        byte_length: encoded.len() as u64,
+        content_hash: Some(sha256_hex(&encoded)),
+        truncated,
+    })
+}
+
+pub(crate) fn build_local_conflict_resolution_operation(
+    state: &MergeState,
+    operation_id: &str,
+    device_id: &str,
+    sequence: u64,
+    physical_ms: i64,
+    logical: u16,
+    conflict_id: &str,
+    alternative_index: u8,
+) -> MergeResult<MergeOperation> {
+    validate_uuid(operation_id, "operation")?;
+    validate_uuid(device_id, "device")?;
+    validate_hash(conflict_id, "conflict")?;
+    let conflict = state.conflicts.get(conflict_id).ok_or_else(|| {
+        MergeError::new(MergeErrorCode::ConflictMissing, "要解决的同步冲突不存在")
+    })?;
+    if conflict.resolution_stamp.is_some() {
+        return Err(MergeError::new(
+            MergeErrorCode::StaleResolution,
+            "同步冲突已经解决",
+        ));
+    }
+    let alternative = conflict
+        .alternatives
+        .get(usize::from(alternative_index))
+        .ok_or_else(|| MergeError::new(MergeErrorCode::InvalidInput, "同步冲突候选索引无效"))?;
+    let operation = MergeOperation {
+        format_version: FORMAT_VERSION,
+        operation_id: operation_id.to_string(),
+        device_id: device_id.to_string(),
+        sequence,
+        hlc: HybridLogicalClock {
+            physical_ms,
+            logical,
+        },
+        payload: MergePayload::Resolve(ResolvePayload {
+            conflict_id: conflict.conflict_id.clone(),
+            entity_kind: conflict.entity_kind.clone(),
+            entity_id: conflict.entity_id.clone(),
+            field: conflict.field.clone(),
+            value: alternative.value.clone(),
+            keep_deleted: alternative.value.is_none(),
+        }),
+    };
+    validate_operation(&operation)?;
+    Ok(operation)
+}
+
 fn validate_operation(operation: &MergeOperation) -> MergeResult<()> {
     if operation.format_version != FORMAT_VERSION
         || operation.sequence == 0
@@ -833,6 +1227,22 @@ fn validate_patch(payload: &PatchPayload, operation: &MergeOperation) -> MergeRe
         return Err(MergeError::new(
             MergeErrorCode::LimitExceeded,
             "同步 patch 字段必须为 1 至 64 项",
+        ));
+    }
+    if payload.entity_kind == EntityKind::Background
+        && !(payload.fields.len() == 2
+            && matches!(
+                payload.fields.get("kind"),
+                Some(FieldValue::Text(value)) if value == "managed-blob"
+            )
+            && matches!(
+                payload.fields.get("blobId"),
+                Some(FieldValue::BlobRef(value)) if validate_hash(value, "background blob").is_ok()
+            ))
+    {
+        return Err(MergeError::new(
+            MergeErrorCode::InvalidInput,
+            "同步背景 patch 必须包含完整 managed blob 引用",
         ));
     }
     for (field, value) in &payload.fields {
@@ -919,6 +1329,58 @@ fn validate_history_core(event: &HistoryEvent) -> MergeResult<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn entity_fields_are_syncable(
+    kind: &EntityKind,
+    fields: &BTreeMap<String, FieldValue>,
+) -> bool {
+    let fields_valid = !fields.is_empty()
+        && fields.len() <= MAX_FIELDS_PER_PATCH
+        && fields
+            .iter()
+            .all(|(field, value)| validate_field(kind, field, value).is_ok());
+    if !fields_valid || kind != &EntityKind::History {
+        return fields_valid;
+    }
+    match fields.get("kind") {
+        Some(FieldValue::Text(kind)) if kind == "command" => {
+            fields.len() == 5
+                && fields.keys().all(|field| {
+                    matches!(
+                        field.as_str(),
+                        "kind" | "value" | "hostId" | "remotePath" | "createdAt"
+                    )
+                })
+        }
+        Some(FieldValue::Text(kind)) if kind == "path" => {
+            fields.len() == 4
+                && fields.keys().all(|field| {
+                    matches!(field.as_str(), "kind" | "value" | "hostId" | "createdAt")
+                })
+                && matches!(fields.get("value"), Some(FieldValue::Text(value))
+                    if value == "~" || value.starts_with('/') || value.starts_with("~/"))
+        }
+        Some(FieldValue::Text(kind)) if kind == "argument" => {
+            fields.len() == 5
+                && fields.keys().all(|field| {
+                    matches!(
+                        field.as_str(),
+                        "kind" | "value" | "commandId" | "parameterName" | "createdAt"
+                    )
+                })
+        }
+        Some(FieldValue::Text(kind)) if kind == "connection" => {
+            fields.len() == 4
+                && fields.keys().all(|field| {
+                    matches!(
+                        field.as_str(),
+                        "kind" | "hostId" | "remotePath" | "createdAt"
+                    )
+                })
+        }
+        _ => false,
+    }
 }
 
 fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeResult<()> {
@@ -1011,10 +1473,23 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
         {
             Ok(())
         }
-        (EntityKind::Setting, _, FieldValue::Text(value)) if valid_text(value, 256) => Ok(()),
-        (EntityKind::Background, "kind", FieldValue::Text(value))
-            if matches!(value.as_str(), "none" | "managed-blob") =>
+        (EntityKind::Setting, "wallpaperOpacity", FieldValue::Integer(value))
+            if (5..=65).contains(value) =>
         {
+            Ok(())
+        }
+        (
+            EntityKind::Setting,
+            "autoUploadEditedFiles" | "packageTransfersEnabled",
+            FieldValue::Flag(_),
+        ) => Ok(()),
+        (EntityKind::Setting, "onboardingCompleted", FieldValue::Flag(_)) => Ok(()),
+        (
+            EntityKind::Setting,
+            "terminalTheme" | "fontFamily" | "locale",
+            FieldValue::Text(value),
+        ) if valid_text(value, 256) => Ok(()),
+        (EntityKind::Background, "kind", FieldValue::Text(value)) if value == "managed-blob" => {
             Ok(())
         }
         (EntityKind::Background, "blobId", FieldValue::BlobRef(value))
@@ -1022,8 +1497,45 @@ fn validate_field(kind: &EntityKind, field: &str, value: &FieldValue) -> MergeRe
         {
             Ok(())
         }
-        (EntityKind::Background, "opacity", FieldValue::Integer(value))
-            if (0..=100).contains(value) =>
+        (EntityKind::History, "kind", FieldValue::Text(value))
+            if matches!(
+                value.as_str(),
+                "command" | "path" | "argument" | "connection"
+            ) =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "value", FieldValue::Text(value))
+            if !value.is_empty()
+                && value.len() <= 4096
+                && !contains_unsafe_multiline(value)
+                && !contains_obvious_secret(value) =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "hostId", FieldValue::Text(value))
+            if validate_uuid(value, "history host").is_ok() =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "remotePath", FieldValue::Text(value))
+            if value.len() <= 4096
+                && (value == "~" || value.starts_with('/') || value.starts_with("~/"))
+                && !contains_unsafe_text(value)
+                && !contains_obvious_secret(value) =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "createdAt", FieldValue::Text(value))
+            if valid_iso_timestamp(value) =>
+        {
+            Ok(())
+        }
+        (EntityKind::History, "commandId", FieldValue::Text(value)) if valid_text(value, 128) => {
+            Ok(())
+        }
+        (EntityKind::History, "parameterName", FieldValue::Text(value))
+            if valid_text(value, 128) && !is_secret_name(value) =>
         {
             Ok(())
         }
@@ -1085,9 +1597,25 @@ fn field_allowed(kind: &EntityKind, field: &str) -> bool {
                 | "fontSize"
                 | "lineHeight"
                 | "monitorInterval"
+                | "wallpaperOpacity"
                 | "locale"
+                | "autoUploadEditedFiles"
+                | "packageTransfersEnabled"
+                | "onboardingCompleted"
         ),
-        EntityKind::Background => matches!(field, "kind" | "blobId" | "opacity"),
+        EntityKind::Background => matches!(field, "kind" | "blobId"),
+        EntityKind::History => {
+            matches!(
+                field,
+                "kind"
+                    | "value"
+                    | "hostId"
+                    | "remotePath"
+                    | "commandId"
+                    | "parameterName"
+                    | "createdAt"
+            )
+        }
     }
 }
 
@@ -1292,6 +1820,7 @@ fn parse_entity_key(value: &str) -> MergeResult<(EntityKind, &str)> {
         "script" => EntityKind::Script,
         "setting" => EntityKind::Setting,
         "background" => EntityKind::Background,
+        "history" => EntityKind::History,
         _ => {
             return Err(MergeError::new(
                 MergeErrorCode::CorruptState,
@@ -1334,6 +1863,44 @@ fn contains_obvious_secret(value: &str) -> bool {
         || lower.contains("api_key=")
         || lower.contains("apikey=")
         || lower.contains("credentialref")
+}
+
+fn valid_iso_timestamp(value: &str) -> bool {
+    if value.len() != 24
+        || !value.is_ascii()
+        || value.as_bytes()[4] != b'-'
+        || value.as_bytes()[7] != b'-'
+        || value.as_bytes()[10] != b'T'
+        || value.as_bytes()[13] != b':'
+        || value.as_bytes()[16] != b':'
+        || value.as_bytes()[19] != b'.'
+        || value.as_bytes()[23] != b'Z'
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit()
+        })
+    {
+        return false;
+    }
+    let parse = |start, end| value[start..end].parse::<u32>().ok();
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        parse(0, 4),
+        parse(5, 7),
+        parse(8, 10),
+        parse(11, 13),
+        parse(14, 16),
+        parse(17, 19),
+    ) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    year >= 1970 && (1..=maximum_day).contains(&day) && hour <= 23 && minute <= 59 && second <= 59
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1386,6 +1953,30 @@ mod tests {
         }
     }
 
+    fn background_patch(operation_number: u128, physical_ms: i64) -> MergeOperation {
+        let fields = BTreeMap::from([
+            ("blobId".to_string(), FieldValue::BlobRef("ab".repeat(32))),
+            ("kind".to_string(), FieldValue::Text("managed-blob".into())),
+        ]);
+        MergeOperation {
+            format_version: FORMAT_VERSION,
+            operation_id: operation_id(operation_number),
+            device_id: DEVICE_A.to_string(),
+            sequence: operation_number as u64,
+            hlc: HybridLogicalClock {
+                physical_ms,
+                logical: 0,
+            },
+            payload: MergePayload::Patch(PatchPayload {
+                entity_kind: EntityKind::Background,
+                entity_id: HOST_ID.to_string(),
+                observed_fields: fields.keys().map(|field| (field.clone(), None)).collect(),
+                fields,
+                observed_tombstone: None,
+            }),
+        }
+    }
+
     fn current_field(state: &MergeState, kind: EntityKind, id: &str, field: &str) -> FieldValue {
         state.entities[&entity_key(&kind, id)].fields[field]
             .value
@@ -1424,6 +2015,84 @@ mod tests {
         assert_eq!(
             current_field(&left, EntityKind::Host, HOST_ID, "address"),
             FieldValue::Text("host-b.example".into())
+        );
+    }
+
+    #[test]
+    fn conflict_snapshot_is_bounded_and_resolution_uses_a_frozen_alternative() {
+        let first_value = "a".repeat(3_000);
+        let second_value = "b".repeat(3_000);
+        let first = patch(
+            101,
+            DEVICE_A,
+            100,
+            EntityKind::Script,
+            HOST_ID,
+            "body",
+            FieldValue::Text(first_value.clone()),
+        );
+        let second = patch(
+            102,
+            DEVICE_B,
+            100,
+            EntityKind::Script,
+            HOST_ID,
+            "body",
+            FieldValue::Text(second_value),
+        );
+        let mut state = MergeState::default();
+        state.apply(&first).unwrap();
+        state.apply(&second).unwrap();
+
+        let (total, conflicts) = state.conflict_snapshot(0, 1).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].alternatives[0].truncated);
+        assert!(conflicts[0].alternatives[0].preview.as_ref().unwrap().len() <= 2_048);
+        assert_eq!(
+            conflicts[0].alternatives[0]
+                .content_hash
+                .as_ref()
+                .unwrap()
+                .len(),
+            64
+        );
+        let encoded_snapshot = serde_json::to_string(&conflicts).unwrap();
+        assert!(!encoded_snapshot.contains(DEVICE_A));
+        assert!(!encoded_snapshot.contains(DEVICE_B));
+        assert!(state.conflict_snapshot(0, 0).is_err());
+        assert!(state.conflict_snapshot(0, 51).is_err());
+
+        let conflict_id = conflicts[0].conflict_id.clone();
+        assert!(
+            build_local_conflict_resolution_operation(
+                &state,
+                &operation_id(103),
+                DEVICE_A,
+                103,
+                101,
+                0,
+                &conflict_id,
+                2,
+            )
+            .is_err()
+        );
+        let operation = build_local_conflict_resolution_operation(
+            &state,
+            &operation_id(104),
+            DEVICE_A,
+            104,
+            101,
+            0,
+            &conflict_id,
+            0,
+        )
+        .unwrap();
+        state.apply(&operation).unwrap();
+        assert!(state.open_conflicts().is_empty());
+        assert_eq!(
+            current_field(&state, EntityKind::Script, HOST_ID, "body"),
+            FieldValue::Text(first_value)
         );
     }
 
@@ -1539,31 +2208,41 @@ mod tests {
                 "fontSize",
                 FieldValue::Integer(16),
             ),
+            background_patch(71, 101),
             patch(
-                71,
+                74,
                 DEVICE_A,
-                101,
-                EntityKind::Background,
+                104,
+                EntityKind::Setting,
                 HOST_ID,
-                "kind",
-                FieldValue::Text("managed-blob".into()),
+                "packageTransfersEnabled",
+                FieldValue::Flag(false),
             ),
             patch(
-                72,
+                75,
                 DEVICE_A,
-                102,
-                EntityKind::Background,
+                105,
+                EntityKind::Setting,
                 HOST_ID,
-                "blobId",
-                FieldValue::BlobRef("ab".repeat(32)),
+                "onboardingCompleted",
+                FieldValue::Flag(true),
             ),
             patch(
-                73,
+                76,
                 DEVICE_A,
-                103,
-                EntityKind::Background,
+                106,
+                EntityKind::Setting,
                 HOST_ID,
-                "opacity",
+                "monitorInterval",
+                FieldValue::Integer(30),
+            ),
+            patch(
+                77,
+                DEVICE_A,
+                107,
+                EntityKind::Setting,
+                HOST_ID,
+                "wallpaperOpacity",
                 FieldValue::Integer(35),
             ),
         ];
@@ -1575,12 +2254,116 @@ mod tests {
             state.entity_fields(&EntityKind::Setting, HOST_ID).unwrap()["fontSize"],
             FieldValue::Integer(16)
         );
+        assert_eq!(
+            state.entity_fields(&EntityKind::Setting, HOST_ID).unwrap()["onboardingCompleted"],
+            FieldValue::Flag(true)
+        );
+        assert_eq!(
+            state.setting_projection().unwrap(),
+            vec![MergedEntityProjection {
+                entity_id: HOST_ID.to_string(),
+                fields: Some(BTreeMap::from([
+                    ("fontSize".to_string(), FieldValue::Integer(16)),
+                    ("monitorInterval".to_string(), FieldValue::Integer(30)),
+                    (
+                        "packageTransfersEnabled".to_string(),
+                        FieldValue::Flag(false),
+                    ),
+                    ("onboardingCompleted".to_string(), FieldValue::Flag(true)),
+                    ("wallpaperOpacity".to_string(), FieldValue::Integer(35)),
+                ])),
+            }]
+        );
+        assert!(
+            patch(
+                78,
+                DEVICE_A,
+                108,
+                EntityKind::Setting,
+                HOST_ID,
+                "packageTransfersEnabled",
+                FieldValue::Text("false".into()),
+            )
+            .encode()
+            .is_err()
+        );
+        assert!(
+            patch(
+                79,
+                DEVICE_A,
+                109,
+                EntityKind::Setting,
+                HOST_ID,
+                "monitorInterval",
+                FieldValue::Integer(4),
+            )
+            .encode()
+            .is_err()
+        );
+        assert!(
+            patch(
+                80,
+                DEVICE_A,
+                110,
+                EntityKind::Setting,
+                HOST_ID,
+                "wallpaperOpacity",
+                FieldValue::Integer(66),
+            )
+            .encode()
+            .is_err()
+        );
         let background = state
             .entity_fields(&EntityKind::Background, HOST_ID)
             .unwrap();
         assert_eq!(background["kind"], FieldValue::Text("managed-blob".into()));
-        assert_eq!(background["opacity"], FieldValue::Integer(35));
+        assert!(
+            patch(
+                81,
+                DEVICE_A,
+                111,
+                EntityKind::Background,
+                HOST_ID,
+                "opacity",
+                FieldValue::Integer(35),
+            )
+            .encode()
+            .is_err()
+        );
+        assert!(
+            patch(
+                82,
+                DEVICE_A,
+                112,
+                EntityKind::Background,
+                HOST_ID,
+                "kind",
+                FieldValue::Text("none".into()),
+            )
+            .encode()
+            .is_err()
+        );
         assert_eq!(MergeState::decode(&state.encode().unwrap()).unwrap(), state);
+    }
+
+    #[test]
+    fn background_blob_references_include_open_conflict_alternatives() {
+        let mut state = MergeState::default();
+        state.apply(&background_patch(90, 100)).unwrap();
+        let mut concurrent = background_patch(91, 101);
+        concurrent.device_id = DEVICE_B.to_string();
+        let MergePayload::Patch(payload) = &mut concurrent.payload else {
+            unreachable!();
+        };
+        payload
+            .fields
+            .insert("blobId".to_string(), FieldValue::BlobRef("cd".repeat(32)));
+        state.apply(&concurrent).unwrap();
+
+        assert_eq!(
+            state.background_blob_references().unwrap(),
+            vec!["ab".repeat(32), "cd".repeat(32)]
+        );
     }
 
     #[test]
@@ -1626,6 +2409,191 @@ mod tests {
             secret.encode().unwrap_err().code,
             MergeErrorCode::InvalidInput
         );
+    }
+
+    #[test]
+    fn command_history_entities_validate_complete_public_fields_and_preserve_tombstones() {
+        let history_id = "22222222-2222-4222-8222-222222222222";
+        let fields = BTreeMap::from([
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-18T22:30:00.000Z".into()),
+            ),
+            ("hostId".to_string(), FieldValue::Text(HOST_ID.into())),
+            ("kind".to_string(), FieldValue::Text("command".into())),
+            (
+                "remotePath".to_string(),
+                FieldValue::Text("/srv/app".into()),
+            ),
+            (
+                "value".to_string(),
+                FieldValue::Text("systemctl status nginx".into()),
+            ),
+        ]);
+        let mut state = MergeState::default();
+        let append = build_local_entity_operation(
+            &state,
+            &operation_id(81),
+            DEVICE_A,
+            81,
+            100,
+            0,
+            EntityKind::History,
+            history_id,
+            LocalEntityMutation::Patch(fields.clone()),
+        )
+        .unwrap();
+        state.apply(&append).unwrap();
+        assert_eq!(
+            state.history_entity_projection().unwrap(),
+            vec![MergedEntityProjection {
+                entity_id: history_id.into(),
+                fields: Some(fields),
+            }]
+        );
+        let delete = build_local_entity_operation(
+            &state,
+            &operation_id(82),
+            DEVICE_A,
+            82,
+            101,
+            0,
+            EntityKind::History,
+            history_id,
+            LocalEntityMutation::Delete,
+        )
+        .unwrap();
+        state.apply(&delete).unwrap();
+        assert_eq!(
+            state.history_entity_projection().unwrap(),
+            vec![MergedEntityProjection {
+                entity_id: history_id.into(),
+                fields: None,
+            }]
+        );
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &BTreeMap::from([(
+                "value".to_string(),
+                FieldValue::Text("deploy --token=secret".into()),
+            )]),
+        ));
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &BTreeMap::from([(
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-18".into()),
+            )]),
+        ));
+    }
+
+    #[test]
+    fn path_history_entities_require_complete_public_remote_paths() {
+        let fields = BTreeMap::from([
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-18T23:30:00.000Z".into()),
+            ),
+            ("hostId".to_string(), FieldValue::Text(HOST_ID.into())),
+            ("kind".to_string(), FieldValue::Text("path".into())),
+            (
+                "value".to_string(),
+                FieldValue::Text("/srv/releases/current".into()),
+            ),
+        ]);
+        assert!(entity_fields_are_syncable(&EntityKind::History, &fields));
+        let mut relative = fields.clone();
+        relative.insert("value".to_string(), FieldValue::Text("srv/releases".into()));
+        assert!(!entity_fields_are_syncable(&EntityKind::History, &relative,));
+        let mut secret = fields.clone();
+        secret.insert(
+            "value".to_string(),
+            FieldValue::Text("/srv/token=secret".into()),
+        );
+        assert!(!entity_fields_are_syncable(&EntityKind::History, &secret,));
+        let mut incomplete = fields;
+        incomplete.remove("createdAt");
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &incomplete,
+        ));
+    }
+
+    #[test]
+    fn argument_history_entities_require_named_public_values() {
+        let fields = BTreeMap::from([
+            (
+                "commandId".to_string(),
+                FieldValue::Text("command-service-logs".into()),
+            ),
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-19T00:10:00.000Z".into()),
+            ),
+            ("kind".to_string(), FieldValue::Text("argument".into())),
+            (
+                "parameterName".to_string(),
+                FieldValue::Text("SERVICE".into()),
+            ),
+            ("value".to_string(), FieldValue::Text("nginx".into())),
+        ]);
+        assert!(entity_fields_are_syncable(&EntityKind::History, &fields));
+        let mut sensitive_name = fields.clone();
+        sensitive_name.insert(
+            "parameterName".to_string(),
+            FieldValue::Text("API_TOKEN".into()),
+        );
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &sensitive_name,
+        ));
+        let mut sensitive_value = fields.clone();
+        sensitive_value.insert("value".to_string(), FieldValue::Text("token=secret".into()));
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &sensitive_value,
+        ));
+        let mut incomplete = fields;
+        incomplete.remove("commandId");
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &incomplete,
+        ));
+    }
+
+    #[test]
+    fn connection_history_requires_host_path_and_rust_timestamp_shape() {
+        let fields = BTreeMap::from([
+            (
+                "createdAt".to_string(),
+                FieldValue::Text("2026-08-19T01:20:00.000Z".into()),
+            ),
+            ("hostId".to_string(), FieldValue::Text(HOST_ID.into())),
+            ("kind".to_string(), FieldValue::Text("connection".into())),
+            (
+                "remotePath".to_string(),
+                FieldValue::Text("/srv/app".into()),
+            ),
+        ]);
+        assert!(entity_fields_are_syncable(&EntityKind::History, &fields));
+        let mut with_value = fields.clone();
+        with_value.insert("value".to_string(), FieldValue::Text("connected".into()));
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &with_value,
+        ));
+        let mut relative_path = fields.clone();
+        relative_path.insert("remotePath".to_string(), FieldValue::Text("srv/app".into()));
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &relative_path,
+        ));
+        let mut missing_host = fields;
+        missing_host.remove("hostId");
+        assert!(!entity_fields_are_syncable(
+            &EntityKind::History,
+            &missing_host,
+        ));
     }
 
     #[test]
@@ -1980,5 +2948,22 @@ mod tests {
             state.entity_fields(&EntityKind::Setting, HOST_ID).unwrap()["fontSize"],
             FieldValue::Integer(17)
         );
+    }
+
+    #[test]
+    fn local_hlc_advances_past_observed_remote_clock() {
+        let remote = patch(
+            90,
+            DEVICE_B,
+            50_000,
+            EntityKind::Host,
+            HOST_ID,
+            "name",
+            FieldValue::Text("remote".into()),
+        );
+        let mut state = MergeState::default();
+        state.apply(&remote).unwrap();
+        assert_eq!(advance_local_hlc(&state, 1_000, 0).unwrap(), (50_000, 1));
+        assert_eq!(advance_local_hlc(&state, 60_000, 0).unwrap(), (60_000, 0));
     }
 }

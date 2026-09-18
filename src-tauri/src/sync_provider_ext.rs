@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
+use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use reqwest::Url;
 use zeroize::Zeroizing;
 
@@ -13,6 +14,7 @@ const MAX_OBJECT_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_TRANSPORT_LIST: usize = 10_000;
 const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_ROOT_BYTES: usize = 1_024;
+const MAX_ROOT_DEPTH: usize = 32;
 const MIN_TIMEOUT_SECONDS: u64 = 5;
 const MAX_TIMEOUT_SECONDS: u64 = 60;
 
@@ -267,7 +269,13 @@ pub(crate) struct S3ProviderConfig {
 
 impl S3ProviderConfig {
     pub(crate) fn validate(&self) -> ProviderResult<()> {
-        validate_https_endpoint(&self.endpoint, "S3")?;
+        let endpoint = validate_https_endpoint(&self.endpoint, "S3")?;
+        if endpoint.path() != "/" {
+            return Err(ProviderError::new(
+                ProviderErrorCode::InvalidInput,
+                "S3 endpoint 不能包含基础路径",
+            ));
+        }
         if self.region.is_empty()
             || self.region.len() > 128
             || !self
@@ -366,6 +374,7 @@ impl GatewayLoginSecrets {
             || username.chars().any(char::is_control)
             || password.is_empty()
             || password.len() > 1_024
+            || password.contains('\0')
             || totp.as_deref().is_some_and(|value| {
                 value.len() != 6 || !value.bytes().all(|byte| byte.is_ascii_digit())
             })
@@ -481,6 +490,7 @@ fn valid_remote_root(root: &str) -> bool {
     };
     !relative.is_empty()
         && root.len() <= MAX_ROOT_BYTES
+        && relative.split('/').count() <= MAX_ROOT_DEPTH
         && !root.contains('\\')
         && !root.chars().any(char::is_control)
         && relative
@@ -490,14 +500,14 @@ fn valid_remote_root(root: &str) -> bool {
 
 fn valid_sha256_fingerprint(value: &str) -> bool {
     value.strip_prefix("SHA256:").is_some_and(|digest| {
-        (43..=44).contains(&digest.len())
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        digest.len() == 43
+            && BASE64_STANDARD_NO_PAD
+                .decode(digest)
+                .is_ok_and(|bytes| bytes.len() == 32)
     })
 }
 
-fn validate_https_endpoint(endpoint: &str, label: &str) -> ProviderResult<()> {
+fn validate_https_endpoint(endpoint: &str, label: &str) -> ProviderResult<Url> {
     if endpoint.is_empty() || endpoint.len() > MAX_ENDPOINT_BYTES {
         return Err(ProviderError::new(
             ProviderErrorCode::InvalidInput,
@@ -522,7 +532,7 @@ fn validate_https_endpoint(endpoint: &str, label: &str) -> ProviderResult<()> {
             format!("{label} endpoint 必须是无凭据/query/fragment 的 HTTPS URL"),
         ));
     }
-    Ok(())
+    Ok(url)
 }
 
 fn valid_bucket(bucket: &str) -> bool {
@@ -719,6 +729,9 @@ mod tests {
         invalid.endpoint = "http://access:secret@example.com/?x=1".into();
         assert!(S3SyncProvider::connect(invalid, FakeTransport::default()).is_err());
         let mut invalid = s3_config();
+        invalid.endpoint = "https://s3.example.com/base/".into();
+        assert!(S3SyncProvider::connect(invalid, FakeTransport::default()).is_err());
+        let mut invalid = s3_config();
         invalid.bucket = "UPPER".into();
         assert!(S3SyncProvider::connect(invalid, FakeTransport::default()).is_err());
     }
@@ -830,6 +843,8 @@ mod tests {
         unsafe_root.root = "/".into();
         assert!(unsafe_root.validate().is_err());
         unsafe_root.root = "/safe/../escape".into();
+        assert!(unsafe_root.validate().is_err());
+        unsafe_root.root = format!("/{}", vec!["safe"; MAX_ROOT_DEPTH + 1].join("/"));
         assert!(unsafe_root.validate().is_err());
     }
 }

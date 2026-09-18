@@ -1,10 +1,69 @@
-import type { AppState, ApplicationSettings, CommandRecipe, HostProfile, ScriptRecipe } from "./types";
+import type {
+  AppState,
+  ApplicationSettings,
+  CommandRecipe,
+  HostProfile,
+  ParameterHistoryItem,
+  PathHistoryItem,
+  ScriptRecipe,
+  WallpaperSettings,
+} from "./types";
 
 const legacyDemoHostIds = new Set([
   "host-sg-prod",
   "host-hk-gateway",
   "host-tokyo-test",
 ]);
+
+function normalizePathHistoryEntries(entries: unknown, scope: string): PathHistoryItem[] {
+  return (Array.isArray(entries) ? entries : []).flatMap((entry, entryIndex): PathHistoryItem[] => {
+    if (typeof entry === "string") {
+      return [{
+        id: `legacy-path-${scope}-${entryIndex}`,
+        path: entry,
+        createdAt: "",
+      }];
+    }
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as Partial<PathHistoryItem>;
+    if (typeof candidate.id !== "string"
+      || candidate.id.length === 0
+      || candidate.id.length > 128
+      || typeof candidate.path !== "string"
+      || typeof candidate.createdAt !== "string") return [];
+    return [{ id: candidate.id, path: candidate.path, createdAt: candidate.createdAt }];
+  });
+}
+
+function normalizeParameterHistoryEntries(entries: unknown): ParameterHistoryItem[] {
+  return (Array.isArray(entries) ? entries : []).flatMap((entry): ParameterHistoryItem[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as Partial<ParameterHistoryItem>;
+    if (typeof candidate.id !== "string"
+      || candidate.id.length === 0
+      || candidate.id.length > 128
+      || typeof candidate.commandId !== "string"
+      || candidate.commandId.length === 0
+      || candidate.commandId.length > 128
+      || typeof candidate.parameterName !== "string"
+      || candidate.parameterName.length === 0
+      || candidate.parameterName.length > 128
+      || typeof candidate.value !== "string"
+      || candidate.value.length === 0
+      || candidate.value.length > 4096
+      || typeof candidate.createdAt !== "string"
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(candidate.createdAt)
+      || [candidate.id, candidate.commandId, candidate.parameterName, candidate.value]
+        .some((value) => /[\0-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(value))) return [];
+    return [{
+      id: candidate.id,
+      commandId: candidate.commandId,
+      parameterName: candidate.parameterName,
+      value: candidate.value,
+      createdAt: candidate.createdAt,
+    }];
+  }).slice(0, 10_000);
+}
 
 export const builtInScripts: ScriptRecipe[] = [
   {
@@ -355,6 +414,7 @@ export const initialState: AppState = {
   commands: builtInCommands,
   sshKeys: [],
   commandHistory: [],
+  parameterHistory: [],
   connectionHistory: [],
   pathHistory: {},
   sync: {
@@ -363,6 +423,11 @@ export const initialState: AppState = {
     endpoint: "",
     remotePath: "/vpshell",
     username: "",
+    s3Region: "us-east-1",
+    s3Bucket: "",
+    s3Prefix: "vpshell",
+    s3PathStyle: true,
+    gatewayVaultId: "",
     totpEnabled: false,
     syncSecrets: false,
   },
@@ -380,12 +445,16 @@ export const initialState: AppState = {
     externalEditorPath: "",
     autoUploadEditedFiles: false,
     packageTransfersEnabled: true,
+    monitorIntervalSeconds: 15,
   },
   onboardingCompleted: false,
 };
 
 /** Remove only the three profiles shipped as legacy demos and their exact references. */
 export function migratePersistedAppState(value: AppState): AppState {
+  const legacyPathHistory = (
+    value as unknown as { pathHistory?: Record<string, unknown[]> }
+  ).pathHistory;
   const sourceHosts = Array.isArray(value.hosts) ? value.hosts : [];
   const hosts = sourceHosts
     .filter((host) => !legacyDemoHostIds.has(host.id))
@@ -401,22 +470,54 @@ export function migratePersistedAppState(value: AppState): AppState {
       return directHost;
     });
   const pathHistory = Object.fromEntries(
-    Object.entries(value.pathHistory ?? {}).filter(([hostId]) => !legacyDemoHostIds.has(hostId)),
+    Object.entries(legacyPathHistory ?? {})
+      .filter(([hostId]) => !legacyDemoHostIds.has(hostId))
+      .map(([hostId, entries], hostIndex) => [
+        hostId,
+        normalizePathHistoryEntries(entries, String(hostIndex)),
+      ]),
   );
+  const deletedHosts = (value.deletedHosts ?? []).map((item, index) => {
+    const legacyItem = item as unknown as { pathHistory?: unknown };
+    return {
+      ...item,
+      pathHistory: normalizePathHistoryEntries(legacyItem.pathHistory, `deleted-${index}`),
+    };
+  });
   const settings = {
     ...initialState.settings,
     ...(value.settings ?? {}),
   } as ApplicationSettings & { defaultJumpHostId?: unknown };
   delete settings.defaultJumpHostId;
+  if (!Number.isInteger(settings.monitorIntervalSeconds)
+    || settings.monitorIntervalSeconds < 5
+    || settings.monitorIntervalSeconds > 300) {
+    settings.monitorIntervalSeconds = initialState.settings.monitorIntervalSeconds;
+  }
+  const wallpaper: WallpaperSettings = {
+    ...initialState.wallpaper,
+    ...(value.wallpaper ?? {}),
+  };
+  const sync = {
+    ...initialState.sync,
+    ...(value.sync ?? {}),
+  };
+  if ((wallpaper.source !== "local" && wallpaper.source !== "url")
+    || !/^[0-9a-f]{64}$/.test(wallpaper.managedBlobId ?? "")) {
+    delete wallpaper.managedBlobId;
+  }
 
   return {
     ...initialState,
     ...value,
     hosts,
-    deletedHosts: value.deletedHosts ?? [],
+    deletedHosts,
     commandHistory: (value.commandHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
+    parameterHistory: normalizeParameterHistoryEntries(value.parameterHistory),
     connectionHistory: (value.connectionHistory ?? []).filter((item) => !legacyDemoHostIds.has(item.hostId)),
     pathHistory,
+    sync,
+    wallpaper,
     settings,
     onboardingCompleted: value.onboardingCompleted ?? false,
   };

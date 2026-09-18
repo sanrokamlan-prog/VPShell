@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-native-terminal"
+description = "Enables the start_native_terminal command without any pre-configured scope."
+commands.allow = ["start_native_terminal"]
+
+[[permission]]
+identifier = "deny-start-native-terminal"
+description = "Denies the start_native_terminal command without any pre-configured scope."
+commands.deny = ["start_native_terminal"]
