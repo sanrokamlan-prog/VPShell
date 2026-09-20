@@ -201,6 +201,7 @@ pub(crate) struct SyncCoordinatorStatus {
     pub(crate) device_registry_revision: u64,
     pub(crate) local_device_authorized: bool,
     pub(crate) key_rotation_required: bool,
+    pub(crate) rotation_activation_revision: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -476,6 +477,17 @@ impl SyncCoordinatorManager {
             .map_err(|_| "无法读取同步冲突状态".to_string())?;
         let local_device_id = self.journal.local_device_id().map_err(journal_code)?;
         let runtime = self.lock_runtime()?;
+        let rotation_activation_revision = runtime
+            .session
+            .as_ref()
+            .map(|session| {
+                self.journal
+                    .trusted_rotation_activation(&session.vault_id)
+                    .map(|value| value.map_or(0, |watermark| watermark.revision))
+            })
+            .transpose()
+            .map_err(journal_code)?
+            .unwrap_or(0);
         let device_registry = runtime
             .session
             .as_ref()
@@ -509,6 +521,7 @@ impl SyncCoordinatorManager {
                 .is_some_and(|registry| registry.is_authorized(&local_device_id)),
             key_rotation_required: device_registry
                 .is_some_and(DeviceRegistry::requires_key_rotation),
+            rotation_activation_revision,
         })
     }
 
@@ -3557,6 +3570,7 @@ mod tests {
         assert_eq!(initialized.device_registry_revision, 1);
         assert!(initialized.local_device_authorized);
         assert!(!initialized.key_rotation_required);
+        assert_eq!(initialized.rotation_activation_revision, 0);
         let bootstrap = fs::read(remote.join(BOOTSTRAP_OBJECT_KEY)).unwrap();
         assert!(!String::from_utf8_lossy(&bootstrap).contains(password));
         let bootstrap = decode_bootstrap(&bootstrap).unwrap();

@@ -322,6 +322,7 @@ interface SyncCoordinatorStatus {
   deviceRegistryRevision: number;
   localDeviceAuthorized: boolean;
   keyRotationRequired: boolean;
+  rotationActivationRevision: number;
 }
 
 interface SyncCycleResult {
@@ -3595,6 +3596,7 @@ function App() {
               <div><span>合并状态</span><strong>{androidSyncStatus ? `revision ${androidSyncStatus.mergeRevision} / ${androidSyncStatus.openConflicts} 个冲突` : "-"}</strong></div>
               <div><span>设备信任</span><strong>{androidSyncStatus?.deviceRegistryRevision ? `revision ${androidSyncStatus.deviceRegistryRevision} / ${androidSyncStatus.localDeviceAuthorized ? "本机已授权" : "本机未授权"}` : "未载入"}</strong></div>
               <div><span>密钥轮换</span><strong>{androidSyncStatus?.keyRotationRequired ? "撤销后需要轮换" : "未触发"}</strong></div>
+              <div><span>轮换信任水位</span><strong>{androidSyncStatus?.rotationActivationRevision ? `revision ${androidSyncStatus.rotationActivationRevision}` : "未激活"}</strong></div>
               <div><span>恢复保护</span><strong>{androidSyncStatus?.recoveryRequired ? "需要人工核对" : "未触发"}</strong></div>
               <div><span>最近周期</span><strong>{androidSyncStatus?.lastCompletedAtMs ? new Date(androidSyncStatus.lastCompletedAtMs).toLocaleString("zh-CN", { hour12: false }) : "尚未运行"}</strong></div>
               {androidSyncStatus?.lastErrorCode ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {androidSyncStatus.lastErrorCode}</p> : null}
@@ -3609,6 +3611,7 @@ function App() {
             <div><span>合并状态</span><strong>{desktopSyncStatus ? `revision ${desktopSyncStatus.mergeRevision} / ${desktopSyncStatus.openConflicts} 个冲突` : "-"}</strong></div>
             <div><span>设备信任</span><strong>{desktopSyncStatus?.deviceRegistryRevision ? `revision ${desktopSyncStatus.deviceRegistryRevision} / ${desktopSyncStatus.localDeviceAuthorized ? "本机已授权" : "本机未授权"}` : "未载入"}</strong></div>
             <div><span>密钥轮换</span><strong>{desktopSyncStatus?.keyRotationRequired ? "撤销后需要轮换" : "未触发"}</strong></div>
+            <div><span>轮换信任水位</span><strong>{desktopSyncStatus?.rotationActivationRevision ? `revision ${desktopSyncStatus.rotationActivationRevision}` : "未激活"}</strong></div>
             <div><span>最近周期</span><strong>{desktopSyncStatus?.lastCompletedAtMs ? new Date(desktopSyncStatus.lastCompletedAtMs).toLocaleString("zh-CN", { hour12: false }) : "尚未运行"}</strong></div>
             <div><span>本周期对象</span><strong>{desktopSyncStatus ? `上传 ${desktopSyncStatus.lastUploadedObjects} / 下载 ${desktopSyncStatus.lastDownloadedObjects}` : "-"}</strong></div>
             {desktopSyncStatus?.lastErrorCode ? <p className="sync-status-diagnostic"><AlertTriangle size={14} /> {desktopSyncStatus.lastErrorCode}</p> : null}
