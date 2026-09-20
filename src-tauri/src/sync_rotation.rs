@@ -24,8 +24,8 @@ use crate::{
     },
     sync_outbox::SyncJournal,
     sync_provider::{
-        ProviderCancellation, ProviderErrorCode, PutObjectOutcome, SyncObjectMetadata,
-        SyncObjectProvider, validate_key, validate_object_bytes,
+        DeleteObjectOutcome, ProviderCancellation, ProviderErrorCode, PutObjectOutcome,
+        SyncObjectMetadata, SyncObjectProvider, validate_key, validate_object_bytes,
     },
 };
 
@@ -638,6 +638,100 @@ pub(crate) fn discover_vault_rotation_activation(
     Ok(Some(opened))
 }
 
+/// Remove an unpublished rotation namespace only after every activation marker
+/// has been authenticated and proven not to reference it. Providers without
+/// conditional deletion fail closed through `delete_exact`.
+pub(crate) fn cleanup_orphaned_rotation(
+    provider: &dyn SyncObjectProvider,
+    current_vault_key: &VaultKey,
+    vault_id: &str,
+    rotation_id: &str,
+    cancellation: &ProviderCancellation,
+) -> Result<u32, String> {
+    validate_canonical_uuid(vault_id)?;
+    validate_canonical_uuid(rotation_id)?;
+    let activation_prefix = format!("vpshell/v1/{vault_id}/activations/");
+    let mut activation_metadata = Vec::new();
+    list_all(
+        provider,
+        &activation_prefix,
+        cancellation,
+        &mut activation_metadata,
+    )?;
+    for item in activation_metadata {
+        cancellation.check().map_err(|_| "cancelled".to_string())?;
+        let encoded = provider.get(&item.key, cancellation).map_err(provider_code)?;
+        if encoded.len() as u64 != item.size {
+            return Err("integrity".to_string());
+        }
+        validate_object_bytes(&encoded).map_err(|_| "resource-limit".to_string())?;
+        let envelope =
+            EncryptedSyncObject::decode(&encoded).map_err(|_| "integrity".to_string())?;
+        let relative = item
+            .key
+            .strip_prefix(&activation_prefix)
+            .and_then(|value| value.strip_suffix(".orac"))
+            .ok_or_else(|| "protocol".to_string())?;
+        let revision = relative
+            .parse::<u64>()
+            .map_err(|_| "protocol".to_string())?;
+        if revision == 0
+            || relative != format!("{revision:020}")
+            || envelope.vault_id() != vault_id
+            || envelope.object_kind() != &SyncObjectKind::Index
+            || envelope.object_id() != format!("rotation-activation-{revision}")
+            || envelope.device_id().is_some()
+            || envelope.sequence().is_some()
+        {
+            return Err("integrity".to_string());
+        }
+        let plaintext = Zeroizing::new(decrypt_sync_object(current_vault_key, &envelope)?);
+        let commit = decode_activation_commit(&plaintext)?;
+        validate_activation_lineage(vault_id, revision, &commit.previous_activation_hash)?;
+        validate_activation_commit(
+            &commit,
+            vault_id,
+            revision,
+            &commit.previous_activation_hash,
+        )?;
+        if commit.rotation_id == rotation_id {
+            return Err("rotation-in-use".to_string());
+        }
+    }
+
+    let rotation_prefix = format!("vpshell/v1/{vault_id}/rotations/{rotation_id}/");
+    let mut metadata = Vec::new();
+    list_all(provider, &rotation_prefix, cancellation, &mut metadata)?;
+    let mut objects = Vec::with_capacity(metadata.len());
+    for item in metadata {
+        cancellation.check().map_err(|_| "cancelled".to_string())?;
+        if !item.key.starts_with(&rotation_prefix) || item.key == rotation_prefix {
+            return Err("protocol".to_string());
+        }
+        let encoded = provider.get(&item.key, cancellation).map_err(provider_code)?;
+        if encoded.len() as u64 != item.size {
+            return Err("integrity".to_string());
+        }
+        validate_object_bytes(&encoded).map_err(|_| "resource-limit".to_string())?;
+        objects.push((item.key, encoded));
+    }
+
+    let mut deleted = 0_u32;
+    for (key, encoded) in objects {
+        cancellation.check().map_err(|_| "cancelled".to_string())?;
+        match provider
+            .delete_exact(&key, &encoded, cancellation)
+            .map_err(provider_code)?
+        {
+            DeleteObjectOutcome::Deleted => {
+                deleted = deleted.saturating_add(1);
+            }
+            DeleteObjectOutcome::AlreadyAbsent => {}
+        }
+    }
+    Ok(deleted)
+}
+
 fn rotation_journal_code(error: crate::sync_outbox::JournalError) -> String {
     use crate::sync_outbox::JournalErrorCode;
     match error.code {
@@ -1083,9 +1177,7 @@ mod tests {
     use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 
     use super::*;
-    use crate::sync_provider::{
-        LocalFolderProvider, ProviderError, ProviderResult, SyncObjectPage,
-    };
+    use crate::sync_provider::{LocalFolderProvider, ProviderError, ProviderResult, SyncObjectPage};
 
     const VAULT_ID: &str = "11111111-1111-4111-8111-111111111111";
     const DEVICE_ID: &str = "22222222-2222-4222-8222-222222222222";
@@ -1181,6 +1273,27 @@ mod tests {
             objects.insert(key.to_string(), bytes.to_vec());
             self.puts.lock().unwrap().push(key.to_string());
             Ok(PutObjectOutcome::Created)
+        }
+
+        fn delete_exact(
+            &self,
+            key: &str,
+            expected: &[u8],
+            cancellation: &ProviderCancellation,
+        ) -> ProviderResult<DeleteObjectOutcome> {
+            cancellation.check()?;
+            let mut objects = self.objects.lock().unwrap();
+            let Some(existing) = objects.get(key) else {
+                return Ok(DeleteObjectOutcome::AlreadyAbsent);
+            };
+            if existing != expected {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Conflict,
+                    "fixture conditional delete mismatch",
+                ));
+            }
+            objects.remove(key);
+            Ok(DeleteObjectOutcome::Deleted)
         }
     }
 
@@ -1785,5 +1898,154 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn orphan_rotation_cleanup_deletes_unreferenced_namespace() {
+        let provider = MemoryProvider::new(false);
+        let cancellation = ProviderCancellation::default();
+        let current = VaultKey::generate().unwrap();
+        let new = VaultKey::generate().unwrap();
+        provider
+            .put(
+                &format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg"),
+                &event(&current, 1, b"one"),
+                &cancellation,
+            )
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &new, VAULT_ID, &cancellation).unwrap();
+
+        let deleted = cleanup_orphaned_rotation(
+            &provider,
+            &current,
+            VAULT_ID,
+            &publication.rotation_id,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(deleted, publication.published_objects);
+        assert!(provider
+            .list(
+                &format!("vpshell/v1/{VAULT_ID}/rotations/"),
+                None,
+                LIST_PAGE_SIZE,
+                &cancellation,
+            )
+            .unwrap()
+            .objects
+            .is_empty());
+    }
+
+    #[test]
+    fn orphan_rotation_cleanup_refuses_referenced_namespace() {
+        let provider = MemoryProvider::new(false);
+        let cancellation = ProviderCancellation::default();
+        let current = VaultKey::generate().unwrap();
+        let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
+        provider
+            .put(
+                &format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg"),
+                &event(&current, 1, b"one"),
+                &cancellation,
+            )
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &new, VAULT_ID, &cancellation).unwrap();
+        activate_vault_rotation(
+            &provider,
+            &current,
+            &new,
+            VAULT_ID,
+            &publication,
+            1,
+            &"77".repeat(32),
+            b"rotation-password",
+            Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
+            &cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cleanup_orphaned_rotation(
+                &provider,
+                &current,
+                VAULT_ID,
+                &publication.rotation_id,
+                &cancellation,
+            )
+            .err()
+            .as_deref(),
+            Some("rotation-in-use")
+        );
+        assert!(!provider
+            .list(
+                &format!(
+                    "vpshell/v1/{VAULT_ID}/rotations/{}/",
+                    publication.rotation_id
+                ),
+                None,
+                LIST_PAGE_SIZE,
+                &cancellation,
+            )
+            .unwrap()
+            .objects
+            .is_empty());
+    }
+
+    #[test]
+    fn orphan_rotation_cleanup_fails_closed_for_unreadable_marker() {
+        let provider = MemoryProvider::new(false);
+        let cancellation = ProviderCancellation::default();
+        let current = VaultKey::generate().unwrap();
+        let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
+        provider
+            .put(
+                &format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg"),
+                &event(&current, 1, b"one"),
+                &cancellation,
+            )
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &new, VAULT_ID, &cancellation).unwrap();
+        activate_vault_rotation(
+            &provider,
+            &current,
+            &new,
+            VAULT_ID,
+            &publication,
+            1,
+            &"88".repeat(32),
+            b"rotation-password",
+            Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
+            &cancellation,
+        )
+        .unwrap();
+
+        assert!(cleanup_orphaned_rotation(
+            &provider,
+            &VaultKey::generate().unwrap(),
+            VAULT_ID,
+            &publication.rotation_id,
+            &cancellation,
+        )
+        .is_err());
+        assert!(!provider
+            .list(
+                &format!(
+                    "vpshell/v1/{VAULT_ID}/rotations/{}/",
+                    publication.rotation_id
+                ),
+                None,
+                LIST_PAGE_SIZE,
+                &cancellation,
+            )
+            .unwrap()
+            .objects
+            .is_empty());
     }
 }
