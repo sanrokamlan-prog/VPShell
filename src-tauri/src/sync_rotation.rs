@@ -660,7 +660,9 @@ pub(crate) fn cleanup_orphaned_rotation(
     )?;
     for item in activation_metadata {
         cancellation.check().map_err(|_| "cancelled".to_string())?;
-        let encoded = provider.get(&item.key, cancellation).map_err(provider_code)?;
+        let encoded = provider
+            .get(&item.key, cancellation)
+            .map_err(provider_code)?;
         if encoded.len() as u64 != item.size {
             return Err("integrity".to_string());
         }
@@ -708,7 +710,9 @@ pub(crate) fn cleanup_orphaned_rotation(
         if !item.key.starts_with(&rotation_prefix) || item.key == rotation_prefix {
             return Err("protocol".to_string());
         }
-        let encoded = provider.get(&item.key, cancellation).map_err(provider_code)?;
+        let encoded = provider
+            .get(&item.key, cancellation)
+            .map_err(provider_code)?;
         if encoded.len() as u64 != item.size {
             return Err("integrity".to_string());
         }
@@ -1177,7 +1181,9 @@ mod tests {
     use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 
     use super::*;
-    use crate::sync_provider::{LocalFolderProvider, ProviderError, ProviderResult, SyncObjectPage};
+    use crate::sync_provider::{
+        LocalFolderProvider, ProviderError, ProviderResult, SyncObjectPage,
+    };
 
     const VAULT_ID: &str = "11111111-1111-4111-8111-111111111111";
     const DEVICE_ID: &str = "22222222-2222-4222-8222-222222222222";
@@ -1925,16 +1931,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(deleted, publication.published_objects);
-        assert!(provider
-            .list(
-                &format!("vpshell/v1/{VAULT_ID}/rotations/"),
-                None,
-                LIST_PAGE_SIZE,
-                &cancellation,
-            )
-            .unwrap()
-            .objects
-            .is_empty());
+        assert!(
+            provider
+                .list(
+                    &format!("vpshell/v1/{VAULT_ID}/rotations/"),
+                    None,
+                    LIST_PAGE_SIZE,
+                    &cancellation,
+                )
+                .unwrap()
+                .objects
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1980,19 +1988,21 @@ mod tests {
             .as_deref(),
             Some("rotation-in-use")
         );
-        assert!(!provider
-            .list(
-                &format!(
-                    "vpshell/v1/{VAULT_ID}/rotations/{}/",
-                    publication.rotation_id
-                ),
-                None,
-                LIST_PAGE_SIZE,
-                &cancellation,
-            )
-            .unwrap()
-            .objects
-            .is_empty());
+        assert!(
+            !provider
+                .list(
+                    &format!(
+                        "vpshell/v1/{VAULT_ID}/rotations/{}/",
+                        publication.rotation_id
+                    ),
+                    None,
+                    LIST_PAGE_SIZE,
+                    &cancellation,
+                )
+                .unwrap()
+                .objects
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2026,26 +2036,30 @@ mod tests {
         )
         .unwrap();
 
-        assert!(cleanup_orphaned_rotation(
-            &provider,
-            &VaultKey::generate().unwrap(),
-            VAULT_ID,
-            &publication.rotation_id,
-            &cancellation,
-        )
-        .is_err());
-        assert!(!provider
-            .list(
-                &format!(
-                    "vpshell/v1/{VAULT_ID}/rotations/{}/",
-                    publication.rotation_id
-                ),
-                None,
-                LIST_PAGE_SIZE,
+        assert!(
+            cleanup_orphaned_rotation(
+                &provider,
+                &VaultKey::generate().unwrap(),
+                VAULT_ID,
+                &publication.rotation_id,
                 &cancellation,
             )
-            .unwrap()
-            .objects
-            .is_empty());
+            .is_err()
+        );
+        assert!(
+            !provider
+                .list(
+                    &format!(
+                        "vpshell/v1/{VAULT_ID}/rotations/{}/",
+                        publication.rotation_id
+                    ),
+                    None,
+                    LIST_PAGE_SIZE,
+                    &cancellation,
+                )
+                .unwrap()
+                .objects
+                .is_empty()
+        );
     }
 }
