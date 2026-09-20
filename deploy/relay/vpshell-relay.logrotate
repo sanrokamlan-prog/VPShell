@@ -1,0 +1,13 @@
+/var/log/vpshell-relay/audit.jsonl {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0600 vpshell-relay vpshell-relay
+    sharedscripts
+    postrotate
+        /usr/bin/systemctl try-restart vpshell-relay.service
+    endscript
+}

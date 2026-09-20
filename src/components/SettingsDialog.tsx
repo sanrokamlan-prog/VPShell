@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Update } from "@tauri-apps/plugin-updater";
 import {
+  Activity,
   CheckCircle2,
   Download,
   FileCode2,
@@ -10,24 +11,31 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { Dialog } from "./Dialog";
+import type { AndroidSecurityStatus } from "../androidSecurity";
 
 export interface SettingsValues {
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
+  monitorIntervalSeconds: number;
 }
 
 interface SettingsDialogProps {
   externalEditorPath: string;
   autoUploadEditedFiles: boolean;
+  monitorIntervalSeconds: number;
   onSave: (settings: SettingsValues) => void | Promise<void>;
   onClose: () => void;
   showToast: (message: string) => void;
+  androidSecurity?: AndroidSecurityStatus | null;
+  onAndroidBiometricChange?: (enabled: boolean) => Promise<AndroidSecurityStatus>;
 }
 
 type UpdateStatus = "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error";
 
 function isDesktopRuntime() {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  return typeof window !== "undefined"
+    && "__TAURI_INTERNALS__" in window
+    && !/Android/i.test(navigator.userAgent);
 }
 
 function formatBytes(bytes: number) {
@@ -40,13 +48,17 @@ function formatBytes(bytes: number) {
 export function SettingsDialog({
   externalEditorPath,
   autoUploadEditedFiles,
+  monitorIntervalSeconds,
   onSave,
   onClose,
   showToast,
+  androidSecurity,
+  onAndroidBiometricChange,
 }: SettingsDialogProps) {
   const desktopRuntime = isDesktopRuntime();
   const [editorPath, setEditorPath] = useState(externalEditorPath);
   const [autoUpload, setAutoUpload] = useState(autoUploadEditedFiles);
+  const [monitorInterval, setMonitorInterval] = useState(monitorIntervalSeconds);
   const [saving, setSaving] = useState(false);
   const [appVersion, setAppVersion] = useState(desktopRuntime ? "读取中..." : "浏览器预览");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
@@ -54,6 +66,7 @@ export function SettingsDialog({
   const updateRef = useRef<Update | null>(null);
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [downloadTotal, setDownloadTotal] = useState<number | undefined>();
+  const [biometricChanging, setBiometricChanging] = useState(false);
 
   useEffect(() => {
     if (!desktopRuntime) return;
@@ -100,6 +113,7 @@ export function SettingsDialog({
       await onSave({
         externalEditorPath: editorPath.trim(),
         autoUploadEditedFiles: autoUpload,
+        monitorIntervalSeconds: monitorInterval,
       });
       showToast("设置已保存");
       onClose();
@@ -188,6 +202,32 @@ export function SettingsDialog({
       )}
     >
       <div className="settings-dialog-content">
+        {onAndroidBiometricChange ? (
+          <section className="settings-section" aria-labelledby="settings-android-security-title">
+            <div className="settings-section-heading">
+              <ShieldCheck size={17} />
+              <div><h3 id="settings-android-security-title">移动端访问保护</h3><p>离开应用后隐藏内容并断开会话；启用后恢复前需要系统验证。</p></div>
+            </div>
+            <label className="credential-option settings-auto-upload">
+              <input
+                type="checkbox"
+                checked={androidSecurity?.enabled === true}
+                disabled={biometricChanging}
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setBiometricChanging(true);
+                  void onAndroidBiometricChange(enabled)
+                    .then(() => showToast(enabled ? "移动端系统验证已启用" : "移动端系统验证已关闭"))
+                    .catch((error) => showToast(`无法更新移动端访问保护：${String(error)}`))
+                    .finally(() => setBiometricChanging(false));
+                }}
+              />
+              <ShieldCheck size={16} />
+              <span><strong>使用生物识别或设备凭据</strong><small>{androidSecurity?.available ? "每次从后台恢复都重新验证。" : "可尝试设备凭据；未设置安全锁时系统会拒绝。"}</small></span>
+            </label>
+          </section>
+        ) : null}
+
         <section className="settings-section" aria-labelledby="settings-editor-title">
           <div className="settings-section-heading">
             <FileCode2 size={17} />
@@ -215,6 +255,22 @@ export function SettingsDialog({
             <span><strong>保存后自动上传</strong><small>上传前校验远端版本；远端内容已变化时阻止覆盖，并要求你确认。</small></span>
           </label>
         </section>
+
+        {desktopRuntime ? (
+          <section className="settings-section" aria-labelledby="settings-monitor-title">
+            <div className="settings-section-heading">
+              <Activity size={17} />
+              <div><h3 id="settings-monitor-title">主机监控</h3><p>控制当前会话与后续新连接的资源采样频率。</p></div>
+            </div>
+            <label className="field full">
+              <span>采样频率</span>
+              <select value={monitorInterval} onChange={(event) => setMonitorInterval(Number(event.target.value))}>
+                {![5, 15, 30, 60, 120].includes(monitorInterval) ? <option value={monitorInterval}>{monitorInterval} 秒</option> : null}
+                {[5, 15, 30, 60, 120].map((seconds) => <option key={seconds} value={seconds}>{seconds} 秒</option>)}
+              </select>
+            </label>
+          </section>
+        ) : null}
 
         <section className="settings-section settings-about" aria-labelledby="settings-about-title">
           <div className="settings-section-heading">

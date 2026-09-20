@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-android-unlock"
+description = "Enables the android_unlock command without any pre-configured scope."
+commands.allow = ["android_unlock"]
+
+[[permission]]
+identifier = "deny-android-unlock"
+description = "Denies the android_unlock command without any pre-configured scope."
+commands.deny = ["android_unlock"]

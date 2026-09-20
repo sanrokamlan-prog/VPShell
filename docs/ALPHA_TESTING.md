@@ -55,11 +55,12 @@
 - 终端刚连接时观察 SFTP 和概况是否依次启动；概况独立连接失败时可以单独报错，但不得把已导入密码标记为无效，也不得断开正常终端。
 - Windows 采样期间不得弹出独立的 `ssh.exe` 黑色窗口。
 - v0.1.0 发布物不会识别手动嵌套 SSH；在 v0.2 工作树中，进入 bash/zsh 后点击“识别当前 Shell”，再手动进入下一台并再次点击，顶部应增加自报上下文；退出后应回退到已知祖先。fish/PowerShell 不在本批支持范围。
-- 当前 Alpha 已移除跳板配置入口；所有资料按直连处理。
+- 桌面添加主机可选择一台已有跳板；只有原生 `russh` 引擎执行该 route。跳板和目标都必须预先配置独立认证来源与 SHA256 pin；Android、兼容 OpenSSH 和独立大传输仍不执行跳板路线。
 
 ### D. SFTP 与打包传输
 
 - 浏览目录并上传、下载单文件和文件夹，验证空目录、中文、空格和较深目录。
+- 在未连接标签显式选择 `russh` 后连接，文件坞应显示“原生共享”；连续刷新和切换多个目录时终端必须持续收发，断开终端后迟到目录结果不得重新填充面板。上传下载、外部编辑和远端变更仍应走独立兼容连接，不能宣称大传输已经复用终端通道。
 - 当 SFTP 失败而同一主机终端正常时，错误应明确区分握手、主机密钥、网络和认证；不得只显示“凭据错误”。
 - 从 Windows 资源管理器拖入文件和文件夹，观察字节进度和完成状态。
 - 至少测试一个 1 GiB 左右的大文件，以及一个包含 1,000 个以上小文件的目录。
@@ -118,29 +119,49 @@
 ### I. 外观、设置与本地持久化
 
 - 测试本机 PNG/JPEG/WebP 和无凭据/query/fragment 的 HTTPS 图片 URL 作为终端背景，以及可读性调节；符号链接、错误魔数、超过 8 MiB、重定向 URL 必须由 Rust 拒绝。
+- 使用两个已配置同一 vault 的桌面测试设备往返 PNG、JPEG 和 WebP 背景，确认接收端只在全部加密分块和 manifest 认证后切换画面；分别移除一个分块和篡改密文应保持旧画面并给出稳定失败。JPEG/WebP 应保持原始编码但经过 Rust 结构校验；确认旧 blob 被移除后，只有两台设备 frontier 都稳定确认、30 天保留期满足且对象重认证成功时才允许条件删除，不支持删除的 provider 必须继续保守保留。
+- 在自有非生产 SFTP 服务器创建权限为 `0700` 的空专用目录，从已核验 SHA256 指纹且已配置本机密码/私钥的主机中选择它，分别初始化和在第二台桌面解锁同一 vault。换错 pin、移除 known_hosts、把 root 或对象父目录替换成符号链接、预置同名不同内容、断网和取消都必须 fail closed；SFTP 旧 blob 不得被 GC 删除。Linux 单个 OpenSSH fixture 不能替代不同服务端、权限、认证方式和网络条件矩阵。
 - 测试系统字体、选择 TTF/OTF/WOFF/WOFF2 和字号；错误魔数、符号链接和超过 12 MiB 必须拒绝，确认长主机名、中文和窗口缩放后没有遮挡。
 - 修改主机、历史、脚本、打包传输、编辑器和背景设置，重启应用确认从 `vpshell-state.sqlite3` 恢复；旧 WebView 状态只在 SQLite 初始化成功后删除。
 - 在测试副本中截断 SQLite 文件，确认显示恢复诊断、最多保留两个 `.corrupt-*` 备份且不崩溃。不要把数据库或备份上传到 Issue。
 - 静态核对生产 CSP 不为 `null`，`object/frame/form` 禁止，capability 没有 core/plugin `default` 集合；Linux 构建不能替代 Windows/macOS WebView 与安装器权限验收。
-- 当前资料保存在本机 SQLite/受管资产缓存；内部 E2EE、Local Folder/WebDAV provider 与持久 outbox 已有单元/本机协议夹具，但尚未彼此接入设置或后台协调器，应用仍不会自动同步。真实 WebDAV 服务、自签 CA、代理、断网和平台目录兼容仍需外部矩阵；S3/SFTP 同步尚未实现。
-- 内部 `vpshell-sync.sqlite3` outbox 夹具应覆盖业务/operation/outbox 原子回滚、两分钟过期租约、暂停/显式恢复、六次退避上限、发布后拒绝重试、损坏隔离后的 `reconcile-required`、未来 schema 原样保留、未发布保留，以及 AEAD/序号/对象身份重放拒绝。它尚无 UI/worker，不能通过手工点击宣称自动同步验收。
-- merge 夹具必须把同一组 host/script/setting/background/history operation 以不同顺序应用并比较完整状态；覆盖 observed update 不误报、未观察 edit/delete 冲突、删除保持/明确恢复、并发冲突解决、风险降低、history 并集、revision 冲突、损坏/未知 schema，以及 password/Token/private key/credentialRef/trust pin/本机路径拒绝。当前冲突中心没有 UI，源码测试不能替代多设备人工可用性验收。
+- 当前资料保存在本机 SQLite/受管资产缓存；桌面 Local Folder 与 HTTPS WebDAV 已把不可变 bootstrap、二级密码解锁、AppState 双向 operation 和 Rust 手动/自动周期接入设置页。公开命令、每主机路径、模板非敏感参数和已认证连接历史应以稳定实体往返，并在确认清空后生成 tombstone。连接测试必须确认原生 russh/Android 只有在 host-key 与认证完成后返回 Rust UUID/时间；系统 OpenSSH/Mosh 必须先通过有界非交互认证检查。错误凭据、未知 host、目标与 AppState 不匹配或事实落库失败必须关闭会话且不新增记录；手工插入 AppState 的 UUID/时间和旧版连接尝试只能留在本机。远端 `connection` 必须恰好含 kind/hostId/remotePath/createdAt，附加 value、非法路径/时间或未知主机应整批拒绝。Android 仍只显示 value-free 恢复/冲突/队列状态且 Sync capability 保持禁用。真实 Android 设备、Mosh 网络切换、WebDAV 服务、自签 CA、代理、断网和多设备兼容仍需外部矩阵。
+- 内部 `vpshell-sync.sqlite3` outbox 夹具应覆盖业务/operation/outbox 原子回滚、两分钟过期租约、暂停/显式恢复、六次退避上限、发布后拒绝重试、损坏隔离后的 `reconcile-required`、未来 schema 原样保留、未发布保留，以及 AEAD/序号/对象身份重放拒绝。手动与自动 worker 只处理已建模业务域，不能通过空周期点击宣称背景或其他未建模数据已完成端到端同步。
+- merge 夹具必须把同一组 host/script/setting/background/history operation 以不同顺序应用并比较完整状态；覆盖 observed update 不误报、未观察 edit/delete 冲突、删除保持/明确恢复、并发冲突解决、风险降低、旧 history event 并集、命令 history 实体 tombstone、revision 冲突、损坏/未知 schema，以及 password/Token/private key/credentialRef/trust pin/本机路径拒绝。当前桌面冲突中心已有 Rust-owned 候选解决 UI，但源码测试仍不能替代多设备人工可用性验收。
 - 恢复密钥夹具必须覆盖可打印格式往返（包括 base64url 正文含 `-`）、校验码、错误密钥、独立 keyslot 域、篡改和未知字段；恢复密钥、VMK 和解密明文不得出现在导出 JSON、日志或前端事件中。
 - device registry 夹具必须覆盖 revision 冲突、公钥身份不可替换、最后活动设备保护、撤销不可逆、撤销后标签不可变、不同合并顺序和已撤销发布者拒绝。撤销后的报告必须要求 VMK 轮换，不能声称远程擦除。
+- 远端 registry 夹具还必须覆盖 genesis/连续 successor 签名、前序 hash 篡改、持久水位跨重启、同 revision 分叉、远端删除已见 revision、revision 断层、外层发布者不一致，以及已登记/未知/撤销设备 event 的真实协调器验签。Android 只能观察 revision、本机授权和轮换状态，不能因此开放 Sync capability。
+- 设备管理夹具必须覆盖短时自签请求往返、跨 vault/过期/篡改/非规范编码拒绝、真实远端批准后新设备获得授权、改名、陈旧 revision 冲突、撤销后同步阻止、已登记身份重复申请和本机自撤销拒绝；桌面五个管理命令必须与 Android capability 精确隔离。
 - 加密导出夹具必须覆盖 manifest/对象篡改、截断、重复 key/hash、跨 vault、数量/大小、恰好一个 registry、错误恢复密钥、无覆盖原子写、Unix `0600` 与符号链接拒绝；演练必须认证每个对象并解析 event/registry。当前没有同步 UI、真实多设备签名或 restore-to-journal，不能做产品级恢复声明。
-- 凭据 vault 夹具必须确认默认关闭、revision 冲突、仅活动且已授权设备可访问、最后授权设备保护、撤销不可重新授权和轮换提示；错误 CVK、AAD 身份搬移、类型/大小、未知字段和跨 vault 必须拒绝。
+- 凭据 vault 夹具必须确认默认关闭、revision 冲突、仅活动且已授权设备可访问、最后授权设备保护、撤销不可重新授权和轮换提示；错误 CVK、AAD 身份搬移、类型/大小、未知字段和跨 vault 必须拒绝。有界 VMK/CVK 批量重加密还必须覆盖空批次、10,000 项上限、总明文边界、重复身份、跨 vault、后置错误旧密钥整批失败、输入顺序/身份保留以及新旧密钥解密结果。
 - 对 SSH 密码、私钥口令、OpenSSH 私钥和 access token 逐类往返，扫描 keyslot/信封/object key/稳定错误，确保不含 secret 或本机 credential reference。静态安全测试必须持续禁止该模块新增 Tauri command/event/日志；当前没有 UI 或钥匙串写回，不能用源码测试宣称凭据同步可用。
 - 扩展 provider adapter 夹具必须对 SFTP/S3/Gateway 复用同一不可变测试：首次创建、相同内容幂等、不同内容冲突、提交后回读、分页、非法/重复/越界 list、24 MiB 上限和取消。SFTP 另测 host-key/root/symlink/special，S3 另测 HTTPS/region/bucket/prefix，Gateway 另测六位 TOTP 只在登录消费及底层含秘密错误净化。
-- B8 必须补真实 OpenSSH SFTP（不同服务器/权限/host-key 变化）、MinIO 或其他 S3-compatible（SigV4/path-style/延迟 list/条件写）及自建 Gateway HTTP 的断网、超时、限流、认证、重复请求和篡改测试；当前 trait fake 不能替代这些结果。
+- Linux Actions 已用单一 OpenSSH fixture 覆盖 SFTP 产品路径，用独立重算 SigV4 的自建 HTTPS fixture 覆盖 S3 path-style、ListObjectsV2 continuation、GET、`If-None-Match: *` 条件写、回读和冲突，并用独立 Gateway HTTPS fixture 覆盖 v1 登录、TOTP、bearer session、list/get、条件写、回读和冲突。B8 外部矩阵仍必须补不同 OpenSSH 服务器/权限/host-key 变化、AWS/MinIO/其他 S3-compatible（virtual-hosted/延迟 list/409-412/时钟偏差）及真实自建 Gateway 的断网、超时、限流、重放、撤销、审计、重复请求和篡改测试；当前 trait fake 和单一自建 fixture 都不能替代这些结果。
 - `sync_protocol_regression` 源码夹具应在每次协议改动后运行并记录：未知版本拒绝、AEAD/对象身份错误、journal replay 与 published finality、merge order convergence、截断状态和取消诊断。它不访问网络，也不替代真实 provider、两台设备或 Windows/macOS/Android 验收。
 
 ### L. Android Preview 共享契约（Linux 可验证部分）
 
 - `android_preview::tests` 必须验证 schema-v1 capability 清单、最多 8 个会话、结构化 host/user/port 和 `ssh-`/`key-` UUID 引用边界；模块不能出现系统 `ssh` 进程入口。
 - 前台建立会话后切到后台应拒绝新连接与操作；锁定或断开应清理会话索引，恢复前台后必须重新建立会话。广播、外部编辑、常驻监控和后台长连接应保持明确禁用。
-- `android_mobile::tests` 与安全回归还应验证 64 KiB 终端 I/O、密码/私钥类型和大小、桌面/Android capability 平台互斥、仅 INTERNET 权限、禁用 backup/cleartext/FileProvider 及 `FLAG_SECURE`。移动敏感请求不得派生 `Debug`/`Serialize` 或使用日志宏。
+- `android_mobile::tests` 与安全回归还应验证 64 KiB 终端 I/O、密码/私钥类型和大小、默认 Locked/原生失焦重锁、只有 Rust 系统认证 command 可解锁、host-key/凭据命令授权、固定主 frame/origin 与 32-byte 可见性 WebMessage、桌面/Android capability 平台互斥且不给 WebView biometric permission、仅 INTERNET 权限、禁用 backup/cleartext/FileProvider、长按选择/autofill/content capture 及 `FLAG_SECURE`。移动敏感请求不得派生 `Debug`/`Serialize` 或使用日志宏。
 - Linux VPS 可记录 aarch64 debug APK/AAB 的路径、大小、SHA-256 与 debug 签名结构，但不能替代 Android Keystore/生物识别、emulator/instrumentation、arm64 真机、休眠/网络切换、软键盘、截图或剪贴板人工验收。
 - `android_native_transport::tests` 还应验证固定 SHA-256 host-key、5--60 秒超时、清零密码/内存私钥载荷、绝对远端路径与 1,000 条 list 上限；它只能证明 Rust API 边界，不证明真实 SSH 算法、SFTP 权限或 Android arm64 链接。
+
+### M. Phase D 原生 route 契约
+
+- 原生 probe 与终端的 IPC 必须只接受 `route.hops[]`；空 route、超过 4 跳、重复 hop UUID、重复 host/port、无效端点/指纹/超时、同跳多认证来源、旧的扁平请求和 `password` 等未知秘密字段都应拒绝。
+- 两跳夹具必须使用不同 host-key、用户和一次性私钥；跳板 sshd 只允许连接目标测试端口，目标 sshd 禁止继续转发。先用错误目标 pin 确认只返回第 2 跳，再以正确 pin 实际完成 probe、共享 SFTP、PTY 字节收发和取消；错误不得包含 host、credentialRef、私钥路径或底层库文本。
+- 单跳 Linux 回环 fixture 必须继续实际完成 pin、公钥认证、两次共享 SFTP 浏览、PTY resize/字节收发和取消，证明 route 重构没有把现有直连退化为 mock。
+- 系统 OpenSSH fixture 必须使用生产参数构造器和精确写入的临时 host key 实际执行远端标记命令；请求未知字段、非 canonical UUID、选项式 host/user、0 端口、越界 PTY 和 ProxyCommand 注入都必须拒绝，credential/key reference 不能出现在 argv。单跳只允许密钥格式、认证算法协商和 RSA SHA-2 不可用三类原生错误携带 OpenSSH 回退；host-key 不匹配/未验证、认证失败/拒绝、取消、超时、无效请求和多跳 route 必须保持无回退字段。
+- 本地转发 IPC 不接受 `bindHost`、密码或 route 外凭据字段；监听必须固定为 `127.0.0.1`，0 端口由 OS 安全分配。远端转发 IPC 还必须拒绝 `targetHost`，最终 SSH 目标的监听与客户端目标都固定为 `127.0.0.1`；未登记、端点不匹配或超过 32 连接的 forwarded channel 必须在确认前拒绝。动态转发 IPC 只接受 UUID、route 和端口，固定回环监听；验证无认证 SOCKS5 CONNECT 的 IPv4/域名/IPv6 目标，并确认 BIND、UDP ASSOCIATE、未知地址类型、无效域名、零端口和超过 32 个连接 fail closed。Linux 双跳夹具的最终 sshd 只能 `PermitOpen` 自身测试端口、`PermitListen` 回环地址，测试必须分别经本地 listener、服务器分配的远端 listener 和动态 SOCKS5 listener 读取真实 SSH banner，停止后等待 Rust 代际清理；非回环监听始终不可用。
+- 自建 Relay 源码测试必须使用真实回环 TCP 完成 challenge/HMAC 双向 proof、opaque SSH-like 字节往返、错误 token、目标篡改/拒绝、challenge 重放、全局/单 IP/认证速率、字节/空闲/总时长/取消、audit fail-closed、token/audit 私有文件边界、旧/新 token 重叠与撤销后拒绝，并证明未知 wire version 不协商或降级；command manifest、desktop/Android capability 与 WebView 状态中不得出现 Relay token 或启动入口。
+- 外部验收只在自有非生产节点执行：Relay firewall 仅开放预期入口，allowlist 仅包含测试 SSH 目标；客户端仍须显示并验证最终 SSH host-key。分别测试错误 token、错误目标、断网、慢连接、限流、审计磁盘不可写和进程重启，确认没有开放代理、无凭据/SSH bytes/原始 IP/hostname 进入 JSONL。协议 v1 控制面不加密；未配置独立 ACL 或经审计 TLS/VPN 时不得把目标元数据称为保密。
+- 仓库 systemd/logrotate 基线及 token 轮换/撤销、升级/回退、audit/token 故障恢复 runbook 只提供可执行边界；至少两地区真实节点、长时间丢包/重连、真实日志轮换、TLS/VPN/firewall 和运维演练尚未外部完成前，不宣称自动选路、线路加速或生产 Relay 服务。
+- 路线评估请求必须拒绝非 canonical campaign UUID、空/超过 4 个候选、重复/非法 candidate ID、30 秒以下或 300 秒以上间隔、窗口/总轮数越界、未知字段和 hop 内明文 `password`。Android capability 必须排除 start/get/stop 三项命令。
+- 为同一测试目标配置可直连且可经跳板到达的两条 route；至少完成 3 轮，确认每轮都实际通过各自 host-key/pin 和认证并完成最终 SFTP readiness。错误 pin 应只返回对应候选与 `hopIndex` 的稳定错误码；快照不得包含 host、用户名、credentialRef、私钥路径或底层错误文本。
+- 人为使一条路线失败，确认成功率低于 80% 后不会被推荐；构造小于 15% 的评分波动，确认保持原建议并显示滞后原因。停止和关闭对话框均应取消在途连接且不再增加样本。该页面不得自动修改主机跳板配置，也不得显示 UDP 丢包、吞吐或“加速”结论。
+- Mosh 契约测试必须拒绝未知字段、选项式 host/user、无效 UUID/PTY、固定范围以外的 UDP 端口和任意 server/SSH 参数；生成参数必须固定 `mosh-server`、adaptive 与 60000–61000，SSH bootstrap 保留严格 host-key、安全 KEX 和至多一次 AskPass，credential/key reference 不得进入 argv。Android capability 必须排除 `start_mosh_session`。
+- Linux CI 使用现有回环 sshd、一次性 Ed25519 密钥和严格 known_hosts，实际启动本机 `mosh` 与远端 `mosh-server`，经 UDP 收到 marker 后有界停止。外部验收只在自有非生产节点执行：分别验证本机/远端缺少 Mosh、UDP firewall 拒绝、网络切换、休眠/恢复、长时间断网和终端 resize；Mosh 必须保持直连手动模式，不支持跳板，不替代 SFTP、传输、监控或转发，也不能作为自动加速结论。
 
 ### J. v0.2 工作区恢复验收（仅源码构建）
 

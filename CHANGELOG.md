@@ -22,6 +22,7 @@ The project follows [Semantic Versioning](https://semver.org/). Pre-release vers
 
 ### Added
 
+- Added an explicit desktop-only native-engine readiness check using exact `russh`/`russh-sftp` versions. Rust resolves local credentials, pins the SHA-256 host key before authentication, opens a real SFTP subsystem with bounded timeout/concurrency and cancellation, and returns only value-free status; system OpenSSH remains the default session engine while long-lived native sessions and routing are unfinished.
 - Rust-owned, schema-versioned transfer recovery snapshots with atomic immutable writes, bounded size/retention, corruption fallback and explicit storage diagnostics.
 - Cross-application-restart `interrupted` state with explicit retry or discard actions. Safe retries are cancellable and limited to three application-level attempts.
 - Commit-boundary journaling that blocks replay after recursive commits or final package renames; recovery metadata never contains passwords, private keys, credential references, private-key paths, raw connection secrets or file contents.

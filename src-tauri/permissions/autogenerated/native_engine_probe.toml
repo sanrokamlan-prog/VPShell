@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-native-engine-probe"
+description = "Enables the native_engine_probe command without any pre-configured scope."
+commands.allow = ["native_engine_probe"]
+
+[[permission]]
+identifier = "deny-native-engine-probe"
+description = "Denies the native_engine_probe command without any pre-configured scope."
+commands.deny = ["native_engine_probe"]

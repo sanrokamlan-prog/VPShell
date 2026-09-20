@@ -1,0 +1,39 @@
+[Unit]
+Description=VPShell self-hosted relay
+Documentation=https://github.com/sanrokamlan-prog/VPShell/blob/main/docs/RELAY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vpshell-relay
+Group=vpshell-relay
+EnvironmentFile=/etc/vpshell-relay/relay.env
+ExecStart=/usr/local/libexec/vpshell-relay serve --listen ${VPSHELL_RELAY_LISTEN} --token-file ${VPSHELL_RELAY_TOKEN_FILE} --allow-target ${VPSHELL_RELAY_TARGET} --audit-file ${VPSHELL_RELAY_AUDIT_FILE}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/vpshell-relay
+ReadWritePaths=/var/log/vpshell-relay
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

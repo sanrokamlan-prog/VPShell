@@ -10,16 +10,18 @@
 
 ## 生命周期
 
-`AndroidPreviewRuntime` 只允许前台且已解锁时建立会话或执行支持的操作。切到任何非前台状态都会增加 generation 并清空原生会话，迟到的连接结果会因 generation/预留状态变化而丢弃。WebView 通过 `visibilitychange` 通知 Rust；这仍需真机验证 Activity 暂停、进程回收和网络切换。
+`AndroidPreviewRuntime` 只允许活动窗口且已解锁时建立会话或执行支持的操作。Tauri 原生窗口失焦与 WebView 后台通知都会增加 generation 并清空原生会话，迟到的连接和 host-key 结果会因 generation/预留状态变化而丢弃；这仍需真机验证 Activity 暂停、进程回收和网络切换。
 
 ## 原生 SSH/SFTP 边界
 
 `AndroidNativeConnectionConfig` 要求 5--60 秒超时和固定 `SHA256:<base64>` host-key 指纹。预检只返回候选指纹，用户确认后连接仍在新握手中重新固定校验；认证只接受清零的密码或内存私钥。每会话最多一个前端终端，尺寸为 20--500 列、5--300 行，单次输入/输出最多 64 KiB。SFTP 列表只接受有界绝对路径，最多返回 1,000 项，按类型标记符号链接/特殊条目而不跟随它们；当前移动 UI 尚不支持上传或下载。
 
-Android capability 与桌面 capability 按平台互斥。移动壳只获得 13 个 `android_*` command，不获得桌面 PTY、广播、外部编辑、监控、dialog、updater 或 process 权限。密码、OpenSSH 私钥和私钥口令通过只反序列化、不序列化/调试的请求写入 Android Keystore-backed store，业务 SQLite 只保存不透明引用。manifest 只有 `INTERNET` 权限，禁止 backup/cleartext/FileProvider，Activity 使用 `FLAG_SECURE`。
+Android capability 与桌面 capability 按平台互斥。移动壳只获得 17 个 `android_*` command（其中同步仅为 value-free 状态读取），不获得桌面 PTY、广播、外部编辑、监控、dialog、updater 或 process 权限，也不授予 WebView 直接调用 biometric 插件的 permission。密码、OpenSSH 私钥和私钥口令通过只反序列化、不序列化/调试的请求写入 Android Keystore-backed store，业务 SQLite 只保存不透明引用。manifest 只有 `INTERNET` 权限，禁止 backup/cleartext/FileProvider，Activity 使用 `FLAG_SECURE`。
+
+设置中可选启用 `tauri-plugin-biometric` 2.3.2 的系统生物识别访问门，并允许设备凭据回退；插件当前 Android 实现使用 `BIOMETRIC_WEAK`，因此不得描述为强生物识别保证。启用和关闭都必须由 Rust 直接完成一次系统认证，开关随后存入 Keystore-backed 固定条目。Activity 暂停时先隐藏 WebView，Rust runtime 初始也为 `Locked`；只有 `android_unlock` 认证成功才能进入 `Foreground`，host-key 网络预检和凭据增删也受同一授权。限定 `http://tauri.localhost`（开发时另含固定 localhost 端口）、主 frame、32-byte 上限的 AndroidX WebMessage listener只处理 `show`/`hide`/`failed`，不能解锁 Rust，不使用通用 `addJavascriptInterface`，也不传凭据。WebView 同时禁用长按选择、autofill/content capture、file/content access 和地理位置。此处是应用访问门，不声称 Keystore 中每个密文都由生物识别密钥逐次解密。
 
 该 transport 是桌面现有 `ssh2`/libssh2 兼容路径的移动隔离层。Linux VPS 已完成 `aarch64-linux-android` Rust/NDK 链接并由 Gradle 生成 debug APK/AAB；这证明构建链，不证明真实 OpenSSH 服务器、Android Keystore 运行时、断网/超时或 SFTP 权限兼容。
 
 ## 当前缺口
 
-Linux VPS 没有 Android emulator/arm64 真机。同步协调器仍未接到移动 UI，生物识别解锁、触屏/软键盘适配、SFTP 内容传输、剪贴板策略、网络切换/休眠与 Keystore 运行时均未验收。现有包使用 Android Debug 自签名证书，不是发布物；在这些门槛通过前不得将 Android Preview 标为可发布产品。
+Linux VPS 没有 Android emulator/arm64 真机。同步协调器只接入只读状态，触屏/软键盘适配、SFTP 内容传输、显式复制体验、网络切换/休眠、BiometricPrompt 与 Keystore 运行时均未验收。现有包使用 Android Debug 自签名证书，不是发布物；在这些门槛通过前不得将 Android Preview 标为可发布产品。

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-approve-sync-device-enrollment"
+description = "Enables the approve_sync_device_enrollment command without any pre-configured scope."
+commands.allow = ["approve_sync_device_enrollment"]
+
+[[permission]]
+identifier = "deny-approve-sync-device-enrollment"
+description = "Denies the approve_sync_device_enrollment command without any pre-configured scope."
+commands.deny = ["approve_sync_device_enrollment"]
