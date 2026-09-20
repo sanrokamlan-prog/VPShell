@@ -24,8 +24,8 @@ use crate::{
     },
     sync_blob_gc::run_blob_gc,
     sync_crypto::{
-        Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, SyncObjectKind, VaultKey,
-        create_password_keyslot, decrypt_sync_object, open_password_keyslot,
+        Argon2Parameters, EncryptedSyncObject, PasswordKeyslot, RecoveryKey, SyncObjectKind,
+        VaultKey, create_password_keyslot, decrypt_sync_object, open_password_keyslot,
     },
     sync_gateway_provider::ReqwestGatewayAuthenticator,
     sync_merge::{EntityKind, FieldValue, LocalEntityMutation, MergeConflictSnapshot},
@@ -50,6 +50,10 @@ use crate::{
         DeviceEnrollmentRequest, DeviceRegistry, DeviceRegistryEntry, RecoveryError,
         RecoveryErrorCode, RevocationReason, SignedDeviceRegistryEnvelope,
         decrypt_signed_device_registry, encrypt_signed_device_registry,
+    },
+    sync_rotation::{
+        RotationActivation, RotationPublication, activate_vault_rotation,
+        publish_vault_rotation,
     },
     sync_s3_provider::ReqwestS3ObjectTransport,
     sync_sftp_provider::Ssh2SftpObjectTransport,
@@ -287,6 +291,7 @@ struct CoordinatorRuntime {
     phase: SyncCoordinatorPhase,
     session: Option<CoordinatorSession>,
     configuring: bool,
+    rotation_frozen: bool,
     running: bool,
     generation: u64,
     cancellation: ProviderCancellation,
@@ -302,6 +307,7 @@ impl Default for CoordinatorRuntime {
             phase: SyncCoordinatorPhase::NotConfigured,
             session: None,
             configuring: false,
+            rotation_frozen: false,
             running: false,
             generation: 0,
             cancellation: ProviderCancellation::default(),
@@ -324,10 +330,61 @@ struct ConfigurationGuard<'a> {
     coordinator: &'a SyncCoordinatorManager,
 }
 
+pub(crate) struct VaultRotationGuard<'a> {
+    coordinator: &'a SyncCoordinatorManager,
+    provider: Arc<dyn SyncObjectProvider>,
+    current_vault_key: Arc<VaultKey>,
+    vault_id: String,
+}
+
 impl Drop for ConfigurationGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut runtime) = self.coordinator.runtime.lock() {
             runtime.configuring = false;
+        }
+    }
+}
+
+impl VaultRotationGuard<'_> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn publish_and_activate(
+        &self,
+        new_vault_key: &VaultKey,
+        activation_revision: u64,
+        previous_activation_hash: &str,
+        new_password: &[u8],
+        kdf: Argon2Parameters,
+        recovery_key: &RecoveryKey,
+        cancellation: &ProviderCancellation,
+    ) -> Result<(RotationPublication, RotationActivation), String> {
+        let publication = publish_vault_rotation(
+            self.provider.as_ref(),
+            self.current_vault_key.as_ref(),
+            new_vault_key,
+            &self.vault_id,
+            cancellation,
+        )?;
+        let activation = activate_vault_rotation(
+            self.provider.as_ref(),
+            self.current_vault_key.as_ref(),
+            new_vault_key,
+            &self.vault_id,
+            &publication,
+            activation_revision,
+            previous_activation_hash,
+            new_password,
+            kdf,
+            recovery_key,
+            cancellation,
+        )?;
+        Ok((publication, activation))
+    }
+}
+
+impl Drop for VaultRotationGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut runtime) = self.coordinator.runtime.lock() {
+            runtime.rotation_frozen = false;
         }
     }
 }
@@ -372,12 +429,41 @@ impl SyncCoordinatorManager {
 
     fn begin_configuration(&self) -> Result<ConfigurationGuard<'_>, String> {
         let mut runtime = self.lock_runtime()?;
+        if runtime.rotation_frozen {
+            return Err("rotation-in-progress".to_string());
+        }
         if runtime.running || runtime.configuring {
             return Err("同步运行或配置期间不能开始新的配置".to_string());
         }
         runtime.configuring = true;
         drop(runtime);
         Ok(ConfigurationGuard { coordinator: self })
+    }
+
+    pub(crate) fn begin_vault_rotation(&self) -> Result<VaultRotationGuard<'_>, String> {
+        let mut runtime = self.lock_runtime()?;
+        if runtime.running || runtime.configuring || runtime.rotation_frozen {
+            return Err("sync-busy".to_string());
+        }
+        let (provider, current_vault_key, vault_id) = {
+            let session = runtime
+                .session
+                .as_ref()
+                .ok_or_else(|| "同步 vault 尚未解锁".to_string())?;
+            (
+                Arc::clone(&session.provider),
+                Arc::clone(&session.vault_key),
+                session.vault_id.clone(),
+            )
+        };
+        runtime.rotation_frozen = true;
+        drop(runtime);
+        Ok(VaultRotationGuard {
+            coordinator: self,
+            provider,
+            current_vault_key,
+            vault_id,
+        })
     }
 
     pub(crate) fn status(&self) -> Result<SyncCoordinatorStatus, String> {
@@ -759,6 +845,9 @@ impl SyncCoordinatorManager {
             .map_err(|_| "同步 vault ID 格式无效".to_string())?
             .to_string();
         let mut runtime = self.lock_runtime()?;
+        if runtime.rotation_frozen {
+            return Err("rotation-in-progress".to_string());
+        }
         if runtime.running || (runtime.configuring && !from_configuration) {
             return Err("同步运行或配置期间不能替换 provider 会话".to_string());
         }
@@ -780,6 +869,9 @@ impl SyncCoordinatorManager {
 
     pub(crate) fn detach_session(&self) -> Result<(), String> {
         let mut runtime = self.lock_runtime()?;
+        if runtime.rotation_frozen {
+            return Err("rotation-in-progress".to_string());
+        }
         if runtime.configuring {
             return Err("同步配置期间不能锁定 vault".to_string());
         }
@@ -1093,6 +1185,9 @@ impl SyncCoordinatorManager {
             cancellation,
         ) = {
             let mut runtime = self.lock_runtime()?;
+            if runtime.rotation_frozen {
+                return Err("rotation-in-progress".to_string());
+            }
             if runtime.running || runtime.configuring {
                 return Err("同一 vault 已有同步配置或 worker 运行".to_string());
             }
@@ -3885,6 +3980,11 @@ mod tests {
         let vault_id = Uuid::new_v4().to_string();
         let guard = coordinator.begin_configuration().unwrap();
 
+        assert_eq!(
+            coordinator.begin_vault_rotation().err().unwrap(),
+            "sync-busy"
+        );
+
         assert!(
             coordinator
                 .configure_local_folder_with_kdf(
@@ -3926,5 +4026,83 @@ mod tests {
             )
             .unwrap();
         assert!(coordinator.status().unwrap().configured);
+    }
+
+    #[test]
+    fn rotation_freeze_blocks_provider_writes_and_session_changes_until_drop() {
+        let root = TempDir::new("rotation-freeze");
+        let coordinator = SyncCoordinatorManager::open(root.0.clone()).unwrap();
+        let vault_id = Uuid::new_v4().to_string();
+        let device_id = Uuid::new_v4().to_string();
+        let current_vault_key = VaultKey::generate().unwrap();
+        let provider = Arc::new(MemoryProvider::default());
+        let source_key = format!("vpshell/v1/{vault_id}/segments/{device_id}/1.oseg");
+        let source = encrypt_sync_object(
+            &current_vault_key,
+            &vault_id,
+            SyncObjectKind::Event,
+            "event-1",
+            Some(&device_id),
+            Some(1),
+            b"rotation-freeze-fixture",
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        provider.insert(&source_key, source);
+        coordinator
+            .attach_session(provider.clone(), current_vault_key, &vault_id)
+            .unwrap();
+
+        let guard = coordinator.begin_vault_rotation().unwrap();
+        assert_eq!(
+            coordinator.begin_vault_rotation().err().unwrap(),
+            "sync-busy"
+        );
+        assert_eq!(
+            coordinator.begin_configuration().err().unwrap(),
+            "rotation-in-progress"
+        );
+        assert_eq!(
+            coordinator
+                .run_once(&test_app_store(&root), 2_000)
+                .unwrap_err(),
+            "rotation-in-progress"
+        );
+        assert_eq!(
+            coordinator
+                .attach_session(
+                    Arc::new(MemoryProvider::default()),
+                    VaultKey::generate().unwrap(),
+                    &Uuid::new_v4().to_string(),
+                )
+                .unwrap_err(),
+            "rotation-in-progress"
+        );
+        assert_eq!(
+            coordinator.detach_session().unwrap_err(),
+            "rotation-in-progress"
+        );
+        let new_vault_key = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
+        let (publication, activation) = guard
+            .publish_and_activate(
+                &new_vault_key,
+                1,
+                &"11".repeat(32),
+                b"rotation-password",
+                Argon2Parameters::minimum_for_tests(),
+                &recovery_key,
+                &ProviderCancellation::default(),
+            )
+            .unwrap();
+        assert_eq!(publication.published_objects, 2);
+        assert_eq!(activation.activation_revision, 1);
+
+        drop(guard);
+        let configuration = coordinator.begin_configuration().unwrap();
+        drop(configuration);
+        coordinator.detach_session().unwrap();
+        assert!(!coordinator.status().unwrap().configured);
     }
 }
