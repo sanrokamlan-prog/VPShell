@@ -736,6 +736,86 @@ pub(crate) fn cleanup_orphaned_rotation(
     Ok(deleted)
 }
 
+/// Reclaim the source objects superseded by an authenticated active rotation.
+/// The activation marker and new namespace are verified first; source objects
+/// are then authenticated with the previous VMK and conditionally deleted.
+/// Missing sources are treated as already reclaimed so interrupted cleanup can
+/// be retried safely.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cleanup_activated_rotation_sources(
+    provider: &dyn SyncObjectProvider,
+    current_vault_key: &VaultKey,
+    new_vault_key: &VaultKey,
+    vault_id: &str,
+    activation_revision: u64,
+    previous_activation_hash: &str,
+    expected_activation_hash: &str,
+    cancellation: &ProviderCancellation,
+) -> Result<u32, String> {
+    if current_vault_key.same_material(new_vault_key) || !is_hash(expected_activation_hash) {
+        return Err("integrity".to_string());
+    }
+    let (commit, activation_hash) = load_rotation_activation_commit(
+        provider,
+        current_vault_key,
+        vault_id,
+        activation_revision,
+        previous_activation_hash,
+        cancellation,
+    )?;
+    if activation_hash != expected_activation_hash {
+        return Err("integrity".to_string());
+    }
+    let _ = load_bound_rotation_keyslots(provider, vault_id, &commit, cancellation)?;
+    let publication = RotationPublication {
+        rotation_id: commit.rotation_id.clone(),
+        manifest_key: commit.manifest_key.clone(),
+        manifest_hash: commit.manifest_hash.clone(),
+        published_objects: commit.staged_objects,
+    };
+    let manifest = load_rotation_manifest(
+        provider,
+        new_vault_key,
+        vault_id,
+        &publication,
+        cancellation,
+    )?;
+
+    let mut authenticated = Vec::with_capacity(manifest.objects.len());
+    for item in &manifest.objects {
+        cancellation.check().map_err(|_| "cancelled".to_string())?;
+        let encoded = match provider.get(&item.source_key, cancellation) {
+            Ok(encoded) => encoded,
+            Err(error) if error.code == ProviderErrorCode::NotFound => continue,
+            Err(error) => return Err(provider_code(error)),
+        };
+        validate_object_bytes(&encoded).map_err(|_| "resource-limit".to_string())?;
+        if sha256_hex(&encoded) != item.source_hash {
+            return Err("rotation-source-changed".to_string());
+        }
+        let envelope =
+            EncryptedSyncObject::decode(&encoded).map_err(|_| "integrity".to_string())?;
+        validate_source_identity(&item.source_key, vault_id, &envelope)?;
+        let _plaintext = Zeroizing::new(decrypt_sync_object(current_vault_key, &envelope)?);
+        authenticated.push((item.source_key.clone(), encoded));
+    }
+
+    let mut deleted = 0_u32;
+    for (key, encoded) in authenticated {
+        cancellation.check().map_err(|_| "cancelled".to_string())?;
+        match provider
+            .delete_exact(&key, &encoded, cancellation)
+            .map_err(provider_code)?
+        {
+            DeleteObjectOutcome::Deleted => {
+                deleted = deleted.saturating_add(1);
+            }
+            DeleteObjectOutcome::AlreadyAbsent => {}
+        }
+    }
+    Ok(deleted)
+}
+
 fn rotation_journal_code(error: crate::sync_outbox::JournalError) -> String {
     use crate::sync_outbox::JournalErrorCode;
     match error.code {
@@ -1194,6 +1274,7 @@ mod tests {
         objects: Mutex<BTreeMap<String, Vec<u8>>>,
         puts: Mutex<Vec<String>>,
         fail_activation_put: bool,
+        supports_delete: bool,
     }
 
     impl MemoryProvider {
@@ -1202,6 +1283,16 @@ mod tests {
                 objects: Mutex::new(BTreeMap::new()),
                 puts: Mutex::new(Vec::new()),
                 fail_activation_put,
+                supports_delete: true,
+            }
+        }
+
+        fn without_delete() -> Self {
+            Self {
+                objects: Mutex::new(BTreeMap::new()),
+                puts: Mutex::new(Vec::new()),
+                fail_activation_put: false,
+                supports_delete: false,
             }
         }
 
@@ -1288,6 +1379,12 @@ mod tests {
             cancellation: &ProviderCancellation,
         ) -> ProviderResult<DeleteObjectOutcome> {
             cancellation.check()?;
+            if !self.supports_delete {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Protocol,
+                    "fixture conditional delete unsupported",
+                ));
+            }
             let mut objects = self.objects.lock().unwrap();
             let Some(existing) = objects.get(key) else {
                 return Ok(DeleteObjectOutcome::AlreadyAbsent);
@@ -2061,5 +2158,219 @@ mod tests {
                 .objects
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn activated_rotation_cleanup_reclaims_authenticated_sources() {
+        let provider = MemoryProvider::new(false);
+        let cancellation = ProviderCancellation::default();
+        let current = VaultKey::generate().unwrap();
+        let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
+        provider
+            .put(
+                &format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg"),
+                &event(&current, 1, b"one"),
+                &cancellation,
+            )
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &new, VAULT_ID, &cancellation).unwrap();
+        let previous_hash = "99".repeat(32);
+        let activation = activate_vault_rotation(
+            &provider,
+            &current,
+            &new,
+            VAULT_ID,
+            &publication,
+            1,
+            &previous_hash,
+            b"rotation-password",
+            Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
+            &cancellation,
+        )
+        .unwrap();
+
+        let deleted = cleanup_activated_rotation_sources(
+            &provider,
+            &current,
+            &new,
+            VAULT_ID,
+            activation.activation_revision,
+            &previous_hash,
+            &activation.activation_hash,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(deleted, 1);
+        assert!(
+            provider
+                .list(
+                    &format!("vpshell/v1/{VAULT_ID}/segments/"),
+                    None,
+                    LIST_PAGE_SIZE,
+                    &cancellation,
+                )
+                .unwrap()
+                .objects
+                .is_empty()
+        );
+        assert!(
+            !provider
+                .list(
+                    &format!(
+                        "vpshell/v1/{VAULT_ID}/rotations/{}/",
+                        publication.rotation_id
+                    ),
+                    None,
+                    LIST_PAGE_SIZE,
+                    &cancellation,
+                )
+                .unwrap()
+                .objects
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn activated_rotation_cleanup_fails_closed_for_changed_source() {
+        let provider = MemoryProvider::new(false);
+        let cancellation = ProviderCancellation::default();
+        let current = VaultKey::generate().unwrap();
+        let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
+        let source_key = format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg");
+        provider
+            .put(&source_key, &event(&current, 1, b"one"), &cancellation)
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &new, VAULT_ID, &cancellation).unwrap();
+        let previous_hash = "aa".repeat(32);
+        let activation = activate_vault_rotation(
+            &provider,
+            &current,
+            &new,
+            VAULT_ID,
+            &publication,
+            1,
+            &previous_hash,
+            b"rotation-password",
+            Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
+            &cancellation,
+        )
+        .unwrap();
+        provider.objects.lock().unwrap().get_mut(&source_key).unwrap()[0] ^= 1;
+
+        assert_eq!(
+            cleanup_activated_rotation_sources(
+                &provider,
+                &current,
+                &new,
+                VAULT_ID,
+                activation.activation_revision,
+                &previous_hash,
+                &activation.activation_hash,
+                &cancellation,
+            )
+            .err()
+            .as_deref(),
+            Some("rotation-source-changed")
+        );
+        assert!(provider.objects.lock().unwrap().contains_key(&source_key));
+    }
+
+    #[test]
+    fn activated_rotation_cleanup_is_idempotent_for_missing_sources() {
+        let provider = MemoryProvider::new(false);
+        let cancellation = ProviderCancellation::default();
+        let current = VaultKey::generate().unwrap();
+        let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
+        let source_key = format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg");
+        provider
+            .put(&source_key, &event(&current, 1, b"one"), &cancellation)
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &new, VAULT_ID, &cancellation).unwrap();
+        let previous_hash = "bb".repeat(32);
+        let activation = activate_vault_rotation(
+            &provider,
+            &current,
+            &new,
+            VAULT_ID,
+            &publication,
+            1,
+            &previous_hash,
+            b"rotation-password",
+            Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
+            &cancellation,
+        )
+        .unwrap();
+        provider.objects.lock().unwrap().remove(&source_key);
+
+        assert_eq!(
+            cleanup_activated_rotation_sources(
+                &provider,
+                &current,
+                &new,
+                VAULT_ID,
+                activation.activation_revision,
+                &previous_hash,
+                &activation.activation_hash,
+                &cancellation,
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn activated_rotation_cleanup_fails_closed_without_conditional_delete() {
+        let provider = MemoryProvider::without_delete();
+        let cancellation = ProviderCancellation::default();
+        let current = VaultKey::generate().unwrap();
+        let new = VaultKey::generate().unwrap();
+        let recovery_key = RecoveryKey::generate().unwrap();
+        let source_key = format!("vpshell/v1/{VAULT_ID}/segments/{DEVICE_ID}/1.oseg");
+        provider
+            .put(&source_key, &event(&current, 1, b"one"), &cancellation)
+            .unwrap();
+        let publication =
+            publish_vault_rotation(&provider, &current, &new, VAULT_ID, &cancellation).unwrap();
+        let previous_hash = "cc".repeat(32);
+        let activation = activate_vault_rotation(
+            &provider,
+            &current,
+            &new,
+            VAULT_ID,
+            &publication,
+            1,
+            &previous_hash,
+            b"rotation-password",
+            Argon2Parameters::minimum_for_tests(),
+            &recovery_key,
+            &cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cleanup_activated_rotation_sources(
+                &provider,
+                &current,
+                &new,
+                VAULT_ID,
+                activation.activation_revision,
+                &previous_hash,
+                &activation.activation_hash,
+                &cancellation,
+            )
+            .err()
+            .as_deref(),
+            Some("protocol")
+        );
+        assert!(provider.objects.lock().unwrap().contains_key(&source_key));
     }
 }
