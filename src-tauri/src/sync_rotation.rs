@@ -2261,7 +2261,12 @@ mod tests {
             &cancellation,
         )
         .unwrap();
-        provider.objects.lock().unwrap().get_mut(&source_key).unwrap()[0] ^= 1;
+        provider
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(&source_key)
+            .unwrap()[0] ^= 1;
 
         assert_eq!(
             cleanup_activated_rotation_sources(
