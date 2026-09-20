@@ -52,8 +52,7 @@ use crate::{
         decrypt_signed_device_registry, encrypt_signed_device_registry,
     },
     sync_rotation::{
-        RotationActivation, RotationPublication, activate_vault_rotation,
-        publish_vault_rotation,
+        RotationActivation, RotationPublication, activate_vault_rotation, publish_vault_rotation,
     },
     sync_s3_provider::ReqwestS3ObjectTransport,
     sync_sftp_provider::Ssh2SftpObjectTransport,
